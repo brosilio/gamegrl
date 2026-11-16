@@ -11,19 +11,20 @@ public sealed class SceneCamera
     public float Distance = 18, Yaw = 0.65f, Pitch = 0.35f;
     public Vector3 Position => Target + new Vector3(MathF.Sin(Yaw) * MathF.Cos(Pitch), MathF.Sin(Pitch), MathF.Cos(Yaw) * MathF.Cos(Pitch)) * Distance;
     public Matrix4x4 Matrix(float aspect) => Matrix4x4.CreateLookAt(Position, Target, Vector3.UnitY) * Camera.Perspective().Projection(aspect);
-    public void Update(Input input, Rect area)
+    public void Update(Input input, Rect area, Vector2? pointerScale = null)
     {
         if (!area.Contains(input.MousePosition)) return;
+        Vector2 delta = input.MouseDelta * (pointerScale ?? Vector2.One);
         if (input.IsDown(MouseButton.Right))
         {
-            Yaw -= input.MouseDelta.X * 0.006f;
-            Pitch = Math.Clamp(Pitch + input.MouseDelta.Y * 0.006f, -1.5f, 1.5f);
+            Yaw -= delta.X * 0.006f;
+            Pitch = Math.Clamp(Pitch + delta.Y * 0.006f, -1.5f, 1.5f);
         }
         if (input.IsDown(MouseButton.Middle))
         {
             var right = Vector3.Normalize(Vector3.Cross(Target - Position, Vector3.UnitY));
             var up = Vector3.Normalize(Vector3.Cross(right, Target - Position));
-            Target += (-right * input.MouseDelta.X + up * input.MouseDelta.Y) * Distance * 0.0015f;
+            Target += (-right * delta.X + up * delta.Y) * Distance * 0.0015f;
         }
         Distance = Math.Clamp(Distance * MathF.Exp(-input.Wheel.Y * 0.12f), 0.2f, 10000);
     }

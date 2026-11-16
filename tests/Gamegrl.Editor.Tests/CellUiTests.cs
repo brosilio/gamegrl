@@ -36,6 +36,7 @@ internal static class CellUiTests
                 ui.Button("First"); ui.TextField(ui.Next(), "edit", ref value); ui.Button("Last"); ui.End();
             }
             Draw(); input.BeginFrame(); input.OnKey((int)Key.Tab, true, false); Draw();
+            Check(ui.Draw.Surface.GetRow(0).ToArray().Any(cell => cell.Rune.Value == '>'));
             input.BeginFrame(); input.OnKey((int)Key.Tab, false, false); Draw();
             input.BeginFrame(); input.OnKey((int)Key.Tab, true, false); Draw();
             input.BeginFrame(); input.OnKey((int)Key.Tab, false, false); input.OnKey((int)Key.Enter, true, false); Draw();
@@ -81,6 +82,14 @@ internal static class CellUiTests
             }
             finally { backend.Release.Set(); }
             Check(SpinWait.SpinUntil(() => backend.Text.Contains("latest snapshot", StringComparison.Ordinal), 5000));
+        });
+        test("Terminal pipe: input EOF still allows terminal mode restoration on stdout", () =>
+        {
+            using var input = new MemoryStream(); using var output = new MemoryStream();
+            using var terminal = Terminal.Open(new EditorPipeBackend(input, output, new TerminalSize(80, 24)));
+            Check(SpinWait.SpinUntil(() => terminal.TryReadEvent(out var ev) && ev.Kind == InputEventKind.Closed, 5000));
+            terminal.Dispose();
+            Check(Encoding.UTF8.GetString(output.ToArray()).Contains("\u001b[?1049l", StringComparison.Ordinal));
         });
         test("Terminal input: modifiers, paste, SGR mouse, focus loss and key pulses", () =>
         {

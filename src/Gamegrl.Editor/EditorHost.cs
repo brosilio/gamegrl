@@ -32,6 +32,7 @@ internal sealed partial class EditorHost : IDisposable
     private readonly TerminalDisplay? _terminal;
     private readonly TerminalViewport? _sceneTerminal, _gameTerminal;
     internal int CellWidth => _renderer?.CellWidth ?? 1;
+    internal float GamePreviewScale => _terminal is not null ? 8 : 1;
     internal int CellHeight => _renderer?.CellHeight ?? 2;
     internal CellUi Ui => _ui;
     internal Rect SceneArea => _sceneArea;
@@ -203,7 +204,7 @@ internal sealed partial class EditorHost : IDisposable
         {
             _sceneArea = _gameArea = default;
             GameInput.RouteFrom(input, false, default); _gameFocused = false;
-            FileDialog(); _ui.End(); return;
+            FileDialog(); _ui.End(); _terminal?.Publish(_ui.Draw.Surface); return;
         }
         Toolbar(w);
         float availableH = Math.Max(4, h - 3);
@@ -226,6 +227,7 @@ internal sealed partial class EditorHost : IDisposable
         if (click) _gameFocused = _gameArea.W > 0 && _ui.IsHovered(_gameArea);
         if (_gameArea.W <= 0 || !Document.Playing || _ui.WantsKeyboard) _gameFocused = false;
         GameInput.RouteFrom(_app.World.Resource<Input>(), _gameFocused, PixelRect(_gameArea).Min, [Key.F5]);
+        GameInput.ScaleMouse(new Vector2(GamePreviewScale));
         if (!_ui.WantsKeyboard && !_gameFocused)
         {
             if (input.Ctrl && input.WasPressed(Key.S)) { if (input.Shift) Files.SaveAs(); else Files.Save(); }
@@ -241,7 +243,7 @@ internal sealed partial class EditorHost : IDisposable
             Document.CommitEdit();
             Files.RequestClose();
         }
-        _ui.End();
+        _ui.End(); _terminal?.Publish(_ui.Draw.Surface);
     }
     private void Toolbar(float width)
     {
@@ -278,13 +280,13 @@ internal sealed partial class EditorHost : IDisposable
         if (_gameArea.W > 0 && _gameColor is not null)
         {
             MainCameraSystem.TryMainCamera(_cameras, _gameColor.Width / (float)_gameColor.Height, out var matrix, out var clear);
-            _render.Scene.DrawView(frame.Commands, new ViewDesc { Color = _gameColor, Depth = _gameDepth!, ViewProjection = matrix, ClearColor = clear, Sprites = true });
+            _render.Scene.DrawView(frame.Commands, new ViewDesc { Color = _gameColor, Depth = _gameDepth!, ViewProjection = matrix, ClearColor = clear, Sprites = true, SpriteSize = new Vector2(_gameColor.Width, _gameColor.Height) * GamePreviewScale });
         }
         if (_terminal is not null)
         {
             if (_sceneArea.W > 0 && _sceneColor is not null) _sceneTerminal!.Capture(frame.Commands, _sceneColor);
             if (_gameArea.W > 0 && _gameColor is not null) _gameTerminal!.Capture(frame.Commands, _gameColor);
-            _terminal.Publish(_ui.Draw.Surface); return;
+            return;
         }
         frame.Commands.BeginRenderPass(new RenderPassDesc { Color = new ColorAttachment { Texture = frame.Backbuffer, Load = LoadOp.Clear, Store = StoreOp.Store, ClearColor = new Vector4(0.1f, 0.1f, 0.1f, 1) } });
         _renderer!.Render(frame.Commands, frame.FrameIndex, _ui.Draw, frame.Backbuffer.Width, frame.Backbuffer.Height);

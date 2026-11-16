@@ -24,7 +24,7 @@ internal sealed partial class EditorHost
         Registry.AddPanel("game", "Game", DockRegion.Center, (_, r) =>
         {
             _gameArea = r; EnsureTarget(ref _gameColor, ref _gameDepth, r); _ui.Image(r, _gameColor!); _gameTerminal?.Paint(_ui.Draw, r, _gameColor!);
-            _app.World.Resource<Gamegrl.Rendering.ScreenSize>() = new() { Width = _gameColor!.Width, Height = _gameColor.Height };
+            _app.World.Resource<Gamegrl.Rendering.ScreenSize>() = new() { Width = (int)(_gameColor!.Width * GamePreviewScale), Height = (int)(_gameColor.Height * GamePreviewScale) };
         });
         Registry.AddPanel("inspector", "Inspector", DockRegion.Right, (_, r) => Inspector(r.Shrink(1)));
         Registry.AddPanel("project", "Project", DockRegion.Bottom, (_, r) => Project(r));

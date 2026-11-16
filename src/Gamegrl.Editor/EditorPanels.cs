@@ -154,7 +154,7 @@ internal sealed partial class EditorHost
     private void SceneInteraction(Input input)
     {
         if (_sceneArea.W < 1 || _sceneArea.H < 1) return;
-        _camera.Update(input, _sceneArea);
+        _camera.Update(input, _sceneArea, new Vector2(CellWidth, CellHeight));
         var world = _app.World;
         var selected = Document.Selected;
         if (!world.IsAlive(selected)) selected = default;

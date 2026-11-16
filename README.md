@@ -80,7 +80,7 @@ display server is not; a software Vulkan driver also works.
 
 Tab or arrow keys move focus, Enter/Space activate controls, Escape cancels fields/dialogs, and mouse reporting
 supports selection, scrolling, docking and splitters. Ctrl+Q requests a clean close. Classic terminal key events
-are pulses; desktop mode retains precise held-key gameplay. Unsaved scenes on terminal disconnect go to
+are pulses; desktop mode retains precise held-key gameplay. Unsaved scenes on terminal EOF or Unix hangup go to
 `Library/recovery` and can be reopened with Menu / File / Recover disconnected scene. Terminal clipboard
 copy/paste uses an internal session buffer plus bracketed paste; it does not read the operator's OS clipboard.
 
@@ -90,3 +90,9 @@ transports stay outside extension code. `Gamegrl.UI` remains an optional runtime
 ```sh
 dotnet run --project tests/Gamegrl.Editor.Tests -- --terminal-smoke # headless Vulkan + stream terminal end to end
 ```
+
+For the full Linux transport check after a Release build, run `python3 scripts/terminal-cli-smoke.py`.
+It uses temporary sample copies and verifies real pipes, PTY resize, EOF/hangup recovery and terminal mode
+restoration. Set `GAMEGRL_TERMINAL_SMOKE=1` when running `scripts/ci.sh` to also run the headless Vulkan editor
+workflow. Terminal preview downsampling preserves a separate logical screen size for sprites and game mouse
+coordinates, so reducing output resolution does not enlarge sprites or change input units.

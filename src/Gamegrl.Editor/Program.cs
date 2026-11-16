@@ -1,6 +1,7 @@
 using AnsiDotNet;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using Gamegrl;
 using Gamegrl.Assets;
 using Gamegrl.Editor;
@@ -31,7 +32,7 @@ if (terminalMode)
     Log.ToStderr = false;
     var options = new TerminalOptions { Mouse = MouseMode.AnyMotion, FocusEvents = true, KittyKeyboard = true, Title = "gamegrl editor" };
     terminal = args.Contains("--stdio")
-        ? Terminal.Open(new StreamBackend(Console.OpenStandardInput(), Console.OpenStandardOutput(), new TerminalSize(int.Parse(Option("--columns") ?? "120", CultureInfo.InvariantCulture), int.Parse(Option("--rows") ?? "40", CultureInfo.InvariantCulture)), ownsStreams: false), options)
+        ? Terminal.Open(new EditorPipeBackend(Console.OpenStandardInput(), Console.OpenStandardOutput(), new TerminalSize(int.Parse(Option("--columns") ?? "120", CultureInfo.InvariantCulture), int.Parse(Option("--rows") ?? "40", CultureInfo.InvariantCulture))), options)
         : Terminal.OpenConsole(options);
     if (Option("--colors") is { } colors) terminal.ColorMode = colors switch { "none" => ColorMode.None, "16" => ColorMode.Basic16, "256" => ColorMode.Indexed256, "truecolor" => ColorMode.TrueColor, _ => throw new ArgumentException("--colors must be none, 16, 256 or truecolor.") };
     terminal.Output.TrueColorPrecision = 5;
@@ -63,13 +64,17 @@ void Changed(object sender, FileSystemEventArgs e)
 }
 watcher.Changed += Changed; watcher.Created += Changed; watcher.Deleted += Changed; watcher.Renamed += (s, e) => Changed(s, e);
 watcher.EnableRaisingEvents = true;
+int terminalHangup = 0;
+using var hangup = terminalMode && (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsFreeBSD())
+    ? PosixSignalRegistration.Create(PosixSignal.SIGHUP, signal => { signal.Cancel = true; Interlocked.Exchange(ref terminalHangup, 1); })
+    : null;
 var elapsed = Stopwatch.StartNew();
 bool closePending = false, recovering = false, disconnected = false;
 while (!editor.Files.ExitRequested && (seconds <= 0 || elapsed.Elapsed.TotalSeconds < seconds))
 {
     input.BeginFrame();
     platform.Platform.PumpEvents(input);
-    if (terminalPlatform?.Disconnected == true)
+    if (terminalPlatform?.Disconnected == true || Volatile.Read(ref terminalHangup) != 0)
     {
         if (!recovering) { recovering = true; editor.RecoverOnDisconnect(() => disconnected = true); }
         editor.Pump(); if (disconnected) break; Thread.Sleep(10); continue;

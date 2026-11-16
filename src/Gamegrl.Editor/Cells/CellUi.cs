@@ -27,6 +27,7 @@ public sealed class CellUi
     private int _caret, _anchor;
     private IPlatform? _platform;
     private double _lastClick = -100, _time;
+    private Vector2 _lastClickPosition;
     public CellUi(bool ascii = false) { _main.Ascii = _overlay.Ascii = ascii; Draw.Reset(1, 1); }
     private readonly CellDraw _main = new(), _overlay = new();
     private readonly List<Rect> _overlays = new();
@@ -55,8 +56,8 @@ public sealed class CellUi
         _previousPopup = _popup; _popup = null; _inPopup = false; _claimed = false;
         _previousFocusable.Clear(); _previousFocusable.AddRange(_focusable); _focusable.Clear();
         _areas.Clear(); _areas.Push(new Area(Screen)); _ids.Clear(); _ids.Push(2166136261);
-        DoubleClicked = input.WasPressed(MouseButton.Left) && time - _lastClick < 0.3;
-        if (input.WasPressed(MouseButton.Left)) _lastClick = time;
+        DoubleClicked = input.WasPressed(MouseButton.Left) && time - _lastClick < 0.3 && Vector2.Distance(_lastClickPosition, Mouse) < 1;
+        if (input.WasPressed(MouseButton.Left)) { _lastClick = time; _lastClickPosition = Mouse; }
         if (Focus == 0) _editId = 0;
         if (_editId != 0 && input.WasPressed(MouseButton.Left))
         {
@@ -143,7 +144,7 @@ public sealed class CellUi
         _controls[label] = rect;
         bool result = Activate(rect, Id(label), out bool hover, out bool held);
         Draw.Rect(rect, held ? Theme.WidgetActive : hover ? Theme.WidgetHover : Theme.Widget);
-        TextIn(rect, label, _keyboardFocus == Id(label) ? Theme.Accent : Theme.Text, 0.5f); return result;
+        TextIn(rect, _keyboardFocus == Id(label) && KeyboardNavigation ? ">" + label : label, _keyboardFocus == Id(label) ? Theme.Accent : Theme.Text, 0.5f); return result;
     }
     public bool Selectable(Rect rect, string label, bool selected)
     {
@@ -160,11 +161,12 @@ public sealed class CellUi
     {
         rect = rect with { X = rect.X + depth, W = Math.Max(0, rect.W - depth) };
         bool clicked = Activate(rect, Id(id), out bool hover, out _);
-        if (selected || hover) Draw.Rect(rect, selected ? Theme.Selection : Theme.WidgetHover);
+        bool focused = KeyboardNavigation && _keyboardFocus == Id(id);
+        if (selected || hover || focused) Draw.Rect(rect, selected ? Theme.Selection : Theme.WidgetHover);
         if (KeyboardNavigation && _keyboardFocus == Id(id) && hasChildren)
         { if (Input.WasPressed(Key.Left)) open = false; if (Input.WasPressed(Key.Right)) open = true; }
         if (hasChildren && clicked && (Mouse.X < rect.X + 2 || DoubleClicked || Input.WasPressed(Key.Space))) { open = !open; clicked = false; }
-        TextIn(rect, (hasChildren ? open ? "▾ " : "▸ " : "  ") + label, Theme.Text); return clicked;
+        TextIn(rect, (hasChildren ? open ? "▾" : "▸" : " ") + (selected ? "*" : focused ? ">" : " ") + label, Theme.Text); return clicked;
     }
     public void Image(Rect rect, GpuTexture texture) => Draw.Image(rect, texture);
     public float Splitter(Rect rect, string id, float position, bool vertical, float min, float max)
@@ -261,7 +263,7 @@ public sealed class CellUi
         string visible = _editId == id ? _buffer : value;
         int start = 0;
         if (_editId == id) while (Font.Measure(visible[start.._caret]) >= rect.W && start < _caret) start = NextRune(start);
-        TextIn(rect, visible[start..], Theme.Text);
+        TextIn(rect, visible[start..], _keyboardFocus == id && KeyboardNavigation ? Theme.Accent : Theme.Text);
         if (_editId == id && ((int)(_time * 2) & 1) == 0) Draw.Text(new Vector2(rect.X + Font.Measure(visible[start.._caret]), rect.Y), "▏", Theme.Accent);
         return changed;
     }

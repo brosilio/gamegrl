@@ -42,6 +42,8 @@ public struct ViewDesc
     public Matrix4x4 ViewProjection;
     public Vector4 ClearColor;
     public bool Sprites;
+    /// <summary>Logical sprite coordinates, independent of preview resolution; zero uses the target size.</summary>
+    public Vector2 SpriteSize;
     public bool DebugLines;
 }
 
@@ -211,7 +213,7 @@ public sealed class SceneRenderer : IDisposable
         var sprites = CollectionsMarshal.AsSpan(_ctx.SpriteInstances);
         if (view.Sprites && sprites.Length > 0)
         {
-            var proj = Matrix4x4.CreateOrthographicOffCenter(0, view.Color.Width, 0, view.Color.Height, -1, 1);
+            var proj = Matrix4x4.CreateOrthographicOffCenter(0, view.SpriteSize.X > 0 ? view.SpriteSize.X : view.Color.Width, 0, view.SpriteSize.Y > 0 ? view.SpriteSize.Y : view.Color.Height, -1, 1);
             uint screenOffset = (uint)ring.Push(proj, align);
             cmd.SetPipeline(_sprites);
             cmd.SetBindGroup(0, _screenGroup, [screenOffset]);

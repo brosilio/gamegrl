@@ -98,10 +98,11 @@ internal static class GraphicsSmoke
         Check(!editor.GameInput.IsDown(Gamegrl.Platform.MouseButton.Left), "Toolbar input leaked");
         Click(editor.GameArea.Center); Frame(() => input.OnKey((int)Key.Space, true, false));
         Check(editor.GameInput.IsDown(Key.Space), "Game focus failed");
-        Check(Vector2.Distance(editor.GameInput.MousePosition, input.MousePosition - editor.PixelRect(editor.GameArea).Min) < 0.01f, "Game coordinates failed");
+        Check(Vector2.Distance(editor.GameInput.MousePosition, (input.MousePosition - editor.PixelRect(editor.GameArea).Min) * editor.GamePreviewScale) < 0.01f, "Game coordinates failed");
         Click(editor.DockArea(DockRegion.Left).Center);
         Check(!editor.GameInput.IsDown(Key.Space) && input.IsDown(Key.Space), "Input isolation failed");
         Frame(() => input.OnKey((int)Key.Space, false, false));
+        Check(app.World.Resource<ScreenSize>().Width == (int)(editor.GameArea.W * editor.CellWidth * editor.GamePreviewScale), "Logical sprite coordinates changed with preview resolution");
         int playingCount = app.World.EntityCount; string firstBuild = editor.GameAssemblyPath!;
         editor.BuildGame(); Wait(() => !editor.Jobs.Busy); Frame();
         Check(editor.Document.Playing && app.World.EntityCount == playingCount, "Reload duplicated or lost entities");
