@@ -16,6 +16,7 @@ void Test(string name, Action body)
     catch (Exception e) { failed++; Console.WriteLine("  FAIL  " + name + "\n" + e); }
 }
 Gamegrl.Tests.SceneFilesTests.Register(Test);
+Gamegrl.Tests.ExtensionTests.Register(Test);
 
 Test("Undo/redo coalesces a drag, restores hierarchy and selection, branches history", () =>
 {
@@ -225,13 +226,19 @@ return failed;
 static WeakReference ReloadGame(string dll, App app, SceneDocument doc)
 {
     using var game = new GameCode();
-    game.Load(dll, app, doc);
+    using var registry = new EditorRegistry();
+    string configuration = AppContext.BaseDirectory.Contains("/Release/", StringComparison.Ordinal) ? "Release" : "Debug";
+    string plugin = Path.GetFullPath($"tests/Gamegrl.Editor.PluginFixture/bin/{configuration}/net10.0/Gamegrl.Editor.PluginFixture.dll");
+    game.Load(dll, app, doc, registry: registry, extensions: [plugin]);
+    if (registry.FindPanel("fixture") is null) throw new Exception("Extension panel missing");
     doc.Open("gamegrl scene 1\nentity 0000000000000001\n  Spinners.Spinner\n    Axis = 0 1 0\n    DegreesPerSecond = 123\n");
     string before = doc.Text;
     var reference = game.ContextReference!;
     app.World.Clear();
     game.Unload(app);
-    game.Load(dll, app, doc);
+    if (registry.Panels.Count != 0 || registry.Menus.Count != 0) throw new Exception("Extension registrations survived unload");
+    game.Load(dll, app, doc, registry: registry, extensions: [plugin]);
+    if (registry.FindPanel("fixture") is null) throw new Exception("Extension did not reload");
     doc.Restore(before);
     if (doc.Text != before) throw new Exception("Reload changed serialized game state");
     app.World.Clear();

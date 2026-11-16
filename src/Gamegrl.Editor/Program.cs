@@ -26,6 +26,8 @@ using var app = EngineBuilder.Create()
     .AddModule(new RenderingModule())
     .Build();
 using var editor = new EditorHost(app, assets, root, project, font);
+for (int i = 0; i + 1 < args.Length; i++)
+    if (args[i] == "--extension") editor.AddExtension(args[++i]);
 var platform = app.World.Resource<PlatformContext>();
 var input = app.World.Resource<Input>();
 long assetChanged = 0, codeChanged = 0;

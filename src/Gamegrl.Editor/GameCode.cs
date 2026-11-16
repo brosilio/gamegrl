@@ -12,12 +12,15 @@ internal sealed class GameCode : IDisposable
     private sealed class GameContext(string path) : AssemblyLoadContext(isCollectible: true)
     {
         private readonly AssemblyDependencyResolver _resolver = new(path);
+        private readonly List<AssemblyDependencyResolver> _extensionResolvers = new();
+        public Assembly LoadExtension(string extension)
+        { _extensionResolvers.Add(new AssemblyDependencyResolver(extension)); return LoadFromAssemblyPath(extension); }
         protected override Assembly? Load(AssemblyName name)
         {
             // Share engine identity, including the component registry, with the host.
             var shared = Default.Assemblies.FirstOrDefault(a => a.GetName().Name == name.Name);
             if (shared is not null) return shared;
-            string? file = _resolver.ResolveAssemblyToPath(name);
+            string? file = _resolver.ResolveAssemblyToPath(name) ?? _extensionResolvers.Select(r => r.ResolveAssemblyToPath(name)).FirstOrDefault(p => p is not null);
             return file is null ? null : LoadFromAssemblyPath(file);
         }
     }
@@ -29,6 +32,7 @@ internal sealed class GameCode : IDisposable
     private bool _started;
     private ResourceSession? _resources;
     private Input? _input;
+    private readonly List<IDisposable> _extensions = new();
     private readonly struct InputScope : IDisposable
     {
         private readonly World _world;
@@ -53,7 +57,7 @@ internal sealed class GameCode : IDisposable
             inner.Run(world);
         }
     }
-    public void Load(string path, App app, SceneDocument document, Input? input = null)
+    public void Load(string path, App app, SceneDocument document, Input? input = null, EditorRegistry? registry = null, IReadOnlyList<string>? extensions = null)
     {
         _input = input;
         using var scope = new InputScope(app.World, input);
@@ -71,6 +75,14 @@ internal sealed class GameCode : IDisposable
             _wrappers.Add(wrapper);
             app.Schedule.Add(wrapper);
         }
+        if (registry is not null && extensions is not null)
+            foreach (string extension in extensions)
+            {
+                var plugin = _context.LoadExtension(Path.GetFullPath(extension));
+                var types = plugin.GetTypes().Where(t => !t.IsAbstract && typeof(IEditorExtension).IsAssignableFrom(t)).ToArray();
+                if (types.Length == 0) throw new InvalidOperationException("No IEditorExtension in " + extension);
+                foreach (var type in types) _extensions.Add(registry.Register((IEditorExtension)Activator.CreateInstance(type)!));
+            }
         Log.Info("Loaded " + _assemblyName);
     }
     public void Start(App app)
@@ -98,14 +110,18 @@ internal sealed class GameCode : IDisposable
     }
     public void Unload(App app)
     {
-        Stop(app);
+        try { Stop(app); } catch (Exception e) { Log.Error("Game stop during unload: " + e.Message); }
+        foreach (var extension in _extensions.AsEnumerable().Reverse())
+            try { extension.Dispose(); } catch (Exception e) { Log.Error("Extension stop: " + e.Message); }
+        _extensions.Clear();
         foreach (var wrapper in _wrappers) app.Schedule.Remove(wrapper);
         _wrappers.Clear();
         if (_registration is not null)
             foreach (int slot in _registration.ResourceSlots) app.World.RemoveResource(slot);
         _registration = null;
         _input = null;
-        if (_assemblyName is not null) ComponentRegistry.ReleaseAssembly(_assemblyName);
+        if (_context is not null)
+            foreach (var assembly in _context.Assemblies) ComponentRegistry.ReleaseAssembly(assembly.GetName().Name ?? "");
         _assemblyName = null;
         _context?.Unload();
         _context = null;

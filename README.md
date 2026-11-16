@@ -22,8 +22,8 @@ Right-drag orbits the Scene camera, middle-drag pans, the wheel zooms, and F fra
 Click a mesh to select it; drag its colored axis handles to move it. Project prefab rows instantiate prefabs.
 Ctrl+N creates a scene, Ctrl+S saves, Ctrl+Shift+S saves under a new path, Ctrl+Z/Ctrl+Shift+Z undo/redo,
 and F5 enters or stops play mode. New/Open/Close offer Save, Discard and Cancel for unsaved edits. Build and import progress
-appears in Tasks; failures appear in Console. The panel regions resize with their splitters; movable docking
-is still pending (see the design status).
+appears in Tasks; failures appear in Console. Resize panel regions with splitters, or drag tabs between regions and reorder them. Scroll a crowded tab
+strip with the mouse wheel. Menu includes a layout reset command.
 Inspector fields support `[Header("Section")]`, `[Tooltip("Help text")]` and numeric `[Range(0, 720)]`
 attributes. These are generated without reflection; ranges constrain edits while preserving loaded values.
 
@@ -47,3 +47,10 @@ dotnet run --project tests/Gamegrl.Editor.Tests -- --graphics # optional desktop
 | `tests/Gamegrl.Tests` | Dependency-free tests, also run as a NativeAOT binary |
 | `tests/Gamegrl.Editor.Tests` | Headless editor tests and optional SDL/Vulkan interaction smoke |
 | `samples/Spinners` | `Game` (library), `Player` (NativeAOT), `Build` (dev tool), `Assets/` |
+
+Editor-only extensions implement `IEditorExtension.Register(EditorRegistry)`. Register panels with
+`AddPanel`, commands with `AddMenu`, and component Inspectors with `AddDrawer<T>`. Use
+`EditorContext.Edit` for undoable changes and `EditorContext.Jobs` for background work. Keep the extension
+in a separate JIT assembly referencing `Gamegrl.Editor`, then pass `--extension path/to/extension.dll`.
+It loads and unloads with game code, sharing game component identities. Build the extension assembly
+before launching or reloading it; player projects do not reference editor extensions.

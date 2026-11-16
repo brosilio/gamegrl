@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><IsAotCompatible>false</IsAotCompatible></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Gamegrl.Editor/Gamegrl.Editor.csproj" />
+    <ProjectReference Include="../../samples/Spinners/Game/Spinners.Game.csproj" />
+  </ItemGroup>
+</Project>

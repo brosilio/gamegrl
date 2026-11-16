@@ -81,7 +81,8 @@ internal sealed partial class EditorHost
             _ui.Row(-1, 24);
             _ui.Header(info.Name[(info.Name.LastIndexOf('.') + 1)..]);
             if (_ui.Button("×")) remove = type;
-            info.Serializer?.Visit(archetype.Ptr(archetype.ColumnOf(type), row), _inspector);
+            var pointer = archetype.Ptr(archetype.ColumnOf(type), row);
+            if (!Registry.DrawComponent(info.StableId, (nint)pointer, _context)) info.Serializer?.Visit(pointer, _inspector);
             _ui.PopId();
             _ui.Separator();
         }

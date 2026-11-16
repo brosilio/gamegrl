@@ -17,6 +17,8 @@ internal sealed partial class EditorHost : IDisposable
     private bool _gameFocused;
     private readonly GameCode _game = new();
     private string? _gameDll;
+    private readonly List<string> _extensionPaths = new();
+    public void AddExtension(string path) => _extensionPaths.Add(Path.GetFullPath(path));
     private readonly RenderContext _render;
     private readonly Ui _ui;
     private readonly UiRenderer _renderer;
@@ -26,7 +28,7 @@ internal sealed partial class EditorHost : IDisposable
     private readonly InspectorVisitor _inspector;
     private GpuTexture? _sceneColor, _sceneDepth, _gameColor, _gameDepth;
     private Rect _sceneArea, _gameArea;
-    private int _bottomTab, _viewTab;
+    private int _menuSelection;
     private float _left = 230, _right = 320, _bottom = 210;
     private double _clock;
     private bool _importPending, _buildPending, _importAgain, _buildAgain;
@@ -57,6 +59,7 @@ internal sealed partial class EditorHost : IDisposable
         Document = new SceneDocument(app.World, assets.PrefabText);
         Document.Open(Document.Text);
         Files = new SceneFiles(root, Document, Jobs, Import);
+        RegisterPanels();
         _cameras = app.World.Query(new QueryDesc().With<Camera>().With<LocalToWorld>());
         app.Schedule.Add(new HostSystem("Editor.UI", Phase.First, -10000, _ => Update()));
         app.Schedule.Add(new HostSystem("Editor.Draw", Phase.Render, 100, _ => Render()));
@@ -116,14 +119,14 @@ internal sealed partial class EditorHost : IDisposable
         _game.Unload(_app);
         try
         {
-            _game.Load(dll, _app, Document, GameInput);
+            _game.Load(dll, _app, Document, GameInput, Registry, _extensionPaths);
             _gameDll = dll;
         }
         catch (Exception e)
         {
             Log.Error("Game reload: " + e.Message);
             _game.Unload(_app);
-            if (previous is not null) _game.Load(previous, _app, Document, GameInput);
+            if (previous is not null) _game.Load(previous, _app, Document, GameInput, Registry, _extensionPaths);
         }
         Document.Restore(state);
         Document.SelectSceneId(selectedId);
@@ -175,31 +178,14 @@ internal sealed partial class EditorHost : IDisposable
         _right = w - _ui.Splitter(new Rect(w - _right - 4, 32, 4, availableH), "right", w - _right, true, w * 0.6f, w - 150);
         float split = _ui.Splitter(new Rect(_left + 4, 32 + topH, middleW, 4), "bottom", 32 + topH, false, 100, h - 110);
         _bottom = h - 30 - split - 4;
-        Hierarchy(Panel(new Rect(0, 32, _left, availableH), "Hierarchy"));
-        Inspector(Panel(new Rect(w - _right, 32, _right, availableH), "Inspector"));
-        var view = new Rect(_left + 4, 32, middleW, Math.Max(1, topH));
-        _ui.Draw.Rect(view, _ui.Theme.Panel);
-        var content = _ui.Tabs(view, "views", ["Scene", "Game"], ref _viewTab);
-        _sceneArea = _viewTab == 0 ? content : default;
-        _gameArea = _viewTab == 1 ? content : default;
-        if (_viewTab == 0)
-        {
-            EnsureTarget(ref _sceneColor, ref _sceneDepth, content);
-            _ui.Image(content, _sceneColor!);
-            SceneInteraction(input);
-        }
-        else
-        {
-            EnsureTarget(ref _gameColor, ref _gameDepth, content);
-            _ui.Image(content, _gameColor!);
-            _app.World.Resource<ScreenSize>() = new ScreenSize { Width = (int)content.W, Height = (int)content.H };
-        }
-        var bottom = new Rect(_left + 4, 32 + topH + 4, middleW, _bottom);
-        _ui.Draw.Rect(bottom, _ui.Theme.Panel);
-        var bottomContent = _ui.Tabs(bottom, "bottom", ["Project", "Console", "Tasks"], ref _bottomTab);
-        if (_bottomTab == 0) Project(bottomContent);
-        else if (_bottomTab == 1) ConsolePanel(bottomContent);
-        else Tasks(bottomContent);
+        Docks.Sync(Registry.Panels);
+        _sceneArea = _gameArea = default;
+        _dockAreas.Clear();
+        DrawDock(new Rect(0, 32, _left, availableH), DockRegion.Left);
+        DrawDock(new Rect(w - _right, 32, _right, availableH), DockRegion.Right);
+        DrawDock(new Rect(_left + 4, 32, middleW, Math.Max(1, topH)), DockRegion.Center);
+        DrawDock(new Rect(_left + 4, 32 + topH + 4, middleW, _bottom), DockRegion.Bottom);
+        FinishDockDrag();
         _ui.TextIn(new Rect(0, h - 26, w, 26), ScenePath + (Document.Dirty ? " *" : "") + "    " + (Document.Playing ? "Playing" : "Editing") + (Jobs.Busy ? "    Working…" : ""), _ui.Theme.TextDim);
         bool click = input.WasPressed(MouseButton.Left) || input.WasPressed(MouseButton.Right) || input.WasPressed(MouseButton.Middle);
         if (click) _gameFocused = _gameArea.W > 0 && _ui.IsHovered(_gameArea);
@@ -222,13 +208,6 @@ internal sealed partial class EditorHost : IDisposable
         }
         _ui.End();
     }
-    private Rect Panel(Rect r, string title)
-    {
-        _ui.Draw.Rect(r, _ui.Theme.Panel);
-        _ui.Draw.Rect(r with { H = 24 }, _ui.Theme.PanelHeader);
-        _ui.TextIn(r with { H = 24 }, title, _ui.Theme.Text);
-        return new Rect(r.X + 5, r.Y + 28, Math.Max(1, r.W - 10), Math.Max(1, r.H - 33));
-    }
     private void Toolbar(float width)
     {
         _ui.BeginArea(new Rect(5, 4, width - 10, 25));
@@ -241,7 +220,9 @@ internal sealed partial class EditorHost : IDisposable
         if (_ui.Button("Reimport")) Import();
         if (_ui.Button("New")) Files.RequestNew();
         if (_ui.Button("Save As")) Files.SaveAs();
-        _ui.Label("gamegrl");
+        var menus = Registry.Menus.ToArray();
+        if (_ui.Combo(_ui.Next(), "editor-menu", ref _menuSelection, new[] { "Menu" }.Concat(menus.Select(m => m.Label)).ToArray()) && _menuSelection > 0)
+        { menus[_menuSelection - 1].Execute(_context); _menuSelection = 0; }
         _ui.EndArea();
     }
     private void EnsureTarget(ref GpuTexture? color, ref GpuTexture? depth, Rect area)
@@ -275,6 +256,7 @@ internal sealed partial class EditorHost : IDisposable
         _app.World.Clear();
         _game.Unload(_app);
         _render.Device.WaitIdle();
+        Registry.Dispose();
         _renderer.Dispose();
         _sceneColor?.Dispose(); _sceneDepth?.Dispose(); _gameColor?.Dispose(); _gameDepth?.Dispose();
     }

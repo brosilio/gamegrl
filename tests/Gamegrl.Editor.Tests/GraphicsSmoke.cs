@@ -95,6 +95,11 @@ internal static class GraphicsSmoke
         Wait(() => !editor.Jobs.Busy);
         Check(File.ReadAllText(Path.Combine(root, "Assets/main.scene")) == before, "Save did not write the edited scene");
         Check(!editor.Document.Dirty, "Save left the document dirty");
+        Frame(() => { input.OnMouseMove(new Vector2(350, 492), Vector2.Zero); input.OnMouseButton(0, true); });
+        Frame(() => input.OnMouseMove(new Vector2(100, 300), new Vector2(-250, -192)));
+        Frame(() => input.OnMouseButton(0, false)); Frame();
+        Check(editor.Docks.Selected(DockRegion.Left) == "console", "Dragging a tab did not dock it in the left region");
+        editor.Docks.Move("console", DockRegion.Bottom, 1); editor.Docks.Select(DockRegion.Left, "hierarchy"); Frame();
         Click(460, 15); // New scene.
         Check(app.World.EntityCount == 0 && editor.Files.CurrentPath is null && editor.Document.Dirty, "New scene failed");
         Click(35, 15); // Untitled Save opens Save As.
