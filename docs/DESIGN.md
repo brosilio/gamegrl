@@ -46,6 +46,7 @@ Started 2026-11-16.
 | 2026-11-16 | Component identity | Stable id = 64-bit FNV-1a of the full type name; runtime ids stay dense for archetype masks | Scenes, assets and packets use stable ids |
 | 2026-11-16 | Hierarchy | Intrusive parent/child links inside the world; destroying a parent destroys its subtree | No per-entity allocation |
 | 2026-11-16 | Prefabs | `.prefab` files use the scene format; instances store only differences; inner entities have path-derived ids; packing flattens prefabs | Players never expand prefabs |
+| 2026-11-16 | Inspector hints | Generated `FieldMetadata` travels with the existing field visitor; serializers ignore it via a default interface method | `[Range]` constrains Inspector edits, never scene loading; headers/tooltips are constant strings |
 | 2026-11-16 | Editor jobs | Workers produce imported bytes or build outputs; the host applies results between frames | No asset-database I/O in rendering; code reload resets undo history when the schema can change |
 | 2026-11-16 | Game startup | Game modules register gameplay; `SceneBootModule` selects a player's startup scene | Editor chooses its open scene and calls game startup on entering play |
 | 2026-11-16 | XR | VR as an optional `Gamegrl.XR` module on OpenXR; its constraints apply from milestone 1 | See XR |
@@ -68,7 +69,7 @@ The editor shows a familiar GameObject-and-component hierarchy. Underneath, enti
 ```csharp
 public partial struct Spinner : IComponent
 {
-    [Serialize, Range(0, 720)] public float DegreesPerSecond;
+    [Range(0, 720)] public float DegreesPerSecond;
 }
 
 [System(Phase.Update)]
@@ -332,7 +333,7 @@ The editor is the engine plus an editor module, drawn with our own immediate-mod
     - Panels show placeholders or stale data until results land.
     - Jobs touch the edit world only through command buffers applied between frames.
     - Hot reload compiles off-thread. The only pause is swapping code at a frame boundary.
-- **Inspector:** generated from `[Serialize]` metadata, with attributes like `[Range]`, `[Tooltip]` and `[Header]`. Modules can register custom drawers.
+- **Inspector:** generated from serialized-field metadata, with attributes like `[Range]`, `[Tooltip]` and `[Header]`. Modules can register custom drawers.
 - **Play mode:** snapshot the world, run it, then restore the snapshot on stop. This is fast because of contiguous storage. Multiplayer play mode can run host and clients side by side.
 - **Hot reload:** game code recompiles into a new collectible `AssemblyLoadContext`, and world state survives through serialization.
 - **Undo:** every edit goes through a command system that records serialized diffs.
@@ -401,21 +402,22 @@ Multiplayer, web and XR ship in milestones 5 to 7, but their constraints apply f
 
 ## Status
 
-**Milestone 3 (Editor shell): core workflow implemented and exercised; shell committed as `2fc2768`; file workflow follow-up in progress.**
+**Milestone 3 (Editor shell): core workflow implemented and exercised; shell committed as `2fc2768`, file workflow as `227460b`; Inspector metadata follow-up implemented.**
 - `Gamegrl.UI`: in-house TrueType parser and antialiased coverage rasterizer, font atlas, draw lists, renderer, buttons, checkboxes, number dragging, vectors, colors, text fields with clipboard, trees, scrolling popups, tabs, scroll views, splitters and images. Uses the system DejaVu Sans font; `GAMEGRL_FONT` overrides its path.
 - `Gamegrl.Editor`: a standalone JIT host that accepts a project root and a game `.csproj`. Hierarchy, generated-field Inspector, Scene/Game tabs, Project, Console and Tasks. Create empty entities, cubes, cameras and sprites; add/remove components; assign assets from a picker; instantiate prefabs from Project; save scenes. Editor orbit/pan/zoom camera, mesh picking, framing and a world-axis move gizmo (including parent-space conversion).
 - Edit commands store serialized text diffs, coalescing drags and text edits. Undo/redo reconstructs the scene through generated serializers. Play snapshots the serialized edit scene and time; Stop restores them and selection. Game startup runs only when entering play, never a second time during hot reload.
 - Imports, source reads, saves and game builds use cancellable worker jobs; results apply between frames. Rendering reads an in-memory asset catalog. Source changes trigger debounced builds into separate output directories; collectible game assemblies share the host's engine assemblies. Reload preserves serialized entity state and selection, releases old systems/resources/serializers, and resets undo history across schema changes. A failed build keeps the current game running.
 - Scene file workflow: New (Ctrl+N), Save As (Ctrl+Shift+S), and Save/Discard/Cancel on Open/New/Close. Untitled scenes acquire a path only after a successful save; overwrite requires confirmation. Writes use a unique temporary file and atomic rename, support cancellation before rename, and preserve newer edits. Close requests commit active text fields first. Paths are restricted to `.scene` files under `Assets/`; workers handle file operations.
+- Inspector presentation metadata: `[Header]`, `[Tooltip]` and numeric `[Range]` attributes compile into `IFieldVisitor.Metadata` calls without reflection or runtime attribute lookup. Formats ignore the hints; the Inspector draws headers and hover tooltips and constrains user edits (including numeric text input). Existing out-of-range scene data is preserved until edited. Nested fields reset metadata independently; `[NoSerialize]` fields emit no hints. GG0104 rejects nonnumeric, nonfinite, reversed or unrepresentable ranges. Spinners demonstrates the attributes on `Spinner`.
 - Core support: `World.Clear`, schedule add/remove after startup, module registration tracking, component release/re-registration, engine log and `SceneBootModule`. Spinners now uses `SceneBootModule`; its game module has a parameterless constructor.
-- Validation: 27 existing tests under JIT and NativeAOT; 14 JIT editor tests cover undo/redo, hierarchy and selection, play restore, malformed scenes, clear/query reuse, jobs/cancellation, reverse-Z picking, collectible assembly reload/unload, font coverage and UI input/layout, plus file navigation, overwrite confirmation, save failures and edits during saves. The opt-in SDL/Vulkan smoke test clicks through entity creation, undo/redo, move-gizmo dragging, mesh picking, play, reload and save against a temporary copy of the sample. The published NativeAOT player is also exercised separately.
-- Remaining before calling milestone 3 complete: movable/dockable tabs and a public panel/menu/drawer extension API (the shell currently has fixed, resizable panel regions); generated `[Range]`, `[Tooltip]` and `[Header]` metadata; proper focused Game-view input routing/action maps; general game-resource reset/snapshot semantics (entity state and engine time restore today). Build output directory cleanup also needs a lifecycle policy. The core shell is committed; the milestone is not complete.
+- Validation: 29 engine tests under JIT and NativeAOT; 15 JIT editor tests cover undo/redo, hierarchy and selection, play restore, malformed scenes, clear/query reuse, jobs/cancellation, reverse-Z picking, collectible assembly reload/unload, font coverage and UI input/layout, plus file navigation, overwrite confirmation, save failures and edits during saves. The opt-in SDL/Vulkan smoke test clicks through entity creation, undo/redo, move-gizmo dragging, mesh picking, play, reload and save against a temporary copy of the sample. The published NativeAOT player is also exercised separately.
+- Remaining before calling milestone 3 complete: movable/dockable tabs and a public panel/menu/drawer extension API (the shell currently has fixed, resizable panel regions); proper focused Game-view input routing/action maps; general game-resource reset/snapshot semantics (entity state and engine time restore today). Build output directory cleanup also needs a lifecycle policy. The core shell is committed; the milestone is not complete.
 
 **Milestone 2 (Data): done, 2026-11-16.** The NativeAOT player loads `Assets/main.scene` from a memory-mapped `spinners.ggpak`. The scene holds three instances of `tower.prefab` (which nests `speck.prefab`) with per-instance overrides, a glTF mesh and a PNG texture, all decoded by our own importers. `Spinners.Build run` runs the same game from the live asset database with file watching.
 
 | Area | What exists | Where |
 | --- | --- | --- |
-| Serialization | Generator-emitted field visitors per component, registered by module initializers that also register referenced assemblies. One visitor drives text, binary and later the Inspector. Supports primitives, vectors, quaternions, matrices, GUIDs, `FixedString64`, entity refs, `AssetRef<T>`, enums by name, nested structs. Diagnostics GG0101 to GG0103 | `src/Gamegrl.Generators/ComponentGenerator.cs`, `src/Gamegrl.Core/Serialization` |
+| Serialization | Generator-emitted field visitors per component, registered by module initializers that also register referenced assemblies. One visitor drives text, binary and later the Inspector. Supports primitives, vectors, quaternions, matrices, GUIDs, `FixedString64`, entity refs, `AssetRef<T>`, enums by name, nested structs. Diagnostics GG0101 to GG0104 | `src/Gamegrl.Generators/ComponentGenerator.cs`, `src/Gamegrl.Core/Serialization` |
 | Scenes | Text format (deterministic, one property per line, entities depth first) and a binary player format; entity references remapped through scene ids | `Scene.cs`, `SceneText.cs` |
 | Prefabs | Nested expansion, per-property overrides, added and removed components, deleted children, references remapped per instance; saving writes only differences | `SceneText.cs` |
 | Hierarchy | `SetParent`, ordered children, recursive destroy; parallel transform propagation by root | `World.cs`, `Transforms.cs` |

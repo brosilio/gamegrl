@@ -183,6 +183,41 @@ Test("TrueType glyph coverage, UI clipping, button clicks and text input", () =>
     Begin(); ui.TextField(rect, "text", ref text); ui.End();
     Check(text.Contains('!') && !ui.WantsKeyboard);
 });
+Test("Inspector metadata: edits clamp ranges, idle drawing preserves data and headers add layout", () =>
+{
+    var font = FontAtlas.Bake(new TrueTypeFont(File.ReadAllBytes(fontPath)), 14);
+    var ui = new Ui(font);
+    var input = new Input();
+    var inspector = new InspectorVisitor(ui, () => []);
+    float value = 5;
+    void Draw(FieldMetadata metadata)
+    {
+        ui.Begin(input, null, new Vector2(400, 300), 5, null);
+        inspector.Metadata(metadata);
+        inspector.Field("Speed", ref value);
+        ui.End();
+    }
+    var range = new FieldMetadata(Minimum: 0, Maximum: 10);
+    input.OnMouseMove(new Vector2(200, 10), Vector2.Zero); input.OnMouseButton(0, true);
+    Draw(range);
+    input.BeginFrame(); input.OnMouseMove(new Vector2(1200, 10), new Vector2(1000, 0)); Draw(range);
+    Check(value == 10);
+    input.BeginFrame(); input.OnMouseMove(new Vector2(1180, 10), new Vector2(-20, 0)); Draw(range);
+    Check(value == 9);
+    input.BeginFrame(); input.OnMouseButton(0, false); Draw(range);
+    value = 99; input.BeginFrame(); Draw(range); Check(value == 99);
+    float normalY = ui.Remaining.Y;
+    Draw(new FieldMetadata(Header: "Motion", Tooltip: "Angular speed"));
+    Check(ui.Remaining.Y > normalY);
+    Check(InspectorVisitor.Constrain(99, range) == 10);
+    Check(InspectorVisitor.Constrain(-99L, range) == 0L);
+    Check(InspectorVisitor.Constrain(ulong.MaxValue, range) == 10UL);
+    Check(InspectorVisitor.Constrain(double.NaN, range) == 0);
+    var fractions = new FieldMetadata(Minimum: 0.1, Maximum: 0.2);
+    Check((double)InspectorVisitor.Constrain(1f, fractions) <= 0.2);
+    Check((double)InspectorVisitor.Constrain(0f, fractions) >= 0.1);
+    Check(InspectorVisitor.Constrain(0, new FieldMetadata(Minimum: 1.2, Maximum: 4.8)) == 2);
+});
 Console.WriteLine($"{total - failed}/{total} passed");
 return failed;
 

@@ -96,6 +96,7 @@ public sealed class ComponentGenerator : IIncrementalGenerator
             string p = path + "." + f.Name;
             var ft = f.Type;
             string display = ft.ToDisplayString();
+            ops.Add(new FieldOp(OpKind.Metadata, "", Metadata(f, display, diagnostics, loc), "", new EquatableArray<string>(), new EquatableArray<long>()));
             if (Direct.Contains(display))
             {
                 ops.Add(new FieldOp(OpKind.Field, f.Name, p, "", EquatableArrayExtensions.ToEquatableArray<string>(new string[0]), new EquatableArray<long>()));
@@ -131,6 +132,68 @@ public sealed class ComponentGenerator : IIncrementalGenerator
                     $"Field '{f.Name}' has type '{display}', which can't be serialized; mark it [NoSerialize].", loc));
             }
         }
+    }
+
+    private static string Metadata(IFieldSymbol field, string type, List<DiagnosticInfo> diagnostics, LocationInfo? location)
+    {
+        string header = "null", tooltip = "null", min = "null", max = "null";
+        foreach (var a in field.GetAttributes())
+        {
+            string? name = a.AttributeClass?.ToDisplayString();
+            if (name == "Gamegrl.HeaderAttribute" || name == "Gamegrl.TooltipAttribute")
+            {
+                string text = Microsoft.CodeAnalysis.CSharp.SymbolDisplay.FormatLiteral((string?)a.ConstructorArguments[0].Value ?? "", true);
+                if (name == "Gamegrl.HeaderAttribute") header = text; else tooltip = text;
+            }
+            else if (name == "Gamegrl.RangeAttribute")
+            {
+                double lo = System.Convert.ToDouble(a.ConstructorArguments[0].Value);
+                double hi = System.Convert.ToDouble(a.ConstructorArguments[1].Value);
+                bool numeric = new[] { "byte", "sbyte", "short", "ushort", "int", "uint", "long", "ulong", "float", "double" }.Contains(type);
+                if (!numeric || double.IsNaN(lo) || double.IsNaN(hi) || double.IsInfinity(lo) || double.IsInfinity(hi) || lo > hi
+                    || (numeric && !HasRepresentableValue(type, lo, hi)))
+                {
+                    diagnostics.Add(new DiagnosticInfo("GG0104", "Invalid Inspector range",
+                        $"Field '{field.Name}' requires a finite, ordered range on a numeric scalar, intersecting the field type's representable values.", location));
+                    continue;
+                }
+                min = lo.ToString("R", System.Globalization.CultureInfo.InvariantCulture) + "d";
+                max = hi.ToString("R", System.Globalization.CultureInfo.InvariantCulture) + "d";
+            }
+        }
+        return header == "null" && tooltip == "null" && min == "null" ? "default"
+            : $"new global::Gamegrl.FieldMetadata({header}, {tooltip}, {min}, {max})";
+    }
+
+    private static bool HasRepresentableValue(string type, double lo, double hi)
+    {
+        if (type == "double") return true;
+        if (type == "float")
+        {
+            // Check that rounding upward to the first allowed float still lies below the upper bound.
+            if (lo > float.MaxValue || hi < -float.MaxValue) return false;
+            float candidate = (float)System.Math.Max(lo, -float.MaxValue);
+            if (candidate < lo)
+            {
+                var bytes = System.BitConverter.GetBytes(candidate);
+                int bits = System.BitConverter.ToInt32(bytes, 0);
+                bits += candidate >= 0 ? 1 : -1;
+                candidate = System.BitConverter.ToSingle(System.BitConverter.GetBytes(bits), 0);
+            }
+            return candidate <= hi;
+        }
+        var lower = new System.Numerics.BigInteger(System.Math.Ceiling(lo));
+        var upper = new System.Numerics.BigInteger(System.Math.Floor(hi));
+        System.Numerics.BigInteger min = type switch
+        {
+            "sbyte" => sbyte.MinValue, "short" => short.MinValue, "int" => int.MinValue, "long" => long.MinValue, _ => 0,
+        };
+        System.Numerics.BigInteger max = type switch
+        {
+            "byte" => byte.MaxValue, "sbyte" => sbyte.MaxValue, "short" => short.MaxValue, "ushort" => ushort.MaxValue,
+            "int" => int.MaxValue, "uint" => uint.MaxValue, "long" => long.MaxValue, "ulong" => ulong.MaxValue, _ => 0,
+        };
+        return System.Numerics.BigInteger.Max(lower, min) <= System.Numerics.BigInteger.Min(upper, max);
     }
 
     private static string ClassName(string assemblyName) => new string(assemblyName.Where(char.IsLetterOrDigit).ToArray()) + "Components";
@@ -179,6 +242,9 @@ public sealed class ComponentGenerator : IIncrementalGenerator
             {
                 switch (op.Kind)
                 {
+                    case OpKind.Metadata:
+                        sb.Append("            v.Metadata(").Append(op.Path).AppendLine(");");
+                        break;
                     case OpKind.Field:
                         sb.Append("            v.Field(\"").Append(op.Name).Append("\", ref ").Append(op.Path).AppendLine(");");
                         break;
@@ -212,7 +278,7 @@ public sealed class ComponentGenerator : IIncrementalGenerator
     }
 }
 
-internal enum OpKind { Field, Asset, Enum, Begin, End }
+internal enum OpKind { Metadata, Field, Asset, Enum, Begin, End }
 
 internal sealed record FieldOp(OpKind Kind, string Name, string Path, string EnumType, EquatableArray<string> EnumNames, EquatableArray<long> EnumValues);
 

@@ -10,7 +10,9 @@ namespace Spinners;
 
 public struct Spinner : IComponent
 {
+    [Header("Rotation"), Tooltip("Local axis around which this entity rotates.")]
     public Vector3 Axis;
+    [Range(0, 720), Tooltip("Angular speed in degrees per second.")]
     public float DegreesPerSecond;
 }
 

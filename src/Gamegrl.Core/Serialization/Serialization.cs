@@ -4,11 +4,13 @@ namespace Gamegrl;
 
 /// <summary>
 /// Walks a component's serialized fields. The generator emits one visit method per component; the same method
-/// drives every format (text scenes, binary scenes) and, later, the Inspector. Fields arrive in declaration order;
+/// drives text scenes, binary scenes and the Inspector. Fields arrive in declaration order;
 /// nested structs are bracketed by <see cref="Begin"/> and <see cref="End"/>.
 /// </summary>
 public interface IFieldVisitor
 {
+    /// <summary>Presentation hints for the next field or nested struct. Formats may ignore these.</summary>
+    void Metadata(in FieldMetadata metadata) { }
     void Begin(string name);
     void End();
     void Field(string name, ref bool value);
@@ -35,6 +37,28 @@ public interface IFieldVisitor
     void Asset(string name, ref Guid value);
     /// <summary>An enum, as its underlying value, with the generator's name table for text formats.</summary>
     void Enum(string name, ref long value, ReadOnlySpan<string> names, ReadOnlySpan<long> values);
+}
+
+/// <summary>Generated presentation data; inspecting fields requires no runtime reflection.</summary>
+public readonly record struct FieldMetadata(string? Header = null, string? Tooltip = null, double? Minimum = null, double? Maximum = null);
+
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class RangeAttribute(double minimum, double maximum) : Attribute
+{
+    public double Minimum { get; } = minimum;
+    public double Maximum { get; } = maximum;
+}
+
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class TooltipAttribute(string text) : Attribute
+{
+    public string Text { get; } = text;
+}
+
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class HeaderAttribute(string text) : Attribute
+{
+    public string Text { get; } = text;
 }
 
 /// <summary>Generated per component type; registered with <see cref="ComponentRegistry"/> by a module initializer.</summary>

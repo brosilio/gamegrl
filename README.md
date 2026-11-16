@@ -23,7 +23,9 @@ Click a mesh to select it; drag its colored axis handles to move it. Project pre
 Ctrl+N creates a scene, Ctrl+S saves, Ctrl+Shift+S saves under a new path, Ctrl+Z/Ctrl+Shift+Z undo/redo,
 and F5 enters or stops play mode. New/Open/Close offer Save, Discard and Cancel for unsaved edits. Build and import progress
 appears in Tasks; failures appear in Console. The panel regions resize with their splitters; movable docking
-and additional Inspector metadata are still pending (see the design status).
+is still pending (see the design status).
+Inspector fields support `[Header("Section")]`, `[Tooltip("Help text")]` and numeric `[Range(0, 720)]`
+attributes. These are generated without reflection; ranges constrain edits while preserving loaded values.
 
 ```sh
 dotnet run --project tests/Gamegrl.Editor.Tests -- --graphics # optional desktop smoke test, uses temporary assets
