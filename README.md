@@ -54,3 +54,17 @@ Editor-only extensions implement `IEditorExtension.Register(EditorRegistry)`. Re
 in a separate JIT assembly referencing `Gamegrl.Editor`, then pass `--extension path/to/extension.dll`.
 It loads and unloads with game code, sharing game component identities. Build the extension assembly
 before launching or reloading it; player projects do not reference editor extensions.
+
+Game-view input activates on click during play; clicking editor panels or opening a dialog releases it.
+Gameplay reads the view-local `Input` resource or named bindings through `ActionMap`; F5 remains an editor
+shortcut. Keyboard/mouse bindings are available now; other device bindings follow later.
+
+Module resources registered through `SetResource(value)` checkpoint automatically when unmanaged. For mutable
+objects use `SetResource(value, clone)` with a deep-copy function, or `SetResourceFactory(() => new State())`
+for a fresh object per play session. Stop restores edit state and removes play-only resources. Game-code reload
+resets resources to new-code defaults while preserving serialized entities. Modules manage disposable resource
+handles through their lifecycle callbacks.
+
+Editor builds live in leased session workspaces under the temporary directory. Replaced and failed builds are
+removed in the background, with the current build retained for rollback. Owned stale sessions are reclaimed
+on later startup/build; unrelated directories and live editor sessions are left alone.

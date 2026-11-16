@@ -84,10 +84,22 @@ internal static class GraphicsSmoke
         Check(!editor.GameInput.IsDown(Key.Space) && input.IsDown(Key.Space), "Losing Game focus did not isolate held input");
         Frame(() => input.OnKey((int)Key.Space, false, false));
         int playingCount = app.World.EntityCount;
+        string firstBuild = editor.GameAssemblyPath!;
         editor.BuildGame();
         Wait(() => !editor.Jobs.Busy);
         Frame();
         Check(editor.Document.Playing && app.World.EntityCount == playingCount, "Code reload duplicated or lost startup entities");
+        GC.Collect(); GC.WaitForPendingFinalizers();
+        editor.DrainBuildCleanupAsync().GetAwaiter().GetResult();
+        Check(!File.Exists(firstBuild) && File.Exists(editor.GameAssemblyPath), "Superseded build was not retired");
+        string currentBuild = editor.GameAssemblyPath!;
+        using (var invalidBuilds = new BuildWorkspace(Path.Combine(root, "invalid-builds")))
+        {
+            var invalid = invalidBuilds.Create("invalid"); File.WriteAllText(invalid.AssemblyPath, "invalid assembly"); invalid.Complete();
+            editor.AcceptBuild(invalid); Frame();
+            Check(editor.GameAssemblyPath == currentBuild && File.Exists(currentBuild) && editor.Document.Playing && app.World.EntityCount == playingCount,
+                "Failed reload did not retain the current build and running scene");
+        }
         Click(240, 15); // Stop.
         Check(!editor.Document.Playing && editor.Document.Text == before, "Stop did not restore the edit scene");
         Click(265, 44); // Scene view.
@@ -126,7 +138,11 @@ internal static class GraphicsSmoke
         editor.RequestClose(); Frame();
         Click(640, 313); // Discard and close.
         Check(editor.Files.ExitRequested, "Discard did not finish closing");
-        Console.WriteLine("Editor graphics smoke passed: create, Inspector, undo/redo, move gizmo, mesh picking, Game and Scene textures, play/stop, live code reload, save, New/Save As, overwrite and close dialogs.");
+        string finalBuild = editor.GameAssemblyPath!;
+        editor.Dispose(); GC.Collect(); GC.WaitForPendingFinalizers();
+        editor.DrainBuildCleanupAsync().GetAwaiter().GetResult();
+        Check(!File.Exists(finalBuild), "Shutdown did not retire the final build");
+        Console.WriteLine("Editor graphics smoke passed: create, Inspector, undo/redo, move gizmo, mesh picking, Game and Scene textures, play/stop, live code reload, save, New/Save As, overwrite and close dialogs, input focus, tab docking, reload rollback and build cleanup.");
         return 0;
     }
 }

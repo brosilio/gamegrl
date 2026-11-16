@@ -21,7 +21,11 @@ public sealed class EditorJobs : IDisposable
             try
             {
                 T result = work(stop.Token);
-                _completed.Enqueue(() => { if (!stop.IsCancellationRequested) apply(result); });
+                _completed.Enqueue(() =>
+                {
+                    if (!stop.IsCancellationRequested) apply(result);
+                    else if (result is IDisposable disposable) disposable.Dispose();
+                });
             }
             catch (OperationCanceledException) { }
             catch (Exception e) { _completed.Enqueue(() => Log.Error($"{name}: {e.Message}")); }

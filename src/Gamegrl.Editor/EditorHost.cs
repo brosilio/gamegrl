@@ -17,6 +17,12 @@ internal sealed partial class EditorHost : IDisposable
     private bool _gameFocused;
     private readonly GameCode _game = new();
     private string? _gameDll;
+    private readonly BuildWorkspace _builds = new();
+    private BuildOutput? _activeBuild;
+    private bool _disposed;
+    internal string? GameAssemblyPath => _gameDll;
+    internal Task DrainBuildCleanupAsync() => _builds.DrainAsync();
+    internal void AcceptBuild(BuildOutput output) { _reloadBuild?.Dispose(); _reloadBuild = output; }
     private readonly List<string> _extensionPaths = new();
     public void AddExtension(string path) => _extensionPaths.Add(Path.GetFullPath(path));
     private readonly RenderContext _render;
@@ -32,7 +38,7 @@ internal sealed partial class EditorHost : IDisposable
     private float _left = 230, _right = 320, _bottom = 210;
     private double _clock;
     private bool _importPending, _buildPending, _importAgain, _buildAgain;
-    private string? _reloadDll;
+    private BuildOutput? _reloadBuild;
     private bool _loaded;
     private long _editClock;
     private bool _closeRequested;
@@ -75,7 +81,7 @@ internal sealed partial class EditorHost : IDisposable
     }
     public void Import()
     {
-        if (_importPending || _reloadDll is not null) { _importAgain = true; return; }
+        if (_importPending || _reloadBuild is not null) { _importAgain = true; return; }
         _importPending = true;
         Jobs.Run("Import assets", stop => EditorAssets.Import(_root, stop), catalog =>
         {
@@ -90,12 +96,13 @@ internal sealed partial class EditorHost : IDisposable
     public void Pump()
     {
         Jobs.Pump();
-        if (_reloadDll is { } dll && !_importPending)
+        if (_reloadBuild is { } output && !_importPending)
         {
-            _reloadDll = null;
-            ApplyGame(dll);
+            _reloadBuild = null;
+            try { ApplyGame(output); }
+            catch (Exception e) { output.Dispose(); Log.Error("Reload failed: " + e.Message); }
         }
-        if (_importAgain && !_importPending && _reloadDll is null) { _importAgain = false; Import(); }
+        if (_importAgain && !_importPending && _reloadBuild is null) { _importAgain = false; Import(); }
         if (_buildAgain && !_buildPending) { _buildAgain = false; BuildGame(); }
     }
     public void BuildGame()
@@ -104,38 +111,41 @@ internal sealed partial class EditorHost : IDisposable
         _buildPending = true;
         Jobs.Run("Build game scripts", stop =>
         {
-            return GameCode.Build(_project, stop);
-        }, dll => { _reloadDll = dll; }, () => { _buildPending = false; });
+            return GameCode.Build(_project, stop, _builds);
+        }, AcceptBuild, () => { _buildPending = false; });
     }
-    private void ApplyGame(string dll)
+    private void ApplyGame(BuildOutput output)
     {
         Document.CommitEdit();
         ulong selectedId = Document.SelectedId;
         string state = Document.Text;
         bool playing = Document.Playing;
         string? previous = _gameDll;
-        _game.Stop(_app);
-        _app.World.Clear();
-        _game.Unload(_app);
+        try { _game.Stop(_app); } catch (Exception e) { Log.Error("Stop before reload: " + e.Message); }
+        _app.World.Clear(); _game.Unload(_app);
+        void RestoreState()
+        {
+            Document.Restore(state); Document.SelectSceneId(selectedId); Document.ClearHistory();
+            if (playing) _game.Resume();
+        }
         try
         {
-            _game.Load(dll, _app, Document, GameInput, Registry, _extensionPaths);
-            _gameDll = dll;
+            _game.Load(output.AssemblyPath, _app, Document, GameInput, Registry, _extensionPaths);
+            RestoreState();
         }
         catch (Exception e)
         {
             Log.Error("Game reload: " + e.Message);
-            _game.Unload(_app);
-            if (previous is not null) _game.Load(previous, _app, Document, GameInput, Registry, _extensionPaths);
+            _app.World.Clear(); _game.Unload(_app); output.Dispose();
+            if (previous is not null)
+            {
+                _game.Load(previous, _app, Document, GameInput, Registry, _extensionPaths);
+                RestoreState();
+            }
+            return;
         }
-        Document.Restore(state);
-        Document.SelectSceneId(selectedId);
-        Document.ClearHistory();
-        if (playing)
-        {
-            try { _game.Resume(); }
-            catch (Exception e) { Document.Stop(); _app.RestoreClock(_editClock); Log.Error("Resume after reload: " + e.Message); }
-        }
+        _gameDll = output.AssemblyPath;
+        _activeBuild?.Dispose(); _activeBuild = output;
         if (!_loaded) Import();
     }
     public void StopPlay() { if (Document.Playing) TogglePlay(); }
@@ -251,10 +261,13 @@ internal sealed partial class EditorHost : IDisposable
     }
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
         Jobs.Dispose();
-        _game.Stop(_app);
+        try { _game.Stop(_app); } catch (Exception e) { Log.Error("Game stop during shutdown: " + e.Message); }
         _app.World.Clear();
         _game.Unload(_app);
+        _reloadBuild?.Dispose(); _activeBuild?.Dispose(); _builds.Dispose();
         _render.Device.WaitIdle();
         Registry.Dispose();
         _renderer.Dispose();

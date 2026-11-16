@@ -126,24 +126,28 @@ internal sealed class GameCode : IDisposable
         _context?.Unload();
         _context = null;
     }
-    public static string Build(string project, CancellationToken stop)
+    public static BuildOutput Build(string project, CancellationToken stop, BuildWorkspace workspace)
     {
-        string output = Path.Combine(Path.GetTempPath(), "gamegrl-editor", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(output);
-        var info = new ProcessStartInfo("dotnet") { RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (string arg in new[] { "build", project, "-o", output, "-m:1", "-nologo", "-v", "q" }) info.ArgumentList.Add(arg);
-        using var process = Process.Start(info) ?? throw new IOException("Could not start dotnet build.");
-        using var cancel = stop.Register(() => { try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { } });
-        var stdout = process.StandardOutput.ReadToEndAsync(stop);
-        var stderr = process.StandardError.ReadToEndAsync(stop);
-        process.WaitForExit();
-        string log = stdout.GetAwaiter().GetResult() + stderr.GetAwaiter().GetResult();
-        stop.ThrowIfCancellationRequested();
-        if (process.ExitCode != 0) throw new InvalidOperationException(log);
-        // The initial editor shell supports the SDK default assembly name.
-        string dll = Path.Combine(output, Path.GetFileNameWithoutExtension(project) + ".dll");
-        if (!File.Exists(dll)) throw new FileNotFoundException("Game output not found; use the SDK default AssemblyName.", dll);
-        return dll;
+        var output = workspace.Create(Path.GetFileNameWithoutExtension(project));
+        try
+        {
+            stop.ThrowIfCancellationRequested();
+            var info = new ProcessStartInfo("dotnet") { RedirectStandardOutput = true, RedirectStandardError = true };
+            foreach (string arg in new[] { "build", project, "-o", output.Directory, "-m:1", "-nologo", "-v", "q" }) info.ArgumentList.Add(arg);
+            using var process = Process.Start(info) ?? throw new IOException("Could not start dotnet build.");
+            using var cancel = stop.Register(() => { try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { } });
+            // Drain both pipes even after cancellation so process exit cannot deadlock on a full pipe.
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            process.WaitForExit();
+            string log = stdout.GetAwaiter().GetResult() + stderr.GetAwaiter().GetResult();
+            stop.ThrowIfCancellationRequested();
+            if (process.ExitCode != 0) throw new InvalidOperationException(log);
+            if (!File.Exists(output.AssemblyPath)) throw new FileNotFoundException("Game output not found; use the SDK default AssemblyName.", output.AssemblyPath);
+            return output;
+        }
+        catch { output.Dispose(); throw; }
+        finally { output.Complete(); }
     }
     public void Dispose() => _context?.Unload();
 }

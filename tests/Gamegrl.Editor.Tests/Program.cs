@@ -17,6 +17,7 @@ void Test(string name, Action body)
 }
 Gamegrl.Tests.SceneFilesTests.Register(Test);
 Gamegrl.Tests.ExtensionTests.Register(Test);
+Gamegrl.Tests.BuildWorkspaceTests.Register(Test);
 
 Test("Undo/redo coalesces a drag, restores hierarchy and selection, branches history", () =>
 {
