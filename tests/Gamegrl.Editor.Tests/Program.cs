@@ -15,6 +15,8 @@ void Test(string name, Action body)
     try { body(); Console.WriteLine("  ok    " + name); }
     catch (Exception e) { failed++; Console.WriteLine("  FAIL  " + name + "\n" + e); }
 }
+Gamegrl.Tests.SceneFilesTests.Register(Test);
+
 Test("Undo/redo coalesces a drag, restores hierarchy and selection, branches history", () =>
 {
     using var world = new World();
@@ -174,6 +176,12 @@ Test("TrueType glyph coverage, UI clipping, button clicks and text input", () =>
     input.BeginFrame(); input.OnKey((int)Key.Enter, true, false);
     Begin(); ui.TextField(rect, "text", ref text); ui.End();
     Check(text == "Hello");
+    input.BeginFrame(); input.OnKey((int)Key.Enter, false, false); input.OnMouseButton(0, true);
+    Begin(); ui.TextField(rect, "text", ref text); ui.End();
+    input.BeginFrame(); input.OnMouseButton(0, false); input.OnText("!");
+    ui.CommitTextEdit();
+    Begin(); ui.TextField(rect, "text", ref text); ui.End();
+    Check(text.Contains('!') && !ui.WantsKeyboard);
 });
 Console.WriteLine($"{total - failed}/{total} passed");
 return failed;

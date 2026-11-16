@@ -87,7 +87,33 @@ internal static class GraphicsSmoke
         Wait(() => !editor.Jobs.Busy);
         Check(File.ReadAllText(Path.Combine(root, "Assets/main.scene")) == before, "Save did not write the edited scene");
         Check(!editor.Document.Dirty, "Save left the document dirty");
-        Console.WriteLine("Editor graphics smoke passed: create, Inspector, undo/redo, move gizmo, mesh picking, Game and Scene textures, play/stop, live code reload, save.");
+        Click(460, 15); // New scene.
+        Check(app.World.EntityCount == 0 && editor.Files.CurrentPath is null && editor.Document.Dirty, "New scene failed");
+        Click(35, 15); // Untitled Save opens Save As.
+        Check(editor.Files.Dialog == SceneFileDialog.SaveAs, "Untitled Save did not ask for a path");
+        Click(500, 313); // Path field.
+        Frame(() => { input.OnKey((int)Key.LeftCtrl, true, false); input.OnKey((int)Key.A, true, false); });
+        Frame(() => { input.OnKey((int)Key.LeftCtrl, false, false); input.OnKey((int)Key.A, false, false); input.OnText("Assets/new.scene"); });
+        Frame(() => input.OnKey((int)Key.Enter, true, false));
+        Frame(() => input.OnKey((int)Key.Enter, false, false));
+        Click(500, 338); // Save As confirmation.
+        Wait(() => !editor.Jobs.Busy);
+        Check(editor.Files.CurrentPath == "Assets/new.scene" && !editor.Document.Dirty, "Save As did not save the new scene");
+        Check(File.Exists(Path.Combine(root, "Assets/new.scene")), "New scene file is missing");
+        Click(545, 15); // Save As the same name requires an overwrite decision.
+        Click(500, 338);
+        Wait(() => !editor.Jobs.Busy);
+        Check(editor.Files.Dialog == SceneFileDialog.Overwrite, "Existing file was replaced without asking");
+        Click(800, 313); // Cancel overwrite.
+        Click(460, 15); // New untitled scene, then cancel closing it.
+        editor.RequestClose(); Frame();
+        Check(editor.Files.Dialog == SceneFileDialog.Unsaved, "Dirty close did not ask");
+        Click(825, 313);
+        Check(!editor.Files.ExitRequested && editor.Files.Dialog == SceneFileDialog.None, "Cancel close failed");
+        editor.RequestClose(); Frame();
+        Click(640, 313); // Discard and close.
+        Check(editor.Files.ExitRequested, "Discard did not finish closing");
+        Console.WriteLine("Editor graphics smoke passed: create, Inspector, undo/redo, move gizmo, mesh picking, Game and Scene textures, play/stop, live code reload, save, New/Save As, overwrite and close dialogs.");
         return 0;
     }
 }

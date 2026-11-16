@@ -8,7 +8,6 @@ namespace Gamegrl.Editor;
 
 internal sealed partial class EditorHost
 {
-    private string? _pendingOpen;
     private int _newKind, _componentChoice;
     private void Hierarchy(Rect area)
     {
@@ -112,19 +111,12 @@ internal sealed partial class EditorHost
     private void Project(Rect area)
     {
         _ui.BeginScroll(area.Shrink(5), "project-scroll");
-        if (_pendingOpen is not null)
-        {
-            _ui.Label("Unsaved edits. Open " + _pendingOpen + "?");
-            _ui.Row(-1, -1);
-            if (_ui.Button("Discard and open")) { Open(_pendingOpen); _pendingOpen = null; }
-            if (_ui.Button("Cancel")) _pendingOpen = null;
-        }
         foreach (string path in _assets.Files)
         {
-            if (!_ui.Selectable(_ui.Next(), path, path == _scenePath)) continue;
+            if (!_ui.Selectable(_ui.Next(), path, path == Files.CurrentPath)) continue;
             if (path.EndsWith(".scene", StringComparison.Ordinal))
             {
-                if (Document.Dirty) _pendingOpen = path; else Open(path);
+                Files.RequestOpen(path);
             }
             else if (path.EndsWith(".prefab", StringComparison.Ordinal))
                 Document.Edit(() =>

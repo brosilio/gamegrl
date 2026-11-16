@@ -18,6 +18,7 @@ public sealed unsafe class Sdl3Platform : IPlatform
     public string Name => "SDL3";
 
     public bool QuitRequested { get; private set; }
+    public void CancelQuitRequest() => QuitRequested = false;
 
     public IWindow CreateWindow(in WindowDesc desc)
     {
@@ -152,6 +153,7 @@ internal sealed unsafe class Sdl3Window : IWindow
 
     public uint Id { get; }
     public bool CloseRequested { get; private set; }
+    public void CancelCloseRequest() => CloseRequested = false;
     public bool Minimized { get; private set; }
 
     internal void OnClose() => CloseRequested = true;

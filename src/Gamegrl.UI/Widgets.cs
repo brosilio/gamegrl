@@ -255,6 +255,7 @@ public sealed partial class Ui
         else if (IsHovered(r) && _input.IsDown(MouseButton.Left) && MouseDelta != Vector2.Zero)
             _editCursor = Font.HitTest(_editBuffer.ToString(), Mouse.X - r.X - Theme.Padding + _editScroll);
 
+        if (_commitTextEdit) return Finish(true, out commit);
         // Draw: field, selection, text, caret (scrolled to keep the caret visible).
         string text = _editBuffer.ToString();
         float caretX = Font.Measure(text.AsSpan(0, _editCursor));

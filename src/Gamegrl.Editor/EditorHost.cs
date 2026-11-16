@@ -30,9 +30,14 @@ internal sealed partial class EditorHost : IDisposable
     private bool _importPending, _buildPending, _importAgain, _buildAgain;
     private string? _reloadDll;
     private bool _loaded;
-    private bool _savePending;
-    private int _openRequest;
-    private string _scenePath = "Assets/main.scene";
+    private bool _closeRequested;
+    public void RequestClose()
+    {
+        _closeRequested = true;
+        _ui.CommitTextEdit();
+    }
+    public SceneFiles Files { get; }
+    private string ScenePath => Files.CurrentPath ?? "Untitled";
     public SceneDocument Document { get; }
     public EditorJobs Jobs { get; } = new();
 
@@ -47,6 +52,8 @@ internal sealed partial class EditorHost : IDisposable
         _inspector = new InspectorVisitor(_ui, () => new[] { ("None", Guid.Empty), ("Cube", BuiltinAssets.Cube.Guid), ("White", BuiltinAssets.White.Guid) }
             .Concat(_assets.Files.Select(path => (path, _assets.FindByPath(path)))).ToArray());
         Document = new SceneDocument(app.World, assets.PrefabText);
+        Document.Open(Document.Text);
+        Files = new SceneFiles(root, Document, Jobs, Import);
         _cameras = app.World.Query(new QueryDesc().With<Camera>().With<LocalToWorld>());
         app.Schedule.Add(new HostSystem("Editor.UI", Phase.Update, -10000, _ => Update()));
         app.Schedule.Add(new HostSystem("Editor.Draw", Phase.Render, 100, _ => Render()));
@@ -70,7 +77,7 @@ internal sealed partial class EditorHost : IDisposable
             if (!_loaded)
             {
                 _loaded = true;
-                Open(_scenePath);
+                Files.RequestOpen("Assets/main.scene");
             }
         }, () => { _importPending = false; });
     }
@@ -121,39 +128,10 @@ internal sealed partial class EditorHost : IDisposable
         if (playing) _game.Resume();
         if (!_loaded) Import();
     }
-    private void Open(string path)
-    {
-        if (Document.Playing) return;
-        int request = ++_openRequest;
-        string before = Document.Text;
-        Jobs.Run("Open " + path, _ => File.ReadAllText(Path.Combine(_root, path)), text =>
-        {
-            if (request != _openRequest || Document.Playing) return;
-            if (Document.Text != before) { Log.Warn("Open cancelled because the scene was edited while the file was loading."); return; }
-            Document.Open(text); _scenePath = path;
-            Log.Info("Opened " + path);
-        });
-    }
-    private void Save()
-    {
-        if (Document.Playing || _savePending) return;
-        Document.CommitEdit();
-        _savePending = true;
-        string scenePath = _scenePath;
-        string text = Document.Text, path = Path.Combine(_root, _scenePath);
-        Jobs.Run("Save scene", stop =>
-        {
-            stop.ThrowIfCancellationRequested();
-            string temp = path + ".saving";
-            File.WriteAllText(temp, text);
-            File.Move(temp, path, overwrite: true);
-            return text;
-        }, saved => { if (_scenePath == scenePath) Document.MarkSaved(saved); Log.Info("Saved " + scenePath); Import(); }, () => _savePending = false);
-    }
     public void StopPlay() { if (Document.Playing) TogglePlay(); }
     private void TogglePlay()
     {
-        if (!_loaded || _gameDll is null) return;
+        if (!_loaded || _gameDll is null || Files.Busy || Files.Dialog != SceneFileDialog.None) return;
         if (Document.Playing) { _game.Stop(_app); Document.Stop(); _app.QuitRequested = false; }
         else { Document.Play(); _game.Start(_app); }
     }
@@ -165,6 +143,11 @@ internal sealed partial class EditorHost : IDisposable
         _clock += _app.World.Resource<Time>().Delta;
         _ui.Begin(input, platform.Platform, new Vector2(w, h), _clock, _renderer.FontTexture);
         _ui.Draw.Rect(_ui.Screen, _ui.Theme.Background);
+        if (Files.Dialog != SceneFileDialog.None)
+        {
+            _sceneArea = _gameArea = default;
+            FileDialog(); _ui.End(); return;
+        }
         Toolbar(w);
         float availableH = Math.Max(100, h - 62);
         _left = Math.Clamp(_left, 120, Math.Max(120, w * 0.35f));
@@ -200,13 +183,20 @@ internal sealed partial class EditorHost : IDisposable
         if (_bottomTab == 0) Project(bottomContent);
         else if (_bottomTab == 1) ConsolePanel(bottomContent);
         else Tasks(bottomContent);
-        _ui.TextIn(new Rect(0, h - 26, w, 26), _scenePath + (Document.Dirty ? " *" : "") + "    " + (Document.Playing ? "Playing" : "Editing") + (Jobs.Busy ? "    Working…" : ""), _ui.Theme.TextDim);
+        _ui.TextIn(new Rect(0, h - 26, w, 26), ScenePath + (Document.Dirty ? " *" : "") + "    " + (Document.Playing ? "Playing" : "Editing") + (Jobs.Busy ? "    Working…" : ""), _ui.Theme.TextDim);
         if (!_ui.WantsKeyboard)
         {
-            if (input.Ctrl && input.WasPressed(Key.S)) Save();
+            if (input.Ctrl && input.WasPressed(Key.S)) { if (input.Shift) Files.SaveAs(); else Files.Save(); }
+            if (input.Ctrl && input.WasPressed(Key.N)) Files.RequestNew();
             if (input.Ctrl && input.WasPressed(Key.Z)) { if (input.Shift) Document.Redo(); else Document.Undo(); }
             if (input.Ctrl && input.WasPressed(Key.Y)) Document.Redo();
             if (input.WasPressed(Key.F5)) TogglePlay();
+        }
+        if (_closeRequested)
+        {
+            _closeRequested = false;
+            Document.CommitEdit();
+            Files.RequestClose();
         }
         _ui.End();
     }
@@ -220,13 +210,15 @@ internal sealed partial class EditorHost : IDisposable
     private void Toolbar(float width)
     {
         _ui.BeginArea(new Rect(5, 4, width - 10, 25));
-        _ui.Row(65, 65, 65, 65, 65, 90, -1);
-        if (_ui.Button("Save")) Save();
+        _ui.Row(65, 65, 65, 65, 65, 90, 65, 75, -1);
+        if (_ui.Button("Save")) Files.Save();
         if (_ui.Button("Undo")) Document.Undo();
         if (_ui.Button("Redo")) Document.Redo();
         if (_ui.Button(Document.Playing ? "Stop" : "Play")) TogglePlay();
         if (_ui.Button("Build")) BuildGame();
         if (_ui.Button("Reimport")) Import();
+        if (_ui.Button("New")) Files.RequestNew();
+        if (_ui.Button("Save As")) Files.SaveAs();
         _ui.Label("gamegrl");
         _ui.EndArea();
     }

@@ -17,6 +17,8 @@ public interface IWindow : IDisposable
     (int Width, int Height) PixelSize { get; }
 
     bool CloseRequested { get; }
+    /// <summary>Dismiss a close request after a host chooses to keep the window open.</summary>
+    void CancelCloseRequest();
 
     bool Minimized { get; }
 
@@ -39,6 +41,8 @@ public interface IPlatform : IDisposable
 
     /// <summary>The OS asked the app to quit (last window closed, SIGTERM, ...).</summary>
     bool QuitRequested { get; }
+    /// <summary>Dismiss a quit request (for example, while an editor resolves unsaved work).</summary>
+    void CancelQuitRequest();
 
     /// <summary>The system clipboard's text (empty if none).</summary>
     string GetClipboardText();

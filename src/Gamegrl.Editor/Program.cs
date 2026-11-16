@@ -40,10 +40,23 @@ void Changed(object sender, FileSystemEventArgs e)
 watcher.Changed += Changed; watcher.Created += Changed; watcher.Deleted += Changed; watcher.Renamed += (s, e) => Changed(s, e);
 watcher.EnableRaisingEvents = true;
 var elapsed = Stopwatch.StartNew();
-while (!platform.Platform.QuitRequested && !platform.MainWindow.CloseRequested && (seconds <= 0 || elapsed.Elapsed.TotalSeconds < seconds))
+bool closePending = false;
+while (!editor.Files.ExitRequested && (seconds <= 0 || elapsed.Elapsed.TotalSeconds < seconds))
 {
     input.BeginFrame();
     platform.Platform.PumpEvents(input);
+    if (platform.Platform.QuitRequested || platform.MainWindow.CloseRequested)
+    {
+        platform.Platform.CancelQuitRequest();
+        platform.MainWindow.CancelCloseRequest();
+        editor.StopPlay();
+        closePending = true;
+    }
+    if (closePending && !editor.Files.Busy && editor.Files.Dialog == SceneFileDialog.None)
+    {
+        closePending = false;
+        editor.RequestClose();
+    }
     editor.Pump();
     long changed = Interlocked.Read(ref assetChanged);
     if (changed != 0 && Stopwatch.GetElapsedTime(changed).TotalMilliseconds > 350)

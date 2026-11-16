@@ -93,6 +93,7 @@ public sealed partial class Ui
 
     public void End()
     {
+        _commitTextEdit = false;
         if (_input.WasReleased(MouseButton.Left)) Active = 0;
         if (_input.WasPressed(MouseButton.Left) && !_focusClaimed) Focus = 0; // clicking elsewhere drops text focus
         Draw.Append(Overlay);
@@ -315,6 +316,9 @@ public sealed partial class Ui
     // ------------------------------------------------------------------ text editing state
 
     private uint _editId;
+    private bool _commitTextEdit;
+    /// <summary>Commit a focused field when it is drawn this frame, before a host opens a close dialog.</summary>
+    public void CommitTextEdit() => _commitTextEdit = true;
     private readonly StringBuilder _editBuffer = new();
     private int _editCursor, _editAnchor;
     private float _editScroll;

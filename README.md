@@ -20,7 +20,8 @@ Escape quits the sample.
 The editor uses DejaVu Sans on Linux; set `GAMEGRL_FONT` to another TrueType font path if needed.
 Right-drag orbits the Scene camera, middle-drag pans, the wheel zooms, and F frames the selection.
 Click a mesh to select it; drag its colored axis handles to move it. Project prefab rows instantiate prefabs.
-Ctrl+S saves, Ctrl+Z/Ctrl+Shift+Z undo/redo, and F5 enters or stops play mode. Build and import progress
+Ctrl+N creates a scene, Ctrl+S saves, Ctrl+Shift+S saves under a new path, Ctrl+Z/Ctrl+Shift+Z undo/redo,
+and F5 enters or stops play mode. New/Open/Close offer Save, Discard and Cancel for unsaved edits. Build and import progress
 appears in Tasks; failures appear in Console. The panel regions resize with their splitters; movable docking
 and additional Inspector metadata are still pending (see the design status).
 
