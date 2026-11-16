@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
+using Gamegrl.Platform;
 
 namespace Gamegrl.Editor;
 
@@ -26,16 +27,35 @@ internal sealed class GameCode : IDisposable
     private readonly List<ISystem> _wrappers = new();
     private string? _assemblyName;
     private bool _started;
-    private sealed class PlaySystem(ISystem inner, SceneDocument document) : ISystem
+    private Input? _input;
+    private readonly struct InputScope : IDisposable
+    {
+        private readonly World _world;
+        private readonly Input? _previous;
+        public InputScope(World world, Input? input)
+        {
+            _world = world; _previous = input is null ? null : world.Resource<Input>();
+            if (input is not null) world.SetResource(input);
+        }
+        public void Dispose() { if (_previous is not null) _world.SetResource(_previous); }
+    }
+    private sealed class PlaySystem(ISystem inner, SceneDocument document, Input? input) : ISystem
     {
         public string Name => inner.Name;
         public Phase Phase => inner.Phase;
         public int Order => inner.Order;
-        public void Initialize(World world) => inner.Initialize(world);
-        public void Run(World world) { if (document.Playing) inner.Run(world); }
+        public void Initialize(World world) { using var scope = new InputScope(world, input); inner.Initialize(world); }
+        public void Run(World world)
+        {
+            if (!document.Playing) return;
+            using var scope = new InputScope(world, input);
+            inner.Run(world);
+        }
     }
-    public void Load(string path, App app, SceneDocument document)
+    public void Load(string path, App app, SceneDocument document, Input? input = null)
     {
+        _input = input;
+        using var scope = new InputScope(app.World, input);
         _context = new GameContext(path);
         ContextReference = new WeakReference(_context);
         var assembly = _context.LoadFromAssemblyPath(path);
@@ -46,7 +66,7 @@ internal sealed class GameCode : IDisposable
         _registration = EngineBuilder.ForWorld(app.World).AddModule(module);
         foreach (var system in _registration.Systems)
         {
-            var wrapper = new PlaySystem(system, document);
+            var wrapper = new PlaySystem(system, document, input);
             _wrappers.Add(wrapper);
             app.Schedule.Add(wrapper);
         }
@@ -56,11 +76,13 @@ internal sealed class GameCode : IDisposable
     {
         if (_started || _registration is null) return;
         _started = true;
+        using var scope = new InputScope(app.World, _input);
         foreach (var start in _registration.StartActionsList) start(app);
     }
     public void Stop(App app)
     {
         if (!_started || _registration is null) return;
+        using var scope = new InputScope(app.World, _input);
         foreach (var stop in _registration.StopActionsList.Reverse()) stop(app);
         _started = false;
     }
@@ -74,6 +96,7 @@ internal sealed class GameCode : IDisposable
         if (_registration is not null)
             foreach (int slot in _registration.ResourceSlots) app.World.RemoveResource(slot);
         _registration = null;
+        _input = null;
         if (_assemblyName is not null) ComponentRegistry.ReleaseAssembly(_assemblyName);
         _assemblyName = null;
         _context?.Unload();

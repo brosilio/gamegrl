@@ -20,7 +20,7 @@ public enum MouseButton : byte { Left = 0, Middle = 1, Right = 2, X1 = 3, X2 = 4
 
 /// <summary>
 /// Raw device state for the current frame, as a world resource. Gameplay should prefer actions.
-/// TODO(milestone 3): action maps (actions bound to keys, buttons, gamepads and XR controllers).
+/// Use ActionMap for named keyboard/mouse bindings; gamepad and XR bindings will extend it.
 /// </summary>
 public sealed class Input
 {
@@ -29,6 +29,8 @@ public sealed class Input
     private readonly bool[] _down = new bool[KeyCount];
     private readonly bool[] _pressed = new bool[KeyCount];
     private readonly bool[] _released = new bool[KeyCount];
+    private readonly bool[] _previousDown = new bool[KeyCount];
+    private byte _previousMouseDown;
     private byte _mouseDown, _mousePressed, _mouseReleased;
 
     public Vector2 MousePosition { get; private set; }
@@ -37,6 +39,9 @@ public sealed class Input
 
     private readonly bool[] _repeated = new bool[KeyCount];
     private readonly System.Text.StringBuilder _text = new();
+
+    public bool WasDown(Key k) => _previousDown[(int)k];
+    public bool WasDown(MouseButton b) => (_previousMouseDown & (1 << (int)b)) != 0;
 
     public bool IsDown(Key k) => _down[(int)k];
     public bool WasPressed(Key k) => _pressed[(int)k];
@@ -59,6 +64,8 @@ public sealed class Input
     /// <summary>Clear per-frame edges; the host calls this before pumping events.</summary>
     public void BeginFrame()
     {
+        _down.CopyTo(_previousDown, 0);
+        _previousMouseDown = _mouseDown;
         Array.Clear(_pressed);
         Array.Clear(_released);
         Array.Clear(_repeated);
@@ -66,6 +73,32 @@ public sealed class Input
         _mousePressed = _mouseReleased = 0;
         MouseDelta = Vector2.Zero;
         Wheel = Vector2.Zero;
+    }
+
+    /// <summary>Copy an input frame into a view. Losing focus emits releases once, then stays neutral.</summary>
+    public void RouteFrom(Input source, bool enabled, Vector2 origin, ReadOnlySpan<Key> reserved = default)
+    {
+        BeginFrame();
+        if (!enabled)
+        {
+            for (int i = 0; i < KeyCount; i++) { _released[i] = _down[i]; _down[i] = false; }
+            _mouseReleased = _mouseDown; _mouseDown = 0;
+            MousePosition = Vector2.Zero;
+            return;
+        }
+        for (int i = 0; i < KeyCount; i++)
+        {
+            bool next = source._down[i] && !reserved.Contains((Key)i);
+            _pressed[i] = !reserved.Contains((Key)i) && (source._pressed[i] || next && !_down[i]);
+            _released[i] = !next && (_down[i] || source._released[i]);
+            _down[i] = next; _repeated[i] = next && source._repeated[i];
+        }
+        _mousePressed = (byte)(source._mousePressed | source._mouseDown & ~_mouseDown);
+        _mouseReleased = (byte)(source._mouseReleased | _mouseDown & ~source._mouseDown);
+        _mouseDown = source._mouseDown;
+        MousePosition = source.MousePosition - origin;
+        MouseDelta = source.MouseDelta; Wheel = source.Wheel;
+        _text.Append(source._text);
     }
 
     // Platform backends feed events through these.

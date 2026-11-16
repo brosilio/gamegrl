@@ -13,6 +13,8 @@ internal sealed partial class EditorHost : IDisposable
     private readonly App _app;
     private readonly string _root, _project;
     private readonly EditorAssets _assets;
+    internal Input GameInput { get; } = new();
+    private bool _gameFocused;
     private readonly GameCode _game = new();
     private string? _gameDll;
     private readonly RenderContext _render;
@@ -55,7 +57,7 @@ internal sealed partial class EditorHost : IDisposable
         Document.Open(Document.Text);
         Files = new SceneFiles(root, Document, Jobs, Import);
         _cameras = app.World.Query(new QueryDesc().With<Camera>().With<LocalToWorld>());
-        app.Schedule.Add(new HostSystem("Editor.UI", Phase.Update, -10000, _ => Update()));
+        app.Schedule.Add(new HostSystem("Editor.UI", Phase.First, -10000, _ => Update()));
         app.Schedule.Add(new HostSystem("Editor.Draw", Phase.Render, 100, _ => Render()));
         BuildGame();
     }
@@ -113,14 +115,14 @@ internal sealed partial class EditorHost : IDisposable
         _game.Unload(_app);
         try
         {
-            _game.Load(dll, _app, Document);
+            _game.Load(dll, _app, Document, GameInput);
             _gameDll = dll;
         }
         catch (Exception e)
         {
             Log.Error("Game reload: " + e.Message);
             _game.Unload(_app);
-            if (previous is not null) _game.Load(previous, _app, Document);
+            if (previous is not null) _game.Load(previous, _app, Document, GameInput);
         }
         Document.Restore(state);
         Document.SelectSceneId(selectedId);
@@ -146,6 +148,7 @@ internal sealed partial class EditorHost : IDisposable
         if (Files.Dialog != SceneFileDialog.None)
         {
             _sceneArea = _gameArea = default;
+            GameInput.RouteFrom(input, false, default); _gameFocused = false;
             FileDialog(); _ui.End(); return;
         }
         Toolbar(w);
@@ -184,14 +187,19 @@ internal sealed partial class EditorHost : IDisposable
         else if (_bottomTab == 1) ConsolePanel(bottomContent);
         else Tasks(bottomContent);
         _ui.TextIn(new Rect(0, h - 26, w, 26), ScenePath + (Document.Dirty ? " *" : "") + "    " + (Document.Playing ? "Playing" : "Editing") + (Jobs.Busy ? "    Working…" : ""), _ui.Theme.TextDim);
-        if (!_ui.WantsKeyboard)
+        bool click = input.WasPressed(MouseButton.Left) || input.WasPressed(MouseButton.Right) || input.WasPressed(MouseButton.Middle);
+        if (click) _gameFocused = _gameArea.W > 0 && _ui.IsHovered(_gameArea);
+        if (_gameArea.W <= 0 || !Document.Playing || _ui.WantsKeyboard) _gameFocused = false;
+        GameInput.RouteFrom(input, _gameFocused, _gameArea.Min, [Key.F5]);
+        if (!_ui.WantsKeyboard && !_gameFocused)
         {
             if (input.Ctrl && input.WasPressed(Key.S)) { if (input.Shift) Files.SaveAs(); else Files.Save(); }
             if (input.Ctrl && input.WasPressed(Key.N)) Files.RequestNew();
             if (input.Ctrl && input.WasPressed(Key.Z)) { if (input.Shift) Document.Redo(); else Document.Undo(); }
             if (input.Ctrl && input.WasPressed(Key.Y)) Document.Redo();
-            if (input.WasPressed(Key.F5)) TogglePlay();
+
         }
+        if (!_ui.WantsKeyboard && input.WasPressed(Key.F5)) TogglePlay();
         if (_closeRequested)
         {
             _closeRequested = false;

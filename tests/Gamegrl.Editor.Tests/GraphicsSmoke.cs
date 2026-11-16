@@ -75,6 +75,14 @@ internal static class GraphicsSmoke
         Click(335, 44); // Game view, rendered into a sampled texture.
         Click(240, 15); // Play.
         Check(editor.Document.Playing && app.World.EntityCount > count + 1, "Play did not run game startup");
+        Check(!editor.GameInput.IsDown(MouseButton.Left), "Toolbar input leaked into the game");
+        Click(500, 200);
+        Frame(() => input.OnKey((int)Key.Space, true, false));
+        Check(editor.GameInput.IsDown(Key.Space), "Focused Game view did not receive input");
+        Check(editor.GameInput.MousePosition == new Vector2(266, 144), "Game mouse coordinates were not translated");
+        Click(300, 550);
+        Check(!editor.GameInput.IsDown(Key.Space) && input.IsDown(Key.Space), "Losing Game focus did not isolate held input");
+        Frame(() => input.OnKey((int)Key.Space, false, false));
         int playingCount = app.World.EntityCount;
         editor.BuildGame();
         Wait(() => !editor.Jobs.Busy);

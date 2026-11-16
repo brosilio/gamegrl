@@ -1,6 +1,7 @@
 using Gamegrl.Tests;
 
 CoreTests.Register();
+InputTests.Register();
 VkLayoutTests.Register();
 SceneTests.Register();
 MetadataTests.Register();
