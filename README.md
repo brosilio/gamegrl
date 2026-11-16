@@ -22,11 +22,13 @@ The desktop editor uses DejaVu Sans Mono on Linux; set `GAMEGRL_FONT` to another
 Right-drag orbits the Scene camera, middle-drag pans, the wheel zooms, and F frames the selection.
 Click a mesh to select it; drag its colored axis handles to move it. Project prefab rows instantiate prefabs.
 Ctrl+N creates a scene, Ctrl+S saves, Ctrl+Shift+S saves under a new path, Ctrl+Z/Ctrl+Shift+Z undo/redo,
-and F5 enters or stops play mode. New/Open/Close offer Save, Discard and Cancel for unsaved edits. Build and import progress
+and F5 enters or stops play mode. Pause/Resume freezes play systems; a game system that throws pauses play and logs its
+stack trace instead of closing the editor. New/Open/Close offer Save, Discard and Cancel for unsaved edits. Build and import progress
 appears in Tasks; failures appear in Console. Resize panel regions with splitters, or drag tabs between regions and reorder them. Scroll a crowded tab
 strip with the mouse wheel. Menu includes a layout reset command.
 Inspector fields support `[Header("Section")]`, `[Tooltip("Help text")]` and numeric `[Range(0, 720)]`
 attributes. These are generated without reflection; ranges constrain edits while preserving loaded values.
+Add component uses a component's public static `Default` (field or property) when it declares one, else `new T()`.
 
 ```sh
 dotnet run --project tests/Gamegrl.Editor.Tests -- --graphics # optional desktop smoke test, uses temporary assets
@@ -51,7 +53,9 @@ dotnet run --project tests/Gamegrl.Editor.Tests -- --graphics # optional desktop
 
 Editor-only extensions implement `IEditorExtension.Register(EditorRegistry)`. Register panels with
 `AddPanel`, commands with `AddMenu`, and component Inspectors with `AddDrawer<T>`. Use
-`EditorContext.Edit` for undoable changes and `EditorContext.Jobs` for background work. Keep the extension
+`EditorContext.Edit` for undoable structural changes, `Document.BeginEntityEdit(entity)` before editing one
+entity's component values (it records only the bytes that change), and `EditorContext.Jobs` for background work.
+A panel, drawer or menu command that throws is logged once and replaced by an inline error. Keep the extension
 in a separate JIT assembly referencing `Gamegrl.Editor`, then pass `--extension path/to/extension.dll`.
 It loads and unloads with game code, sharing game component identities. Build the extension assembly
 before launching or reloading it; player projects do not reference editor extensions.

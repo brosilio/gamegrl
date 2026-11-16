@@ -6,7 +6,7 @@ Read `docs/DESIGN.md` first; it is the source of truth for decisions. Record new
   `Reflection.Emit`, `dynamic` or runtime loading in engine or game code; the source generator does that work.
   `scripts/ci.sh` runs the tests as a NativeAOT binary: "it builds" is not "it works under AOT".
 - **Few dependencies.** BCL only, plus SDL3 (behind `IPlatform`), OpenSSL (QUIC, via httpgrl), the Khronos OpenXR
-  loader (XR module only) and an editor-only shader compiler. Tests are dependency-free (`tests/Gamegrl.Tests/Harness.cs`).
+  loader (XR module only), an editor-only shader compiler, and the sibling `../ansidotnet` libraries (editor only). Tests are dependency-free (`tests/Gamegrl.Tests/Harness.cs`).
 - **Best implementation over backwards compatibility.** Nothing is released: change any API when it makes the code
   clearly better, and update its callers.
 - **Efficiency is the default path.** Hot paths are written like C: spans, pointers into component columns, pooled or
