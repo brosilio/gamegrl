@@ -1,0 +1,267 @@
+using System.Numerics;
+using Gamegrl.Assets;
+using Gamegrl.Platform;
+using Gamegrl.Rendering;
+using Gamegrl.Rhi;
+using Gamegrl.UI;
+using Gamegrl.UI.Fonts;
+
+namespace Gamegrl.Editor;
+
+internal sealed partial class EditorHost : IDisposable
+{
+    private readonly App _app;
+    private readonly string _root, _project;
+    private readonly EditorAssets _assets;
+    private readonly GameCode _game = new();
+    private string? _gameDll;
+    private readonly RenderContext _render;
+    private readonly Ui _ui;
+    private readonly UiRenderer _renderer;
+    private readonly SceneCamera _camera = new();
+    private readonly Query _cameras;
+    private readonly Dictionary<ulong, bool> _expanded = new();
+    private readonly InspectorVisitor _inspector;
+    private GpuTexture? _sceneColor, _sceneDepth, _gameColor, _gameDepth;
+    private Rect _sceneArea, _gameArea;
+    private int _bottomTab, _viewTab;
+    private float _left = 230, _right = 320, _bottom = 210;
+    private double _clock;
+    private bool _importPending, _buildPending, _importAgain, _buildAgain;
+    private string? _reloadDll;
+    private bool _loaded;
+    private bool _savePending;
+    private int _openRequest;
+    private string _scenePath = "Assets/main.scene";
+    public SceneDocument Document { get; }
+    public EditorJobs Jobs { get; } = new();
+
+    public EditorHost(App app, EditorAssets assets, string root, string project, string fontPath)
+    {
+        _app = app; _assets = assets; _root = root; _project = project;
+        _render = app.World.Resource<RenderContext>();
+        _render.DrawMainCamera = false;
+        var font = FontAtlas.Bake(new TrueTypeFont(File.ReadAllBytes(fontPath)), 14);
+        _ui = new Ui(font);
+        _renderer = new UiRenderer(_render.Device, _render.Swapchain.Format, font);
+        _inspector = new InspectorVisitor(_ui, () => new[] { ("None", Guid.Empty), ("Cube", BuiltinAssets.Cube.Guid), ("White", BuiltinAssets.White.Guid) }
+            .Concat(_assets.Files.Select(path => (path, _assets.FindByPath(path)))).ToArray());
+        Document = new SceneDocument(app.World, assets.PrefabText);
+        _cameras = app.World.Query(new QueryDesc().With<Camera>().With<LocalToWorld>());
+        app.Schedule.Add(new HostSystem("Editor.UI", Phase.Update, -10000, _ => Update()));
+        app.Schedule.Add(new HostSystem("Editor.Draw", Phase.Render, 100, _ => Render()));
+        BuildGame();
+    }
+    private sealed class HostSystem(string name, Phase phase, int order, Action<World> run) : ISystem
+    {
+        public string Name => name;
+        public Phase Phase => phase;
+        public int Order => order;
+        public void Initialize(World world) { }
+        public void Run(World world) => run(world);
+    }
+    public void Import()
+    {
+        if (_importPending || _reloadDll is not null) { _importAgain = true; return; }
+        _importPending = true;
+        Jobs.Run("Import assets", stop => EditorAssets.Import(_root, stop), catalog =>
+        {
+            _assets.Apply(catalog);
+            if (!_loaded)
+            {
+                _loaded = true;
+                Open(_scenePath);
+            }
+        }, () => { _importPending = false; });
+    }
+    public void Pump()
+    {
+        Jobs.Pump();
+        if (_reloadDll is { } dll && !_importPending)
+        {
+            _reloadDll = null;
+            ApplyGame(dll);
+        }
+        if (_importAgain && !_importPending && _reloadDll is null) { _importAgain = false; Import(); }
+        if (_buildAgain && !_buildPending) { _buildAgain = false; BuildGame(); }
+    }
+    public void BuildGame()
+    {
+        if (_buildPending) { _buildAgain = true; return; }
+        _buildPending = true;
+        Jobs.Run("Build game scripts", stop =>
+        {
+            return GameCode.Build(_project, stop);
+        }, dll => { _reloadDll = dll; }, () => { _buildPending = false; });
+    }
+    private void ApplyGame(string dll)
+    {
+        Document.CommitEdit();
+        ulong selectedId = Document.SelectedId;
+        string state = Document.Text;
+        bool playing = Document.Playing;
+        string? previous = _gameDll;
+        _game.Stop(_app);
+        _app.World.Clear();
+        _game.Unload(_app);
+        try
+        {
+            _game.Load(dll, _app, Document);
+            _gameDll = dll;
+        }
+        catch (Exception e)
+        {
+            Log.Error("Game reload: " + e.Message);
+            _game.Unload(_app);
+            if (previous is not null) _game.Load(previous, _app, Document);
+        }
+        Document.Restore(state);
+        Document.SelectSceneId(selectedId);
+        Document.ClearHistory();
+        if (playing) _game.Resume();
+        if (!_loaded) Import();
+    }
+    private void Open(string path)
+    {
+        if (Document.Playing) return;
+        int request = ++_openRequest;
+        string before = Document.Text;
+        Jobs.Run("Open " + path, _ => File.ReadAllText(Path.Combine(_root, path)), text =>
+        {
+            if (request != _openRequest || Document.Playing) return;
+            if (Document.Text != before) { Log.Warn("Open cancelled because the scene was edited while the file was loading."); return; }
+            Document.Open(text); _scenePath = path;
+            Log.Info("Opened " + path);
+        });
+    }
+    private void Save()
+    {
+        if (Document.Playing || _savePending) return;
+        Document.CommitEdit();
+        _savePending = true;
+        string scenePath = _scenePath;
+        string text = Document.Text, path = Path.Combine(_root, _scenePath);
+        Jobs.Run("Save scene", stop =>
+        {
+            stop.ThrowIfCancellationRequested();
+            string temp = path + ".saving";
+            File.WriteAllText(temp, text);
+            File.Move(temp, path, overwrite: true);
+            return text;
+        }, saved => { if (_scenePath == scenePath) Document.MarkSaved(saved); Log.Info("Saved " + scenePath); Import(); }, () => _savePending = false);
+    }
+    public void StopPlay() { if (Document.Playing) TogglePlay(); }
+    private void TogglePlay()
+    {
+        if (!_loaded || _gameDll is null) return;
+        if (Document.Playing) { _game.Stop(_app); Document.Stop(); _app.QuitRequested = false; }
+        else { Document.Play(); _game.Start(_app); }
+    }
+    private void Update()
+    {
+        var input = _app.World.Resource<Input>();
+        var platform = _app.World.Resource<PlatformContext>();
+        var (w, h) = platform.MainWindow.PixelSize;
+        _clock += _app.World.Resource<Time>().Delta;
+        _ui.Begin(input, platform.Platform, new Vector2(w, h), _clock, _renderer.FontTexture);
+        _ui.Draw.Rect(_ui.Screen, _ui.Theme.Background);
+        Toolbar(w);
+        float availableH = Math.Max(100, h - 62);
+        _left = Math.Clamp(_left, 120, Math.Max(120, w * 0.35f));
+        _right = Math.Clamp(_right, 150, Math.Max(150, w * 0.4f));
+        _bottom = Math.Clamp(_bottom, 80, Math.Max(80, availableH * 0.65f));
+        float middleW = Math.Max(1, w - _left - _right - 8), topH = availableH - _bottom - 4;
+        _left = _ui.Splitter(new Rect(_left, 32, 4, availableH), "left", _left, true, 120, Math.Max(120, w * 0.35f));
+        _right = w - _ui.Splitter(new Rect(w - _right - 4, 32, 4, availableH), "right", w - _right, true, w * 0.6f, w - 150);
+        float split = _ui.Splitter(new Rect(_left + 4, 32 + topH, middleW, 4), "bottom", 32 + topH, false, 100, h - 110);
+        _bottom = h - 30 - split - 4;
+        Hierarchy(Panel(new Rect(0, 32, _left, availableH), "Hierarchy"));
+        Inspector(Panel(new Rect(w - _right, 32, _right, availableH), "Inspector"));
+        var view = new Rect(_left + 4, 32, middleW, Math.Max(1, topH));
+        _ui.Draw.Rect(view, _ui.Theme.Panel);
+        var content = _ui.Tabs(view, "views", ["Scene", "Game"], ref _viewTab);
+        _sceneArea = _viewTab == 0 ? content : default;
+        _gameArea = _viewTab == 1 ? content : default;
+        if (_viewTab == 0)
+        {
+            EnsureTarget(ref _sceneColor, ref _sceneDepth, content);
+            _ui.Image(content, _sceneColor!);
+            SceneInteraction(input);
+        }
+        else
+        {
+            EnsureTarget(ref _gameColor, ref _gameDepth, content);
+            _ui.Image(content, _gameColor!);
+            _app.World.Resource<ScreenSize>() = new ScreenSize { Width = (int)content.W, Height = (int)content.H };
+        }
+        var bottom = new Rect(_left + 4, 32 + topH + 4, middleW, _bottom);
+        _ui.Draw.Rect(bottom, _ui.Theme.Panel);
+        var bottomContent = _ui.Tabs(bottom, "bottom", ["Project", "Console", "Tasks"], ref _bottomTab);
+        if (_bottomTab == 0) Project(bottomContent);
+        else if (_bottomTab == 1) ConsolePanel(bottomContent);
+        else Tasks(bottomContent);
+        _ui.TextIn(new Rect(0, h - 26, w, 26), _scenePath + (Document.Dirty ? " *" : "") + "    " + (Document.Playing ? "Playing" : "Editing") + (Jobs.Busy ? "    Working…" : ""), _ui.Theme.TextDim);
+        if (!_ui.WantsKeyboard)
+        {
+            if (input.Ctrl && input.WasPressed(Key.S)) Save();
+            if (input.Ctrl && input.WasPressed(Key.Z)) { if (input.Shift) Document.Redo(); else Document.Undo(); }
+            if (input.Ctrl && input.WasPressed(Key.Y)) Document.Redo();
+            if (input.WasPressed(Key.F5)) TogglePlay();
+        }
+        _ui.End();
+    }
+    private Rect Panel(Rect r, string title)
+    {
+        _ui.Draw.Rect(r, _ui.Theme.Panel);
+        _ui.Draw.Rect(r with { H = 24 }, _ui.Theme.PanelHeader);
+        _ui.TextIn(r with { H = 24 }, title, _ui.Theme.Text);
+        return new Rect(r.X + 5, r.Y + 28, Math.Max(1, r.W - 10), Math.Max(1, r.H - 33));
+    }
+    private void Toolbar(float width)
+    {
+        _ui.BeginArea(new Rect(5, 4, width - 10, 25));
+        _ui.Row(65, 65, 65, 65, 65, 90, -1);
+        if (_ui.Button("Save")) Save();
+        if (_ui.Button("Undo")) Document.Undo();
+        if (_ui.Button("Redo")) Document.Redo();
+        if (_ui.Button(Document.Playing ? "Stop" : "Play")) TogglePlay();
+        if (_ui.Button("Build")) BuildGame();
+        if (_ui.Button("Reimport")) Import();
+        _ui.Label("gamegrl");
+        _ui.EndArea();
+    }
+    private void EnsureTarget(ref GpuTexture? color, ref GpuTexture? depth, Rect area)
+    {
+        int w = Math.Max(1, (int)area.W), h = Math.Max(1, (int)area.H);
+        if (color?.Width == w && color.Height == h) return;
+        if (color is not null) { _renderer.Forget(color); color.Dispose(); }
+        depth?.Dispose();
+        color = _render.Device.CreateTexture(new TextureDesc(w, h, _render.Swapchain.Format, TextureUsage.RenderTarget | TextureUsage.Sampled));
+        depth = _render.Device.CreateTexture(new TextureDesc(w, h, RenderContext.DepthFormat, TextureUsage.DepthStencil));
+    }
+    private void Render()
+    {
+        if (!_render.HasFrame) return;
+        var frame = _render.Frame;
+        if (_sceneArea.W > 0 && _sceneColor is not null)
+            _render.Scene.DrawView(frame.Commands, new ViewDesc { Color = _sceneColor, Depth = _sceneDepth!, ViewProjection = _camera.Matrix(_sceneArea.W / _sceneArea.H), ClearColor = new Vector4(0.08f, 0.09f, 0.12f, 1), DebugLines = true });
+        if (_gameArea.W > 0 && _gameColor is not null)
+        {
+            MainCameraSystem.TryMainCamera(_cameras, _gameArea.W / _gameArea.H, out var matrix, out var clear);
+            _render.Scene.DrawView(frame.Commands, new ViewDesc { Color = _gameColor, Depth = _gameDepth!, ViewProjection = matrix, ClearColor = clear, Sprites = true });
+        }
+        frame.Commands.BeginRenderPass(new RenderPassDesc { Color = new ColorAttachment { Texture = frame.Backbuffer, Load = LoadOp.Clear, Store = StoreOp.Store, ClearColor = new Vector4(0.1f, 0.1f, 0.1f, 1) } });
+        _renderer.Render(frame.Commands, frame.FrameIndex, _ui.Draw, frame.Backbuffer.Width, frame.Backbuffer.Height);
+        frame.Commands.EndRenderPass();
+    }
+    public void Dispose()
+    {
+        Jobs.Dispose();
+        _game.Stop(_app);
+        _app.World.Clear();
+        _game.Unload(_app);
+        _render.Device.WaitIdle();
+        _renderer.Dispose();
+        _sceneColor?.Dispose(); _sceneDepth?.Dispose(); _gameColor?.Dispose(); _gameDepth?.Dispose();
+    }
+}

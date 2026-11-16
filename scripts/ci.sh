@@ -5,17 +5,18 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "== build"
-dotnet build gamegrl.slnx -c Release -nologo -v q
+dotnet build gamegrl.slnx -c Release -nologo -v q -m:1
 
 echo "== tests (JIT)"
 dotnet run --project tests/Gamegrl.Tests -c Release --no-build
+dotnet run --project tests/Gamegrl.Editor.Tests -c Release --no-build
 
 echo "== tests (NativeAOT)"
-dotnet publish tests/Gamegrl.Tests -c Release -o artifacts/tests-aot -nologo -v q
+dotnet publish tests/Gamegrl.Tests -c Release -o artifacts/tests-aot -nologo -v q -m:1
 ./artifacts/tests-aot/Gamegrl.Tests
 
 echo "== sample: NativeAOT player + packed assets"
-dotnet publish samples/Spinners/Player -c Release -o artifacts/spinners -nologo -v q
+dotnet publish samples/Spinners/Player -c Release -o artifacts/spinners -nologo -v q -m:1
 dotnet run --project samples/Spinners/Build -c Release --no-build -- pack artifacts/spinners/spinners.ggpak
 ls -la artifacts/spinners/Spinners artifacts/spinners/spinners.ggpak
 echo "ok"

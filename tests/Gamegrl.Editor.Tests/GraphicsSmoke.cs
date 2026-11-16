@@ -1,0 +1,93 @@
+using System.Diagnostics;
+using System.Numerics;
+using Gamegrl.Assets;
+using Gamegrl.Editor;
+using Gamegrl.Platform;
+using Gamegrl.Platform.Sdl3;
+using Gamegrl.Rendering;
+using Gamegrl.Rhi.Vulkan;
+
+namespace Gamegrl.Tests;
+
+internal static class GraphicsSmoke
+{
+    public static int Run()
+    {
+        string source = Path.GetFullPath("samples/Spinners");
+        string root = Path.Combine(Path.GetTempPath(), "gamegrl-smoke-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(root, "Assets"));
+        foreach (string file in Directory.EnumerateFiles(Path.Combine(source, "Assets"))) File.Copy(file, Path.Combine(root, "Assets", Path.GetFileName(file)));
+        var assets = new EditorAssets();
+        using var app = EngineBuilder.Create()
+            .AddModule(new Sdl3PlatformModule(WindowDesc.Default("gamegrl · smoke")))
+            .AddModule(new AssetsModule(assets))
+            .AddModule<VulkanModule>()
+            .AddModule(new RenderingModule()).Build();
+        using var editor = new EditorHost(app, assets, root, Path.Combine(source, "Game/Spinners.Game.csproj"),
+            Environment.GetEnvironmentVariable("GAMEGRL_FONT") ?? "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+        var platform = app.World.Resource<PlatformContext>();
+        var input = app.World.Resource<Input>();
+        void Frame(Action? inject = null)
+        {
+            input.BeginFrame(); platform.Platform.PumpEvents(input); inject?.Invoke(); editor.Pump(); app.Tick(1.0 / 60);
+        }
+        void Wait(Func<bool> ready)
+        {
+            var timer = Stopwatch.StartNew();
+            while (!ready()) { if (timer.Elapsed.TotalSeconds > 60) throw new TimeoutException("Editor smoke timed out"); Frame(); }
+        }
+        void Click(float x, float y)
+        {
+            Frame(() => { input.OnMouseMove(new Vector2(x, y), Vector2.Zero); input.OnMouseButton(0, true); });
+            Frame(() => input.OnMouseButton(0, false)); Frame();
+        }
+        void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
+        Wait(() => !editor.Jobs.Busy && app.World.EntityCount > 0);
+        int count = app.World.EntityCount;
+        Click(50, 70); // Create, through the actual UI.
+        Check(app.World.EntityCount == count + 1, "Create button did not create an entity");
+        Check(!editor.Document.Selected.IsNull, "Created entity was not selected");
+        Click(100, 15); // Undo.
+        Check(app.World.EntityCount == count, "Undo button did not restore the scene");
+        Click(170, 15); // Redo.
+        Check(app.World.EntityCount == count + 1, "Redo button did not restore the created entity");
+        // Drag the selected entity's world-X handle through the UI, then undo it.
+        var selected = editor.Document.Selected;
+        var camera = new SceneCamera();
+        var area = new Gamegrl.UI.Rect(234, 56, 722, 420);
+        var matrix = camera.Matrix(area.W / area.H);
+        var position = app.World.Get<LocalTransform>(selected).Position;
+        float length = Vector3.Distance(camera.Position, position) * 0.12f;
+        Check(SceneCamera.Project(position + Vector3.UnitX * length, matrix, area, out var handle), "Gizmo is behind camera");
+        var moved = handle + new Vector2(30, 0);
+        Frame(() => { input.OnMouseMove(handle, Vector2.Zero); input.OnMouseButton(0, true); });
+        Frame(() => input.OnMouseMove(moved, new Vector2(30, 0)));
+        Frame(() => input.OnMouseButton(0, false)); Frame();
+        Check(app.World.Get<LocalTransform>(selected).Position.X > position.X, "Move gizmo did not translate the entity");
+        Click(100, 15);
+        Check(app.World.Get<LocalTransform>(editor.Document.Selected).Position == position, "Undo did not revert the gizmo drag");
+        // Select a mesh through the scene view rather than the hierarchy.
+        editor.Document.Selected = default;
+        SceneCamera.Project(new Vector3(0, 5, 0), matrix, area, out var meshPoint);
+        Click(meshPoint.X, meshPoint.Y);
+        Check(app.World.IsAlive(editor.Document.Selected) && app.World.Has<MeshRenderer>(editor.Document.Selected), "Scene picking missed the mesh");
+        string before = editor.Document.Text;
+        Click(335, 44); // Game view, rendered into a sampled texture.
+        Click(240, 15); // Play.
+        Check(editor.Document.Playing && app.World.EntityCount > count + 1, "Play did not run game startup");
+        int playingCount = app.World.EntityCount;
+        editor.BuildGame();
+        Wait(() => !editor.Jobs.Busy);
+        Frame();
+        Check(editor.Document.Playing && app.World.EntityCount == playingCount, "Code reload duplicated or lost startup entities");
+        Click(240, 15); // Stop.
+        Check(!editor.Document.Playing && editor.Document.Text == before, "Stop did not restore the edit scene");
+        Click(265, 44); // Scene view.
+        Click(35, 15); // Save; only the temporary copy is written.
+        Wait(() => !editor.Jobs.Busy);
+        Check(File.ReadAllText(Path.Combine(root, "Assets/main.scene")) == before, "Save did not write the edited scene");
+        Check(!editor.Document.Dirty, "Save left the document dirty");
+        Console.WriteLine("Editor graphics smoke passed: create, Inspector, undo/redo, move gizmo, mesh picking, Game and Scene textures, play/stop, live code reload, save.");
+        return 0;
+    }
+}

@@ -46,6 +46,8 @@ Started 2026-11-16.
 | 2026-11-16 | Component identity | Stable id = 64-bit FNV-1a of the full type name; runtime ids stay dense for archetype masks | Scenes, assets and packets use stable ids |
 | 2026-11-16 | Hierarchy | Intrusive parent/child links inside the world; destroying a parent destroys its subtree | No per-entity allocation |
 | 2026-11-16 | Prefabs | `.prefab` files use the scene format; instances store only differences; inner entities have path-derived ids; packing flattens prefabs | Players never expand prefabs |
+| 2026-11-16 | Editor jobs | Workers produce imported bytes or build outputs; the host applies results between frames | No asset-database I/O in rendering; code reload resets undo history when the schema can change |
+| 2026-11-16 | Game startup | Game modules register gameplay; `SceneBootModule` selects a player's startup scene | Editor chooses its open scene and calls game startup on entering play |
 | 2026-11-16 | XR | VR as an optional `Gamegrl.XR` module on OpenXR; its constraints apply from milestone 1 | See XR |
 | 2026-11-16 | XR targets | PC VR (Linux first, via Monado or SteamVR) and Meta Quest (standalone Android) | Quest adds an Android target: NativeAOT `linux-bionic-arm64` |
 | 2026-11-16 | Web player | Feasible; kept possible by current design choices | See Web target |
@@ -399,6 +401,15 @@ Multiplayer, web and XR ship in milestones 5 to 7, but their constraints apply f
 
 ## Status
 
+**Milestone 3 (Editor shell): core workflow implemented and exercised; uncommitted.**
+- `Gamegrl.UI`: in-house TrueType parser and antialiased coverage rasterizer, font atlas, draw lists, renderer, buttons, checkboxes, number dragging, vectors, colors, text fields with clipboard, trees, scrolling popups, tabs, scroll views, splitters and images. Uses the system DejaVu Sans font; `GAMEGRL_FONT` overrides its path.
+- `Gamegrl.Editor`: a standalone JIT host that accepts a project root and a game `.csproj`. Hierarchy, generated-field Inspector, Scene/Game tabs, Project, Console and Tasks. Create empty entities, cubes, cameras and sprites; add/remove components; assign assets from a picker; instantiate prefabs from Project; save scenes. Editor orbit/pan/zoom camera, mesh picking, framing and a world-axis move gizmo (including parent-space conversion).
+- Edit commands store serialized text diffs, coalescing drags and text edits. Undo/redo reconstructs the scene through generated serializers. Play snapshots the serialized edit scene and time; Stop restores them and selection. Game startup runs only when entering play, never a second time during hot reload.
+- Imports, source reads, saves and game builds use cancellable worker jobs; results apply between frames. Rendering reads an in-memory asset catalog. Source changes trigger debounced builds into separate output directories; collectible game assemblies share the host's engine assemblies. Reload preserves serialized entity state and selection, releases old systems/resources/serializers, and resets undo history across schema changes. A failed build keeps the current game running.
+- Core support: `World.Clear`, schedule add/remove after startup, module registration tracking, component release/re-registration, engine log and `SceneBootModule`. Spinners now uses `SceneBootModule`; its game module has a parameterless constructor.
+- Validation: 27 existing tests under JIT and NativeAOT; nine JIT editor tests cover undo/redo, hierarchy and selection, play restore, malformed scenes, clear/query reuse, jobs/cancellation, reverse-Z picking, collectible assembly reload/unload, font coverage and UI input/layout. The opt-in SDL/Vulkan smoke test clicks through entity creation, undo/redo, move-gizmo dragging, mesh picking, play, reload and save against a temporary copy of the sample. The published NativeAOT player is also exercised separately.
+- Remaining before calling milestone 3 complete: movable/dockable tabs and a public panel/menu/drawer extension API (the shell currently has fixed, resizable panel regions); generated `[Range]`, `[Tooltip]` and `[Header]` metadata; proper focused Game-view input routing/action maps; general game-resource reset/snapshot semantics (entity state and engine time restore today). Add new-scene/Save As and a close-with-unsaved-edits flow. Build output directory cleanup also needs a lifecycle policy. No milestone commit yet.
+
 **Milestone 2 (Data): done, 2026-11-16.** The NativeAOT player loads `Assets/main.scene` from a memory-mapped `spinners.ggpak`. The scene holds three instances of `tower.prefab` (which nests `speck.prefab`) with per-instance overrides, a glTF mesh and a PNG texture, all decoded by our own importers. `Spinners.Build run` runs the same game from the live asset database with file watching.
 
 | Area | What exists | Where |
@@ -436,7 +447,7 @@ Multiplayer, web and XR ship in milestones 5 to 7, but their constraints apply f
 - Any prefab change invalidates every cached scene and prefab artifact (coarse dependency tracking).
 - glTF: one merged mesh per file, no materials, skinning, morph targets or sparse accessors. No JPEG or texture compression yet (BC and ASTC are needed for desktop and Quest).
 - Runtime-instantiated binary prefabs keep their source scene ids, so two instances share ids (fine at runtime; the editor will reassign them).
-- `Spinners.Build` stands in for the editor: it authors scenes in code until milestone 3.
+- `Spinners.Build author` remains a sample fixture generator; interactive scene editing now runs in `Gamegrl.Editor`.
 
 **httpgrl (2026-11-16):** M0 is committed (884640a). M1 (client endpoint, pluggable TLS) is done and green but uncommitted, awaiting the owner's go-ahead in that repo. Its public API: `QuicClientEndpoint`, an abstract `QuicTlsContext` provider (built-in OpenSSL `Server`/`Client`/`ClientWithoutVerification`), `QuicOpenSsl.UseLibraries`, `QuicClock`, `IQuicDispatcher`. Console note: ChaCha20 header protection still uses libcrypto, so a non-OpenSSL TLS provider should offer only AES-GCM suites.
 

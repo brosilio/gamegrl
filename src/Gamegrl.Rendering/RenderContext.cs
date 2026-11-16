@@ -72,7 +72,7 @@ public sealed class RenderContext : IDisposable
     public GpuTexture Depth => _depth!;
 
     /// <summary>Reports problems (a missing or broken asset) once per asset.</summary>
-    public Action<string> Warn { get; set; } = message => Console.Error.WriteLine("[rendering] " + message);
+    public Action<string> Warn { get; set; } = message => Log.Warn("rendering: " + message);
 
     internal readonly record struct Mesh(GpuBuffer Vertices, GpuBuffer Indices, int IndexCount, IndexFormat IndexFormat, Vector3 Min, Vector3 Max);
     internal readonly record struct SpriteTexture(GpuTexture Texture, BindGroup Group);

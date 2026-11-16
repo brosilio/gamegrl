@@ -4,5 +4,6 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Gamegrl.Tests" />
+    <InternalsVisibleTo Include="Gamegrl.Editor" />
   </ItemGroup>
 </Project>

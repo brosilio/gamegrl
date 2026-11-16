@@ -108,7 +108,7 @@ public sealed unsafe class JobScheduler : IDisposable
     public void Dispose()
     {
         _stopping = true;
-        _wake.Release(_workers.Length);
+        if (_workers.Length > 0) _wake.Release(_workers.Length);
         foreach (var t in _workers) t.Join();
         _wake.Dispose();
     }

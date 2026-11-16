@@ -43,6 +43,9 @@ public sealed unsafe class CommandBuffer
         Unsafe.WriteUnaligned(ref _buffer[at], parent);
     }
 
+    /// <summary>Drop recorded commands without applying them.</summary>
+    public void Discard() => _length = 0;
+
     /// <summary>Apply every recorded command in order, then clear. Commands on dead entities are skipped.</summary>
     public void Playback()
     {

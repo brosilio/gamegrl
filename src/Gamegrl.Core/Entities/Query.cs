@@ -57,6 +57,8 @@ public sealed class Query
         return n;
     }
 
+    internal void ClearMatches() => _matches.Clear();
+
     internal void Consider(Archetype archetype)
     {
         if (Desc.Matches(archetype.Set)) _matches.Add(archetype);

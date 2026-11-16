@@ -29,7 +29,7 @@ public sealed unsafe class World : IDisposable
     private readonly List<Archetype> _archetypes = new();
     private readonly Dictionary<ComponentSet, Archetype> _bySet = new();
     private readonly Dictionary<QueryDesc, Query> _queries = new();
-    private readonly Archetype _empty;
+    private Archetype _empty;
     private int _iterating;
 
     private object?[] _resources = new object?[16];
@@ -260,6 +260,32 @@ public sealed unsafe class World : IDisposable
     public bool IsAlive(Entity e) =>
         e.Index < (uint)_recordCount && _records[e.Index].Generation == e.Generation && !e.IsNull;
 
+    /// <summary>
+    /// Destroy every entity and free all component storage, keeping resources and query objects (systems stay
+    /// valid). Old entity handles become dead. The editor uses this to restore snapshots and reload game code.
+    /// </summary>
+    public void Clear()
+    {
+        AssertNotIterating();
+        foreach (var a in _archetypes) a.Dispose();
+        _archetypes.Clear();
+        _bySet.Clear();
+        foreach (var q in _queries.Values) q.ClearMatches();
+        _freeCount = 0;
+        for (int i = _recordCount - 1; i >= 0; i--)
+        {
+            ref var r = ref _records[i];
+            if (r.Archetype is not null || r.Generation != 0) r.Generation = r.Generation == uint.MaxValue ? 1 : r.Generation + 1;
+            r.Archetype = null;
+            r.Parent = r.FirstChild = r.LastChild = r.Next = r.Prev = 0;
+            if (_freeCount == _free.Length) Array.Resize(ref _free, _free.Length * 2);
+            _free[_freeCount++] = i;
+        }
+        _alive = 0;
+        Commands.Discard();
+        _empty = GetOrCreateArchetype(default);
+    }
+
     /// <summary>Destroy <paramref name="e"/> and, depth first, all of its children.</summary>
     public void Destroy(Entity e)
     {
@@ -453,13 +479,25 @@ public sealed unsafe class World : IDisposable
     private static int _nextResourceId;
 
     /// <summary>Set (or replace) the world's resource of type <typeparamref name="T"/>.</summary>
-    public void SetResource<T>(T value)
+    public void SetResource<T>(T value) => SetResource(value, out _);
+
+    /// <summary>Set a resource and report its slot, so a module's resources can be removed together later.</summary>
+    public void SetResource<T>(T value, out int slot)
     {
         int id = ResourceId<T>.Value;
+        slot = id;
         if (id >= _resources.Length) Array.Resize(ref _resources, Math.Max(id + 1, _resources.Length * 2));
         if (_resources[id] is ResourceBox<T> box) box.Value = value;
         else _resources[id] = new ResourceBox<T> { Value = value };
     }
+
+    /// <summary>Remove the resource in <paramref name="slot"/> (see <see cref="SetResource{T}(T, out int)"/>).</summary>
+    public void RemoveResource(int slot)
+    {
+        if (slot >= 0 && slot < _resources.Length) _resources[slot] = null;
+    }
+
+    public void RemoveResource<T>() => RemoveResource(ResourceId<T>.Value);
 
     public bool HasResource<T>()
     {

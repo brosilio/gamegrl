@@ -9,9 +9,12 @@
     <Project Path="src/Gamegrl.Rendering/Gamegrl.Rendering.csproj" />
     <Project Path="src/Gamegrl.Assets/Gamegrl.Assets.csproj" />
     <Project Path="src/Gamegrl.AssetPipeline/Gamegrl.AssetPipeline.csproj" />
+    <Project Path="src/Gamegrl.UI/Gamegrl.UI.csproj" />
+    <Project Path="src/Gamegrl.Editor/Gamegrl.Editor.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Gamegrl.Tests/Gamegrl.Tests.csproj" />
+    <Project Path="tests/Gamegrl.Editor.Tests/Gamegrl.Editor.Tests.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/Spinners/Game/Spinners.Game.csproj" />

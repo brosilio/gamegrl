@@ -299,7 +299,7 @@ internal sealed class BeginFrameSystem : ISystem
 }
 
 /// <summary>The game's view: the first camera, drawn into the window.</summary>
-internal sealed class MainCameraSystem : ISystem
+public sealed class MainCameraSystem : ISystem
 {
     private Query _cameras = null!;
 

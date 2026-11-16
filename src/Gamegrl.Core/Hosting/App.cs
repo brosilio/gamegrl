@@ -19,12 +19,29 @@ public sealed class EngineBuilder
     internal readonly List<Action<App>> StartActions = new();
     internal readonly List<Action<App>> StopActions = new();
 
-    private EngineBuilder() { }
+    private readonly List<int> _resourceSlots = new();
 
-    public static EngineBuilder Create() => new();
+    private EngineBuilder(World? world) => World = world ?? new World();
+
+    public static EngineBuilder Create() => new(null);
+
+    /// <summary>
+    /// A builder that feeds an existing world (resources go straight into it) and records what modules register,
+    /// so it can all be removed again. The editor builds game modules this way, and drops them on hot reload.
+    /// </summary>
+    public static EngineBuilder ForWorld(World world) => new(world);
 
     public Schedule Schedule { get; } = new();
-    public World World { get; } = new();
+    public World World { get; }
+
+    /// <summary>The systems modules added, by phase (for hosts that run them their own way).</summary>
+    public IEnumerable<ISystem> Systems => Enum.GetValues<Phase>().SelectMany(Schedule.SystemsIn);
+
+    /// <summary>The world resource slots modules set (see <see cref="World.RemoveResource(int)"/>).</summary>
+    public IReadOnlyList<int> ResourceSlots => _resourceSlots;
+
+    public IReadOnlyList<Action<App>> StartActionsList => StartActions;
+    public IReadOnlyList<Action<App>> StopActionsList => StopActions;
 
     /// <summary>The fixed simulation rate in Hz.</summary>
     public double FixedRate { get; set; } = 60;
@@ -52,7 +69,8 @@ public sealed class EngineBuilder
 
     public EngineBuilder SetResource<T>(T value)
     {
-        World.SetResource(value);
+        World.SetResource(value, out int slot);
+        _resourceSlots.Add(slot);
         return this;
     }
 

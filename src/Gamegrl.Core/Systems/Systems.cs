@@ -66,6 +66,7 @@ public sealed class Schedule
 {
     private readonly List<ISystem>[] _phases;
     private bool _initialized;
+    private World? _world;
 
     public Schedule()
     {
@@ -73,14 +74,17 @@ public sealed class Schedule
         for (int i = 0; i < _phases.Length; i++) _phases[i] = new List<ISystem>();
     }
 
+    /// <summary>Add a system; after the app is built it's initialized immediately (the editor adds game systems this way).</summary>
     public void Add(ISystem system)
     {
-        if (_initialized) throw new InvalidOperationException("Systems are added before the app is built.");
         var list = _phases[(int)system.Phase];
         int at = list.Count;
         while (at > 0 && list[at - 1].Order > system.Order) at--;
         list.Insert(at, system);
+        if (_initialized) system.Initialize(_world!);
     }
+
+    public bool Remove(ISystem system) => _phases[(int)system.Phase].Remove(system);
 
     public IReadOnlyList<ISystem> SystemsIn(Phase phase) => _phases[(int)phase];
 
@@ -88,13 +92,16 @@ public sealed class Schedule
     {
         foreach (var list in _phases)
             foreach (var s in list) s.Initialize(world);
+        _world = world;
         _initialized = true;
     }
 
     public void Run(Phase phase, World world)
     {
-        foreach (var s in _phases[(int)phase])
+        var list = _phases[(int)phase];
+        for (int i = 0; i < list.Count; i++)
         {
+            var s = list[i];
             s.Run(world);
             if (!world.Commands.IsEmpty) world.Commands.Playback();
         }

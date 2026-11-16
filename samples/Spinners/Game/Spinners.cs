@@ -64,28 +64,24 @@ public static partial class Gameplay
     }
 }
 
-/// <summary>The game: loads Assets/main.scene, then adds a procedural field of cubes around it.</summary>
-public sealed class SpinnersModule(double? runFor) : IModule
+/// <summary>Game systems and play-mode startup; the host chooses the startup scene.</summary>
+public sealed class SpinnersModule : IModule
 {
+    public SpinnersModule() { }
+    public SpinnersModule(double? runFor) => _runFor = runFor;
+    private readonly double? _runFor;
     public const string MainScene = "Assets/main.scene";
 
     public void Build(EngineBuilder builder)
     {
         Gamegrl.Generated.SpinnersGameSystems.AddTo(builder.Schedule);
-        builder.SetResource(new QuitAfter { Seconds = runFor ?? 0 });
+        builder.SetResource(new QuitAfter { Seconds = _runFor ?? 0 });
         builder.OnStart(Start);
     }
 
     private static void Start(App app)
     {
         var world = app.World;
-        var assets = world.Resource<IAssetSource>();
-        var scene = assets.FindByPath(MainScene);
-        if (!assets.TryRead(scene, out var kind, out var bytes) || kind != AssetKind.Scene)
-            throw new InvalidOperationException($"{MainScene} is missing from the asset source.");
-        var loaded = Scene.LoadBinary(world, bytes.Span, w => Console.Error.WriteLine("[scene] " + w));
-        Console.WriteLine($"spinners: loaded {MainScene}: {loaded.Length} entities");
-
         // A 24 × 24 field of cubes (576 instances, one draw call).
         var rng = new Random(1234);
         const int n = 24;
@@ -113,6 +109,7 @@ public static class SpinnersApp
             .AddModule(new AssetsModule(assets))
             .AddModule<VulkanModule>()
             .AddModule(new RenderingModule(vsync: true))
+            .AddModule(new SceneBootModule(SpinnersModule.MainScene))
             .AddModule(new SpinnersModule(runFor))
             .Build();
 
