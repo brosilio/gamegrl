@@ -1,9 +1,8 @@
 using System.Numerics;
+using Gamegrl.Assets;
 
 namespace Gamegrl.Rendering;
 
-public readonly record struct MeshHandle(int Id);
-public readonly record struct TextureHandle(int Id);
 
 /// <summary>
 /// A 3D perspective camera; its pose comes from the entity's <see cref="LocalToWorld"/>. It renders N views:
@@ -36,7 +35,7 @@ public struct Camera : IComponent
 /// <summary>Draws a mesh at the entity's <see cref="LocalToWorld"/>.</summary>
 public struct MeshRenderer : IComponent
 {
-    public MeshHandle Mesh;
+    public AssetRef<MeshAsset> Mesh;
     public Vector4 Color;
 }
 
@@ -47,7 +46,7 @@ public struct MeshRenderer : IComponent
 /// </summary>
 public struct Sprite : IComponent
 {
-    public TextureHandle Texture;
+    public AssetRef<TextureAsset> Texture;
     public Vector2 Size;
     public Vector4 Color;
     /// <summary>The point rotation and position refer to, in 0..1 of the size (0.5, 0.5 = center).</summary>
@@ -55,7 +54,7 @@ public struct Sprite : IComponent
     /// <summary>u0, v0, u1, v1; (0, 0, 1, 1) is the whole texture.</summary>
     public Vector4 UvRect;
 
-    public static Sprite Of(TextureHandle texture, Vector2 size) =>
+    public static Sprite Of(AssetRef<TextureAsset> texture, Vector2 size) =>
         new() { Texture = texture, Size = size, Color = Vector4.One, Pivot = new Vector2(0.5f), UvRect = new Vector4(0, 0, 1, 1) };
 
     public Sprite Tinted(Vector4 color)
@@ -72,9 +71,9 @@ public struct ScreenSize
     public int Height;
 }
 
-/// <summary>A mesh vertex: position and normal.</summary>
-public struct MeshVertex(Vector3 position, Vector3 normal)
+/// <summary>Assets every renderer has without importing anything.</summary>
+public static class BuiltinAssets
 {
-    public Vector3 Position = position;
-    public Vector3 Normal = normal;
+    public static readonly AssetRef<MeshAsset> Cube = new(new Guid("6a1b3c00000000000000000000c0be01"));
+    public static readonly AssetRef<TextureAsset> White = new(new Guid("6a1b3c0000000000000000000ffffff1"));
 }

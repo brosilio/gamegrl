@@ -14,7 +14,8 @@ echo "== tests (NativeAOT)"
 dotnet publish tests/Gamegrl.Tests -c Release -o artifacts/tests-aot -nologo -v q
 ./artifacts/tests-aot/Gamegrl.Tests
 
-echo "== sample (NativeAOT)"
-dotnet publish samples/Spinners -c Release -o artifacts/spinners -nologo -v q
-ls -la artifacts/spinners/Spinners
+echo "== sample: NativeAOT player + packed assets"
+dotnet publish samples/Spinners/Player -c Release -o artifacts/spinners -nologo -v q
+dotnet run --project samples/Spinners/Build -c Release --no-build -- pack artifacts/spinners/spinners.ggpak
+ls -la artifacts/spinners/Spinners artifacts/spinners/spinners.ggpak
 echo "ok"

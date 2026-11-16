@@ -42,6 +42,10 @@ Started 2026-11-16.
 | 2026-11-16 | httpgrl libraries | Consumed by csproj project reference (no NuGet) | httpgrl is splitting out `Httpgrl.Quic` and `Httpgrl.Http3` |
 | 2026-11-16 | Platform order | Linux, then web, then Windows, then macOS | WebGPU is therefore the second RHI backend |
 | 2026-11-16 | Consoles | Deferred; code stays friendly to a future C#-to-C++ step | Revisit with devkit access |
+| 2026-11-16 | Serialized fields | Public instance fields serialize by default (the Unity convention); `[NoSerialize]` opts out | Private serialized fields can come later via `partial` |
+| 2026-11-16 | Component identity | Stable id = 64-bit FNV-1a of the full type name; runtime ids stay dense for archetype masks | Scenes, assets and packets use stable ids |
+| 2026-11-16 | Hierarchy | Intrusive parent/child links inside the world; destroying a parent destroys its subtree | No per-entity allocation |
+| 2026-11-16 | Prefabs | `.prefab` files use the scene format; instances store only differences; inner entities have path-derived ids; packing flattens prefabs | Players never expand prefabs |
 | 2026-11-16 | XR | VR as an optional `Gamegrl.XR` module on OpenXR; its constraints apply from milestone 1 | See XR |
 | 2026-11-16 | XR targets | PC VR (Linux first, via Monado or SteamVR) and Meta Quest (standalone Android) | Quest adds an Android target: NativeAOT `linux-bionic-arm64` |
 | 2026-11-16 | Web player | Feasible; kept possible by current design choices | See Web target |
@@ -395,6 +399,18 @@ Multiplayer, web and XR ship in milestones 5 to 7, but their constraints apply f
 
 ## Status
 
+**Milestone 2 (Data): done, 2026-11-16.** The NativeAOT player loads `Assets/main.scene` from a memory-mapped `spinners.ggpak`. The scene holds three instances of `tower.prefab` (which nests `speck.prefab`) with per-instance overrides, a glTF mesh and a PNG texture, all decoded by our own importers. `Spinners.Build run` runs the same game from the live asset database with file watching.
+
+| Area | What exists | Where |
+| --- | --- | --- |
+| Serialization | Generator-emitted field visitors per component, registered by module initializers that also register referenced assemblies. One visitor drives text, binary and later the Inspector. Supports primitives, vectors, quaternions, matrices, GUIDs, `FixedString64`, entity refs, `AssetRef<T>`, enums by name, nested structs. Diagnostics GG0101 to GG0103 | `src/Gamegrl.Generators/ComponentGenerator.cs`, `src/Gamegrl.Core/Serialization` |
+| Scenes | Text format (deterministic, one property per line, entities depth first) and a binary player format; entity references remapped through scene ids | `Scene.cs`, `SceneText.cs` |
+| Prefabs | Nested expansion, per-property overrides, added and removed components, deleted children, references remapped per instance; saving writes only differences | `SceneText.cs` |
+| Hierarchy | `SetParent`, ordered children, recursive destroy; parallel transform propagation by root | `World.cs`, `Transforms.cs` |
+| Assets (runtime) | Texture, mesh and scene artifact formats; `.ggpak` archive (memory-mapped, zero-copy reads); `IAssetSource` | `src/Gamegrl.Assets` |
+| Asset pipeline | `.meta` GUIDs and settings; SHA-256-keyed `Library/artifacts` cache; importers for PNG (every color type, bit depth, Adam7, CRC-checked), glTF 2.0 (.gltf/.glb, node transforms, generated normals), scenes and prefabs; packing; file watching with reimport and change events | `src/Gamegrl.AssetPipeline` |
+| Rendering | Meshes and sprites referenced by `AssetRef`, resolved by GUID on first use, re-uploaded on reimport; built-in cube and white texture | `src/Gamegrl.Rendering` |
+
 **Milestone 1 (Foundation): done, 2026-11-16.** The NativeAOT player (`samples/Spinners`, a 2.2 MB binary) renders 576 instanced, lit, spinning cubes plus 40 alpha-blended 2D sprites, all driven by generated systems. It runs at the display's refresh rate on an RX 6750 XT (RADV). `scripts/ci.sh` runs the tests under the JIT and as a NativeAOT binary.
 
 | Area | What exists | Where |
@@ -410,13 +426,17 @@ Multiplayer, web and XR ship in milestones 5 to 7, but their constraints apply f
 
 **Known gaps and temporary choices, to fix in later milestones:**
 - Shaders compile with `glslc` (GLSL) because Slang isn't installed yet. Slang remains the plan, for WGSL and the other targets.
-- Component ids are assigned in first-use order. Serialization and networking need stable ids (milestone 2).
-- No transform hierarchy yet (milestone 2). No action maps yet; input is raw device state (milestone 3).
+- No action maps yet; input is raw device state (milestone 3).
 - `IBehaviour` (batched per-entity behaviours) isn't generated yet.
 - Rendering is a single assembly; the split into 2D and 3D assemblies on a render graph comes later.
 - Vulkan memory is one allocation per resource; a sub-allocator is needed.
 - Vulkan validation layers aren't installed on the dev machine (`sudo apt install vulkan-validationlayers`). They're enabled automatically in Debug builds when present.
 - Command buffers are single-threaded, and the job system has no task graph yet: parallelism is within systems only.
+- Assets load synchronously on first use; streaming (async, budgeted) is milestone 4. Runtime hot reload of meshes and textures is wired to asset change events but only exercised by tests, not yet by hand.
+- Any prefab change invalidates every cached scene and prefab artifact (coarse dependency tracking).
+- glTF: one merged mesh per file, no materials, skinning, morph targets or sparse accessors. No JPEG or texture compression yet (BC and ASTC are needed for desktop and Quest).
+- Runtime-instantiated binary prefabs keep their source scene ids, so two instances share ids (fine at runtime; the editor will reassign them).
+- `Spinners.Build` stands in for the editor: it authors scenes in code until milestone 3.
 
 **httpgrl (2026-11-16):** M0 is committed (884640a). M1 (client endpoint, pluggable TLS) is done and green but uncommitted, awaiting the owner's go-ahead in that repo. Its public API: `QuicClientEndpoint`, an abstract `QuicTlsContext` provider (built-in OpenSSL `Server`/`Client`/`ClientWithoutVerification`), `QuicOpenSsl.UseLibraries`, `QuicClock`, `IQuicDispatcher`. Console note: ChaCha20 header protection still uses libcrypto, so a non-OpenSSL TLS provider should offer only AES-GCM suites.
 

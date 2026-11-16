@@ -15,6 +15,9 @@ public sealed unsafe class World : IDisposable
         public Archetype? Archetype; // null: reserved by a command buffer, not placed yet
         public int Row;
         public uint Generation;
+
+        // The hierarchy, as intrusive links between entity indices, stored +1 so that 0 means none.
+        public int Parent, FirstChild, LastChild, Next, Prev;
     }
 
     private Record[] _records = new Record[1024];
@@ -57,6 +60,7 @@ public sealed unsafe class World : IDisposable
         return e;
     }
 
+    /// <summary>Spawn an entity with 1 component, placed in its archetype in one step.</summary>
     public Entity Spawn<T1>(in T1 c1)
         where T1 : unmanaged, IComponent
     {
@@ -70,8 +74,10 @@ public sealed unsafe class World : IDisposable
         return e;
     }
 
+    /// <summary>Spawn an entity with 2 components, placed in its archetype in one step.</summary>
     public Entity Spawn<T1, T2>(in T1 c1, in T2 c2)
-        where T1 : unmanaged, IComponent where T2 : unmanaged, IComponent
+        where T1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
     {
         AssertNotIterating();
         var set = default(ComponentSet);
@@ -85,8 +91,11 @@ public sealed unsafe class World : IDisposable
         return e;
     }
 
+    /// <summary>Spawn an entity with 3 components, placed in its archetype in one step.</summary>
     public Entity Spawn<T1, T2, T3>(in T1 c1, in T2 c2, in T3 c3)
-        where T1 : unmanaged, IComponent where T2 : unmanaged, IComponent where T3 : unmanaged, IComponent
+        where T1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        where T3 : unmanaged, IComponent
     {
         AssertNotIterating();
         var set = default(ComponentSet);
@@ -102,9 +111,12 @@ public sealed unsafe class World : IDisposable
         return e;
     }
 
+    /// <summary>Spawn an entity with 4 components, placed in its archetype in one step.</summary>
     public Entity Spawn<T1, T2, T3, T4>(in T1 c1, in T2 c2, in T3 c3, in T4 c4)
-        where T1 : unmanaged, IComponent where T2 : unmanaged, IComponent
-        where T3 : unmanaged, IComponent where T4 : unmanaged, IComponent
+        where T1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        where T3 : unmanaged, IComponent
+        where T4 : unmanaged, IComponent
     {
         AssertNotIterating();
         var set = default(ComponentSet);
@@ -122,20 +134,229 @@ public sealed unsafe class World : IDisposable
         return e;
     }
 
+    /// <summary>Spawn an entity with 5 components, placed in its archetype in one step.</summary>
+    public Entity Spawn<T1, T2, T3, T4, T5>(in T1 c1, in T2 c2, in T3 c3, in T4 c4, in T5 c5)
+        where T1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        where T3 : unmanaged, IComponent
+        where T4 : unmanaged, IComponent
+        where T5 : unmanaged, IComponent
+    {
+        AssertNotIterating();
+        var set = default(ComponentSet);
+        set.Add(Component<T1>.Id);
+        set.Add(Component<T2>.Id);
+        set.Add(Component<T3>.Id);
+        set.Add(Component<T4>.Id);
+        set.Add(Component<T5>.Id);
+        var a = GetOrCreateArchetype(set);
+        var e = Allocate();
+        int row = Place(e, a);
+        Write(a, row, c1);
+        Write(a, row, c2);
+        Write(a, row, c3);
+        Write(a, row, c4);
+        Write(a, row, c5);
+        return e;
+    }
+
+    /// <summary>Spawn an entity with 6 components, placed in its archetype in one step.</summary>
+    public Entity Spawn<T1, T2, T3, T4, T5, T6>(in T1 c1, in T2 c2, in T3 c3, in T4 c4, in T5 c5, in T6 c6)
+        where T1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        where T3 : unmanaged, IComponent
+        where T4 : unmanaged, IComponent
+        where T5 : unmanaged, IComponent
+        where T6 : unmanaged, IComponent
+    {
+        AssertNotIterating();
+        var set = default(ComponentSet);
+        set.Add(Component<T1>.Id);
+        set.Add(Component<T2>.Id);
+        set.Add(Component<T3>.Id);
+        set.Add(Component<T4>.Id);
+        set.Add(Component<T5>.Id);
+        set.Add(Component<T6>.Id);
+        var a = GetOrCreateArchetype(set);
+        var e = Allocate();
+        int row = Place(e, a);
+        Write(a, row, c1);
+        Write(a, row, c2);
+        Write(a, row, c3);
+        Write(a, row, c4);
+        Write(a, row, c5);
+        Write(a, row, c6);
+        return e;
+    }
+
+    /// <summary>Spawn an entity with 7 components, placed in its archetype in one step.</summary>
+    public Entity Spawn<T1, T2, T3, T4, T5, T6, T7>(in T1 c1, in T2 c2, in T3 c3, in T4 c4, in T5 c5, in T6 c6, in T7 c7)
+        where T1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        where T3 : unmanaged, IComponent
+        where T4 : unmanaged, IComponent
+        where T5 : unmanaged, IComponent
+        where T6 : unmanaged, IComponent
+        where T7 : unmanaged, IComponent
+    {
+        AssertNotIterating();
+        var set = default(ComponentSet);
+        set.Add(Component<T1>.Id);
+        set.Add(Component<T2>.Id);
+        set.Add(Component<T3>.Id);
+        set.Add(Component<T4>.Id);
+        set.Add(Component<T5>.Id);
+        set.Add(Component<T6>.Id);
+        set.Add(Component<T7>.Id);
+        var a = GetOrCreateArchetype(set);
+        var e = Allocate();
+        int row = Place(e, a);
+        Write(a, row, c1);
+        Write(a, row, c2);
+        Write(a, row, c3);
+        Write(a, row, c4);
+        Write(a, row, c5);
+        Write(a, row, c6);
+        Write(a, row, c7);
+        return e;
+    }
+
+    /// <summary>Spawn an entity with 8 components, placed in its archetype in one step.</summary>
+    public Entity Spawn<T1, T2, T3, T4, T5, T6, T7, T8>(in T1 c1, in T2 c2, in T3 c3, in T4 c4, in T5 c5, in T6 c6, in T7 c7, in T8 c8)
+        where T1 : unmanaged, IComponent
+        where T2 : unmanaged, IComponent
+        where T3 : unmanaged, IComponent
+        where T4 : unmanaged, IComponent
+        where T5 : unmanaged, IComponent
+        where T6 : unmanaged, IComponent
+        where T7 : unmanaged, IComponent
+        where T8 : unmanaged, IComponent
+    {
+        AssertNotIterating();
+        var set = default(ComponentSet);
+        set.Add(Component<T1>.Id);
+        set.Add(Component<T2>.Id);
+        set.Add(Component<T3>.Id);
+        set.Add(Component<T4>.Id);
+        set.Add(Component<T5>.Id);
+        set.Add(Component<T6>.Id);
+        set.Add(Component<T7>.Id);
+        set.Add(Component<T8>.Id);
+        var a = GetOrCreateArchetype(set);
+        var e = Allocate();
+        int row = Place(e, a);
+        Write(a, row, c1);
+        Write(a, row, c2);
+        Write(a, row, c3);
+        Write(a, row, c4);
+        Write(a, row, c5);
+        Write(a, row, c6);
+        Write(a, row, c7);
+        Write(a, row, c8);
+        return e;
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public bool IsAlive(Entity e) =>
         e.Index < (uint)_recordCount && _records[e.Index].Generation == e.Generation && !e.IsNull;
 
+    /// <summary>Destroy <paramref name="e"/> and, depth first, all of its children.</summary>
     public void Destroy(Entity e)
     {
         AssertNotIterating();
         ref var r = ref RecordOf(e);
+        while (r.FirstChild != 0) Destroy(EntityAt(r.FirstChild - 1));
+        Detach((int)e.Index);
         if (r.Archetype is { } a) Unplace(a, r.Row);
         r.Archetype = null;
         r.Generation = r.Generation == uint.MaxValue ? 1 : r.Generation + 1;
         if (_freeCount == _free.Length) Array.Resize(ref _free, _free.Length * 2);
         _free[_freeCount++] = (int)e.Index;
         _alive--;
+    }
+
+    // ------------------------------------------------------------------ hierarchy
+
+    /// <summary>
+    /// Make <paramref name="child"/> the last child of <paramref name="parent"/>; pass default to make it a root.
+    /// Transforms propagate down the tree. Not allowed during iteration (use the command buffer).
+    /// </summary>
+    public void SetParent(Entity child, Entity parent)
+    {
+        AssertNotIterating();
+        RecordOf(child);
+        int c = (int)child.Index;
+        if (!parent.IsNull)
+        {
+            RecordOf(parent);
+            for (int p = (int)parent.Index; ; p = _records[p].Parent - 1)
+            {
+                if (p == c) throw new InvalidOperationException($"Parenting {child} to {parent} would make a cycle.");
+                if (_records[p].Parent == 0) break;
+            }
+        }
+        Detach(c);
+        if (parent.IsNull) return;
+        int pi = (int)parent.Index;
+        ref var pr = ref _records[pi];
+        ref var cr = ref _records[c];
+        cr.Parent = pi + 1;
+        cr.Prev = pr.LastChild;
+        if (pr.LastChild != 0) _records[pr.LastChild - 1].Next = c + 1;
+        else pr.FirstChild = c + 1;
+        pr.LastChild = c + 1;
+    }
+
+    /// <summary>The parent of <paramref name="e"/>, or default for a root.</summary>
+    public Entity GetParent(Entity e)
+    {
+        int p = RecordOf(e).Parent;
+        return p == 0 ? default : EntityAt(p - 1);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool HasParent(Entity e) => _records[e.Index].Parent != 0;
+
+    /// <summary>The children of <paramref name="e"/>, in order. Don't change the hierarchy while enumerating.</summary>
+    public ChildEnumerator Children(Entity e) => new(this, RecordOf(e).FirstChild);
+
+    public struct ChildEnumerator
+    {
+        private readonly World _world;
+        private int _next; // index + 1
+        private Entity _current;
+
+        internal ChildEnumerator(World world, int first)
+        {
+            _world = world;
+            _next = first;
+            _current = default;
+        }
+
+        public readonly Entity Current => _current;
+        public readonly ChildEnumerator GetEnumerator() => this;
+
+        public bool MoveNext()
+        {
+            if (_next == 0) return false;
+            _current = _world.EntityAt(_next - 1);
+            _next = _world._records[_next - 1].Next;
+            return true;
+        }
+    }
+
+    private Entity EntityAt(int index) => new((uint)index, _records[index].Generation);
+
+    private void Detach(int c)
+    {
+        ref var cr = ref _records[c];
+        if (cr.Parent == 0) return;
+        ref var pr = ref _records[cr.Parent - 1];
+        if (cr.Prev != 0) _records[cr.Prev - 1].Next = cr.Next;
+        else pr.FirstChild = cr.Next;
+        if (cr.Next != 0) _records[cr.Next - 1].Prev = cr.Prev;
+        else pr.LastChild = cr.Prev;
+        cr.Parent = cr.Next = cr.Prev = 0;
     }
 
     // ------------------------------------------------------------------ components
@@ -265,6 +486,14 @@ public sealed unsafe class World : IDisposable
         return e;
     }
 
+    /// <summary>Where <paramref name="e"/>'s components live (for serializers and tools that walk every component).</summary>
+    internal (Archetype Archetype, int Row) Locate(Entity e)
+    {
+        ref var r = ref RecordOf(e);
+        if (r.Archetype is null) PlaceReserved(e);
+        return (r.Archetype!, r.Row);
+    }
+
     internal void PlaceReserved(Entity e)
     {
         if (_records[e.Index].Archetype is null) Place(e, _empty);
@@ -281,6 +510,7 @@ public sealed unsafe class World : IDisposable
         }
         ref var r = ref _records[index];
         if (r.Generation == 0) r.Generation = 1;
+        r.Parent = r.FirstChild = r.LastChild = r.Next = r.Prev = 0;
         _alive++;
         return new Entity((uint)index, r.Generation);
     }

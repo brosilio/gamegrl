@@ -5,6 +5,7 @@ layout(set = 0, binding = 0) uniform Camera { mat4 viewProj; vec4 lightDir; vec4
 
 layout(location = 0) in vec3 inPos;
 layout(location = 1) in vec3 inNormal;
+layout(location = 7) in vec2 inUv; // unused until materials (milestone 3+)
 layout(location = 2) in vec4 m0;
 layout(location = 3) in vec4 m1;
 layout(location = 4) in vec4 m2;

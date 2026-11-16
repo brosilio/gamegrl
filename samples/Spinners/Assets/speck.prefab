@@ -1,0 +1,13 @@
+gamegrl scene 1
+
+entity ad9d034fa894c02b
+  Gamegrl.LocalToWorld
+  Gamegrl.LocalTransform
+    Position = 0 1.5 0
+    Rotation = 0 0 0 1
+    Scale = 0.5 0.5 0.5
+  Gamegrl.Name
+    Value = "Speck"
+  Gamegrl.Rendering.MeshRenderer
+    Mesh = asset:ef9f366098fe4ef183ed8ea12463035e
+    Color = 1 1 1 1

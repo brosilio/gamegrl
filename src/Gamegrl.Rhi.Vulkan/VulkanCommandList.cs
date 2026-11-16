@@ -5,6 +5,7 @@ internal sealed unsafe class VulkanCommandList : CommandList
     public nint Cmd;
     private ulong _layout;
     private int _targetWidth, _targetHeight;
+    private VulkanTexture? _passColor, _passDepth;
 
     public override void BeginRenderPass(in RenderPassDesc desc)
     {
@@ -50,11 +51,23 @@ internal sealed unsafe class VulkanCommandList : CommandList
 
         _targetWidth = color.Width;
         _targetHeight = color.Height;
+        _passColor = color;
+        _passDepth = depth;
         SetViewport(0, 0, color.Width, color.Height);
         SetScissor(0, 0, color.Width, color.Height);
     }
 
-    public override void EndRenderPass() => Vk.CmdEndRendering(Cmd);
+    /// <summary>
+    /// Ends the pass. Attachments that can also be sampled move to the shader-read layout, so a texture rendered
+    /// here can be drawn by a later pass (the editor's Scene and Game views) without explicit barriers.
+    /// </summary>
+    public override void EndRenderPass()
+    {
+        Vk.CmdEndRendering(Cmd);
+        if (_passColor is { } c && (c.Usage & TextureUsage.Sampled) != 0) Barriers.Transition(Cmd, c, VkConst.ImageLayoutShaderReadOnly);
+        if (_passDepth is { } d && (d.Usage & TextureUsage.Sampled) != 0) Barriers.Transition(Cmd, d, VkConst.ImageLayoutShaderReadOnly);
+        _passColor = _passDepth = null;
+    }
 
     public override void SetPipeline(GraphicsPipeline pipeline)
     {

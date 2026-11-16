@@ -1,4 +1,5 @@
 using System.Numerics;
+using Gamegrl.Assets;
 using Gamegrl.Platform;
 using Gamegrl.Rhi;
 
@@ -16,29 +17,29 @@ public sealed class RenderingModule(bool vsync = true) : IModule
         builder.AddModule<CoreModule>();
         var device = builder.World.Resource<GpuDevice>();
         var window = builder.World.Resource<PlatformContext>().MainWindow;
-        var ctx = new RenderContext(device, window, vsync);
+        var assets = builder.World.HasResource<IAssetSource>() ? builder.World.Resource<IAssetSource>() : null;
+        var ctx = new RenderContext(device, window, vsync, assets);
         ctx.SpriteTextureLayout = device.CreateBindGroupLayout(
         [
             new BindingLayout(0, BindingType.SampledTexture, ShaderStages.Fragment),
             new BindingLayout(1, BindingType.Sampler, ShaderStages.Fragment),
         ]);
         ctx.SpriteSampler = device.CreateSampler(new SamplerDesc(Filter.Linear, AddressMode.ClampToEdge));
+        ctx.Register(BuiltinAssets.Cube, Primitives.Cube());
+        ctx.Register(BuiltinAssets.White, new TextureData(1, 1, [255, 255, 255, 255]));
+        ctx.Scene = new SceneRenderer(ctx);
         builder.SetResource(ctx);
         builder.SetResource(new ScreenSize { Width = ctx.Swapchain.Width, Height = ctx.Swapchain.Height });
 
-        var meshes = new MeshRendererSystem();
-        var sprites = new SpriteRendererSystem();
         builder.AddSystem(new BeginFrameSystem());
-        builder.AddSystem(meshes);
-        builder.AddSystem(sprites);
+        builder.AddSystem(new MainCameraSystem());
         builder.AddSystem(new EndFrameSystem());
         Gamegrl.Generated.GamegrlRenderingSystems.AddTo(builder.Schedule);
 
         builder.OnStop(_ =>
         {
             device.WaitIdle();
-            meshes.Dispose();
-            sprites.Dispose();
+            ctx.Scene.Dispose();
             ctx.SpriteSampler.Dispose();
             ctx.SpriteTextureLayout.Dispose();
             ctx.Dispose();
@@ -50,20 +51,20 @@ public sealed class RenderingModule(bool vsync = true) : IModule
 public static class Primitives
 {
     /// <summary>A unit cube centered on the origin: 24 vertices (flat normals), 36 indices, counter-clockwise outward.</summary>
-    public static (MeshVertex[] Vertices, ushort[] Indices) Cube()
+    public static MeshData Cube()
     {
-        var v = new List<MeshVertex>(24);
-        var i = new List<ushort>(36);
+        var v = new List<Vertex>(24);
+        var i = new List<uint>(36);
         void Face(Vector3 n, Vector3 u, Vector3 w)
         {
             // u × w = n, so (−u−w, u−w, u+w, −u+w) is counter-clockwise seen from outside.
-            ushort b = (ushort)v.Count;
+            uint b = (uint)v.Count;
             Vector3 c = n * 0.5f;
-            v.Add(new MeshVertex(c - u * 0.5f - w * 0.5f, n));
-            v.Add(new MeshVertex(c + u * 0.5f - w * 0.5f, n));
-            v.Add(new MeshVertex(c + u * 0.5f + w * 0.5f, n));
-            v.Add(new MeshVertex(c - u * 0.5f + w * 0.5f, n));
-            i.AddRange([b, (ushort)(b + 1), (ushort)(b + 2), b, (ushort)(b + 2), (ushort)(b + 3)]);
+            v.Add(new Vertex(c - u * 0.5f - w * 0.5f, n, new Vector2(0, 1)));
+            v.Add(new Vertex(c + u * 0.5f - w * 0.5f, n, new Vector2(1, 1)));
+            v.Add(new Vertex(c + u * 0.5f + w * 0.5f, n, new Vector2(1, 0)));
+            v.Add(new Vertex(c - u * 0.5f + w * 0.5f, n, new Vector2(0, 0)));
+            i.AddRange([b, b + 1, b + 2, b, b + 2, b + 3]);
         }
         Face(Vector3.UnitX, Vector3.UnitY, Vector3.UnitZ);
         Face(-Vector3.UnitX, Vector3.UnitZ, Vector3.UnitY);
@@ -71,6 +72,6 @@ public static class Primitives
         Face(-Vector3.UnitY, Vector3.UnitX, Vector3.UnitZ);
         Face(Vector3.UnitZ, Vector3.UnitX, Vector3.UnitY);
         Face(-Vector3.UnitZ, Vector3.UnitY, Vector3.UnitX);
-        return (v.ToArray(), i.ToArray());
+        return new MeshData(v.ToArray(), i.ToArray());
     }
 }

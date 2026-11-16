@@ -39,7 +39,17 @@ public interface IPlatform : IDisposable
 
     /// <summary>The OS asked the app to quit (last window closed, SIGTERM, ...).</summary>
     bool QuitRequested { get; }
+
+    /// <summary>The system clipboard's text (empty if none).</summary>
+    string GetClipboardText();
+
+    void SetClipboardText(string text);
+
+    /// <summary>The mouse cursor shape (editors change it over splitters and text fields).</summary>
+    void SetCursor(CursorShape shape);
 }
+
+public enum CursorShape { Arrow, Text, ResizeHorizontal, ResizeVertical, Hand, Move }
 
 /// <summary>The platform and main window, as a world resource.</summary>
 public sealed class PlatformContext(IPlatform platform, IWindow mainWindow)

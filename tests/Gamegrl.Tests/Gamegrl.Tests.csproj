@@ -6,5 +6,9 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Gamegrl.Core/Gamegrl.Core.csproj" />
     <ProjectReference Include="../../src/Gamegrl.Rhi.Vulkan/Gamegrl.Rhi.Vulkan.csproj" />
+    <ProjectReference Include="../../src/Gamegrl.AssetPipeline/Gamegrl.AssetPipeline.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Data/**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

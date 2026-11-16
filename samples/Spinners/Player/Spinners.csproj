@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The shipping player: NativeAOT, loads spinners.ggpak from beside the executable. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Game/Spinners.Game.csproj" />
+  </ItemGroup>
+</Project>

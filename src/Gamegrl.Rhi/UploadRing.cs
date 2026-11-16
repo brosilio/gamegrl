@@ -1,10 +1,8 @@
-using Gamegrl.Rhi;
-
-namespace Gamegrl.Rendering;
+namespace Gamegrl.Rhi;
 
 /// <summary>
-/// A persistently mapped buffer split into one region per frame in flight. Per-frame data (camera constants,
-/// instance arrays) is bump-allocated into the current frame's region; the region is reused only after the GPU
+/// A persistently mapped buffer split into one region per frame in flight. Per-frame data (constants, instance
+/// arrays, UI vertices) is bump-allocated into the current frame's region; a region is reused only after the GPU
 /// has finished that frame, so there are no per-frame allocations and no stalls.
 /// </summary>
 public sealed unsafe class UploadRing : IDisposable
@@ -12,11 +10,11 @@ public sealed unsafe class UploadRing : IDisposable
     private readonly long _regionSize;
     private long _regionStart, _cursor;
 
-    public UploadRing(GpuDevice device, long bytesPerFrame)
+    public UploadRing(GpuDevice device, long bytesPerFrame, string name = "upload ring")
     {
         _regionSize = bytesPerFrame;
         Buffer = device.CreateBuffer(new BufferDesc(bytesPerFrame * GpuDevice.FramesInFlight,
-            BufferUsage.Vertex | BufferUsage.Index | BufferUsage.Uniform | BufferUsage.Storage, MemoryKind.Upload, "upload ring"));
+            BufferUsage.Vertex | BufferUsage.Index | BufferUsage.Uniform | BufferUsage.Storage, MemoryKind.Upload, name));
     }
 
     public GpuBuffer Buffer { get; }

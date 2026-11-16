@@ -25,12 +25,46 @@ public sealed unsafe class Sdl3Platform : IPlatform
         nint handle;
         fixed (byte* title = Utf8(desc.Title)) handle = Sdl.CreateWindow(title, desc.Width, desc.Height, flags);
         if (handle == 0) throw new InvalidOperationException("SDL_CreateWindow failed: " + Sdl.Error());
+        Sdl.StartTextInput(handle); // SDL3 delivers text events only when asked
         var w = new Sdl3Window(this, handle);
         _windows.Add(w);
         return w;
     }
 
     internal void Forget(Sdl3Window w) => _windows.Remove(w);
+
+    public string GetClipboardText()
+    {
+        nint p = Sdl.GetClipboardText();
+        if (p == 0) return "";
+        string s = Marshal.PtrToStringUTF8(p) ?? "";
+        Sdl.Free(p);
+        return s;
+    }
+
+    public void SetClipboardText(string text)
+    {
+        fixed (byte* t = Utf8(text)) Sdl.SetClipboardText(t);
+    }
+
+    private readonly Dictionary<CursorShape, nint> _cursors = new();
+    private CursorShape _cursor = CursorShape.Arrow;
+
+    public void SetCursor(CursorShape shape)
+    {
+        if (shape == _cursor) return;
+        _cursor = shape;
+        if (!_cursors.TryGetValue(shape, out var c))
+        {
+            int id = shape switch
+            {
+                CursorShape.Text => 1, CursorShape.ResizeHorizontal => 7, CursorShape.ResizeVertical => 8,
+                CursorShape.Move => 9, CursorShape.Hand => 11, _ => 0,
+            };
+            _cursors[shape] = c = Sdl.CreateSystemCursor(id);
+        }
+        if (c != 0) Sdl.SetCursor(c);
+    }
 
     public void PumpEvents(Input input)
     {
@@ -45,6 +79,12 @@ public sealed unsafe class Sdl3Platform : IPlatform
                 case Sdl.EventWindowCloseRequested:
                     Find(e.Window.WindowId)?.OnClose();
                     break;
+                case Sdl.EventWindowFocusLost:
+                    input.ReleaseAll();
+                    break;
+                case Sdl.EventTextInput:
+                    if (e.Text.Text != 0) input.OnText(Marshal.PtrToStringUTF8(e.Text.Text) ?? "");
+                    break;
                 case Sdl.EventWindowMinimized:
                     Find(e.Window.WindowId)?.SetMinimized(true);
                     break;
@@ -58,8 +98,12 @@ public sealed unsafe class Sdl3Platform : IPlatform
                     input.OnKey((int)e.Key.Scancode, e.Key.Down != 0, e.Key.Repeat != 0); // SDL scancodes are USB HID usages
                     break;
                 case Sdl.EventMouseMotion:
-                    input.OnMouseMove(new Vector2(e.Motion.X, e.Motion.Y), new Vector2(e.Motion.XRel, e.Motion.YRel));
+                {
+                    // SDL reports points; everything in the engine works in pixels (HiDPI-correct).
+                    float density = Find(e.Motion.WindowId)?.Density ?? 1;
+                    input.OnMouseMove(new Vector2(e.Motion.X, e.Motion.Y) * density, new Vector2(e.Motion.XRel, e.Motion.YRel) * density);
                     break;
+                }
                 case Sdl.EventMouseButtonDown:
                 case Sdl.EventMouseButtonUp:
                     input.OnMouseButton(e.Button.Button - 1, e.Button.Down != 0); // SDL buttons are 1-based
@@ -112,6 +156,16 @@ internal sealed unsafe class Sdl3Window : IWindow
 
     internal void OnClose() => CloseRequested = true;
     internal void SetMinimized(bool m) => Minimized = m;
+
+    /// <summary>Pixels per point (2 on a typical HiDPI display).</summary>
+    public float Density
+    {
+        get
+        {
+            float d = Sdl.GetWindowPixelDensity(_handle);
+            return d > 0 ? d : 1;
+        }
+    }
 
     public (int Width, int Height) PixelSize
     {

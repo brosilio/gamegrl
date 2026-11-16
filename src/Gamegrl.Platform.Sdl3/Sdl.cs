@@ -12,8 +12,8 @@ internal static unsafe partial class Sdl
 
     public const uint EventQuit = 0x100;
     public const uint EventWindowShown = 0x202, EventWindowMinimized = 0x209, EventWindowMaximized = 0x20A,
-        EventWindowRestored = 0x20B, EventWindowCloseRequested = 0x210;
-    public const uint EventKeyDown = 0x300, EventKeyUp = 0x301;
+        EventWindowRestored = 0x20B, EventWindowFocusLost = 0x20F, EventWindowCloseRequested = 0x210;
+    public const uint EventKeyDown = 0x300, EventKeyUp = 0x301, EventTextInput = 0x303;
     public const uint EventMouseMotion = 0x400, EventMouseButtonDown = 0x401, EventMouseButtonUp = 0x402, EventMouseWheel = 0x403;
 
     private static bool _loaded;
@@ -64,6 +64,30 @@ internal static unsafe partial class Sdl
     [return: MarshalAs(UnmanagedType.U1)]
     public static partial bool PollEvent(SdlEvent* e);
 
+    [LibraryImport(Lib, EntryPoint = "SDL_StartTextInput")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static partial bool StartTextInput(nint window);
+
+    [LibraryImport(Lib, EntryPoint = "SDL_GetWindowPixelDensity")]
+    public static partial float GetWindowPixelDensity(nint window);
+
+    [LibraryImport(Lib, EntryPoint = "SDL_GetClipboardText")]
+    public static partial nint GetClipboardText();
+
+    [LibraryImport(Lib, EntryPoint = "SDL_SetClipboardText")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static partial bool SetClipboardText(byte* text);
+
+    [LibraryImport(Lib, EntryPoint = "SDL_free")]
+    public static partial void Free(nint memory);
+
+    [LibraryImport(Lib, EntryPoint = "SDL_CreateSystemCursor")]
+    public static partial nint CreateSystemCursor(int id);
+
+    [LibraryImport(Lib, EntryPoint = "SDL_SetCursor")]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static partial bool SetCursor(nint cursor);
+
     [LibraryImport(Lib, EntryPoint = "SDL_Vulkan_GetInstanceExtensions")]
     public static partial byte** VulkanGetInstanceExtensions(uint* count);
 
@@ -82,6 +106,16 @@ internal struct SdlEvent
     [FieldOffset(0)] public SdlMouseMotionEvent Motion;
     [FieldOffset(0)] public SdlMouseButtonEvent Button;
     [FieldOffset(0)] public SdlMouseWheelEvent Wheel;
+    [FieldOffset(0)] public SdlTextInputEvent Text;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct SdlTextInputEvent
+{
+    public uint Type, Reserved;
+    public ulong Timestamp;
+    public uint WindowId;
+    public nint Text; // const char*, valid until the next poll
 }
 
 [StructLayout(LayoutKind.Sequential)]

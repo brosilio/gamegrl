@@ -9,8 +9,9 @@ Needs the .NET 10 SDK, SDL3, a Vulkan 1.3 driver and `glslc` (shaderc).
 
 ```sh
 ./scripts/ci.sh                                   # build, test (JIT + NativeAOT), publish the sample
-dotnet run --project samples/Spinners             # run the sample under the JIT
-./artifacts/spinners/Spinners                     # or the NativeAOT build from ci.sh
+dotnet run --project samples/Spinners/Build -- run      # dev: run from the asset database, edits hot-reload
+dotnet run --project samples/Spinners/Build -- author   # regenerate the sample's prefabs and main.scene
+./artifacts/spinners/Spinners                           # the NativeAOT player + spinners.ggpak from ci.sh
 ```
 
 Escape quits the sample.
@@ -20,9 +21,11 @@ Escape quits the sample.
 | Path | What |
 | --- | --- |
 | `src/Gamegrl.Core` | Entities, systems, jobs, the app loop, transforms |
-| `src/Gamegrl.Generators` | Roslyn source generator: `[System]` methods into loops and registration |
+| `src/Gamegrl.Generators` | Roslyn source generators: `[System]` loops and registration, component serializers |
 | `src/Gamegrl.Platform`, `.Sdl3` | Windows and input behind `IPlatform`; the SDL3 backend |
 | `src/Gamegrl.Rhi`, `.Vulkan` | The render hardware interface; the Vulkan 1.3 backend |
 | `src/Gamegrl.Rendering` | 3D mesh and 2D sprite renderers |
+| `src/Gamegrl.Assets` | Runtime asset formats, the `.ggpak` archive, `IAssetSource` |
+| `src/Gamegrl.AssetPipeline` | Editor-only: `.meta` files, importers (PNG, glTF, scenes, prefabs), cache, packing, watching |
 | `tests/Gamegrl.Tests` | Dependency-free tests, also run as a NativeAOT binary |
-| `samples/Spinners` | Milestone 1 sample |
+| `samples/Spinners` | `Game` (library), `Player` (NativeAOT), `Build` (dev tool), `Assets/` |

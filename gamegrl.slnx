@@ -7,11 +7,15 @@
     <Project Path="src/Gamegrl.Rhi/Gamegrl.Rhi.csproj" />
     <Project Path="src/Gamegrl.Rhi.Vulkan/Gamegrl.Rhi.Vulkan.csproj" />
     <Project Path="src/Gamegrl.Rendering/Gamegrl.Rendering.csproj" />
+    <Project Path="src/Gamegrl.Assets/Gamegrl.Assets.csproj" />
+    <Project Path="src/Gamegrl.AssetPipeline/Gamegrl.AssetPipeline.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Gamegrl.Tests/Gamegrl.Tests.csproj" />
   </Folder>
   <Folder Name="/samples/">
-    <Project Path="samples/Spinners/Spinners.csproj" />
+    <Project Path="samples/Spinners/Game/Spinners.Game.csproj" />
+    <Project Path="samples/Spinners/Player/Spinners.csproj" />
+    <Project Path="samples/Spinners/Build/Spinners.Build.csproj" />
   </Folder>
 </Solution>

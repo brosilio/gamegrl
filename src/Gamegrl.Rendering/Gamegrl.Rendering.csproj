@@ -2,6 +2,7 @@
   <ItemGroup>
     <ProjectReference Include="../Gamegrl.Rhi/Gamegrl.Rhi.csproj" />
     <ProjectReference Include="../Gamegrl.Platform/Gamegrl.Platform.csproj" />
+    <ProjectReference Include="../Gamegrl.Assets/Gamegrl.Assets.csproj" />
   </ItemGroup>
 
   <!--

@@ -9,7 +9,7 @@ namespace Gamegrl;
 /// </summary>
 public sealed unsafe class CommandBuffer
 {
-    private enum Op : byte { Spawn, Destroy, Add, Remove }
+    private enum Op : byte { Spawn, Destroy, Add, Remove, SetParent }
 
     private readonly World _world;
     private byte[] _buffer = new byte[4096];
@@ -37,6 +37,12 @@ public sealed unsafe class CommandBuffer
 
     public void Remove<T>(Entity e) where T : unmanaged, IComponent => Header(Op.Remove, e, Component<T>.Id, 0);
 
+    public void SetParent(Entity child, Entity parent)
+    {
+        int at = Header(Op.SetParent, child, 0, 8);
+        Unsafe.WriteUnaligned(ref _buffer[at], parent);
+    }
+
     /// <summary>Apply every recorded command in order, then clear. Commands on dead entities are skipped.</summary>
     public void Playback()
     {
@@ -58,6 +64,10 @@ public sealed unsafe class CommandBuffer
                         fixed (byte* data = &_buffer[p]) _world.AddRaw(e, component, data);
                         break;
                     case Op.Remove: _world.RemoveRaw(e, component); break;
+                    case Op.SetParent:
+                        var parent = Unsafe.ReadUnaligned<Entity>(ref _buffer[p]);
+                        if (parent.IsNull || _world.IsAlive(parent)) _world.SetParent(e, parent);
+                        break;
                 }
             }
             p += size;

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Development tool (JIT): author the scene, pack assets, run from the asset database with hot reload. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Game/Spinners.Game.csproj" />
+    <ProjectReference Include="../../../src/Gamegrl.AssetPipeline/Gamegrl.AssetPipeline.csproj" />
+  </ItemGroup>
+</Project>
