@@ -21,11 +21,16 @@ Escape quits the sample.
 The desktop editor uses DejaVu Sans Mono on Linux; set `GAMEGRL_FONT` to another TrueType font path if needed.
 Right-drag orbits the Scene camera, middle-drag pans, the wheel zooms, and F frames the selection.
 Click a mesh to select it; drag its colored axis handles to move it. Project prefab rows instantiate prefabs.
-Ctrl+N creates a scene, Ctrl+S saves, Ctrl+Shift+S saves under a new path, Ctrl+Z/Ctrl+Shift+Z undo/redo,
-and F5 enters or stops play mode. Pause/Resume freezes play systems; a game system that throws pauses play and logs its
-stack trace instead of closing the editor. New/Open/Close offer Save, Discard and Cancel for unsaved edits. Build and import progress
-appears in Tasks; failures appear in Console. Resize panel regions with splitters, or drag tabs between regions and reorder them. Scroll a crowded tab
-strip with the mouse wheel. Menu includes a layout reset command.
+Ctrl+P opens the command palette: type part of a command name, choose with the arrows, Enter runs it. Every editor
+action is there, with its shortcut. Ctrl+N creates a scene, Ctrl+S saves, Ctrl+Shift+S saves under a new path,
+Ctrl+Z/Ctrl+Shift+Z undo/redo, Del deletes the selection, Ctrl+B hides the sidebar, F5 enters or stops play mode and
+F6 pauses it. A game system that throws pauses play and logs its stack trace instead of closing the editor.
+New/Open/Close offer Save, Discard and Cancel for unsaved edits.
+
+The top line shows the scene (a pink dot means unsaved), play controls and background work. Hierarchy and Project
+are collapsible sections in the sidebar; click a header to fold it. The other panels are boxed panes with their tabs in
+the top border. Drag any border to resize, drag tabs or section headers between regions, and scroll a crowded tab strip
+with the mouse wheel. Build and import progress appears in Tasks; Console filters by level.
 Inspector fields support `[Header("Section")]`, `[Tooltip("Help text")]` and numeric `[Range(0, 720)]`
 attributes. These are generated without reflection; ranges constrain edits while preserving loaded values.
 Add component uses a component's public static `Default` (field or property) when it declares one, else `new T()`.
@@ -52,10 +57,10 @@ dotnet run --project tests/Gamegrl.Editor.Tests -- --graphics # optional desktop
 | `samples/Spinners` | `Game` (library), `Player` (NativeAOT), `Build` (dev tool), `Assets/` |
 
 Editor-only extensions implement `IEditorExtension.Register(EditorRegistry)`. Register panels with
-`AddPanel`, commands with `AddMenu`, and component Inspectors with `AddDrawer<T>`. Use
+`AddPanel`, command palette entries with `AddCommand`, and component Inspectors with `AddDrawer<T>`. Use
 `EditorContext.Edit` for undoable structural changes, `Document.BeginEntityEdit(entity)` before editing one
 entity's component values (it records only the bytes that change), and `EditorContext.Jobs` for background work.
-A panel, drawer or menu command that throws is logged once and replaced by an inline error. Keep the extension
+A panel, drawer or command that throws is logged once and replaced by an inline error. Keep the extension
 in a separate JIT assembly referencing `Gamegrl.Editor`, then pass `--extension path/to/extension.dll`.
 It loads and unloads with game code, sharing game component identities. Build the extension assembly
 before launching or reloading it; player projects do not reference editor extensions.
@@ -85,7 +90,7 @@ display server is not; a software Vulkan driver also works.
 Tab or arrow keys move focus, Enter/Space activate controls, Escape cancels fields/dialogs, and mouse reporting
 supports selection, scrolling, docking and splitters. Ctrl+Q requests a clean close. Classic terminal key events
 are pulses; desktop mode retains precise held-key gameplay. Unsaved scenes on terminal EOF or Unix hangup go to
-`Library/recovery` and can be reopened with Menu / File / Recover disconnected scene. Terminal clipboard
+`Library/recovery` and can be reopened with the "File: Recover disconnected scene" command. Terminal clipboard
 copy/paste uses an internal session buffer plus bracketed paste; it does not read the operator's OS clipboard.
 
 `EditorContext.Ui` is now `CellUi`; extension rectangles and widget sizes are character cells. Fonts and ANSI

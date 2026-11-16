@@ -60,6 +60,9 @@ Started 2026-11-16.
 | 2026-11-16 | Text edit commit | A click outside an active field is held for one frame while the field commits, then delivered | Whatever the click changes sees the committed value |
 | 2026-11-16 | Held scenes | If game code and its rollback both fail to load, the scene is held as verbatim text until code loads | Saves write the held text; edits are blocked |
 | 2026-11-16 | Component defaults | Generated `IComponentSerializer.Reset` writes a component's public static `Default`, else `new T()` | Used by Add component; no editor special cases |
+| 2026-11-16 | Editor layout | Not Unity's layout. Lines and glyphs instead of filled blocks: an unboxed sidebar of stacked sections, boxed panes edge to edge with tabs in their top border, borders as splitters, one top line instead of toolbar, menu and status bar | Learned from herdr's terminal UI. Fewer bytes per frame over a terminal and more rows for content |
+| 2026-11-16 | Editor commands | A Ctrl+P command palette over `EditorRegistry.AddCommand` entries (with optional shortcut text) replaces menus | Built-ins and extensions register the same way; selection actions live here instead of in panels |
+| 2026-11-16 | Cell theme | `CellTheme` semantic tokens: one background, raised, selection, border, dim, text, a single `#ff5fa2` accent, warning, error and axis colors | Tokens are chosen to stay distinct at 256 and 16 colors; selected text also takes the accent so selection survives without background color |
 | 2026-11-16 | Editor UI allocation | Steady-state editor frames allocate nothing | Enforced by a test; caches rebuild on registry, catalog, log or code-generation changes |
 
 ## Object model
@@ -336,7 +339,7 @@ The asset workflow follows Unity: an `Assets/` folder, `.meta` sidecars with GUI
 
 The editor is the engine plus editor services and a shared AnsiDotNet cell interface. The desktop host draws glyph cells on the engine renderer and composites full-resolution Scene/Game textures into grid-aligned rectangles. The terminal host uses ANSI/VT output with headless Vulkan viewports converted to colored cells.
 
-- **Panels:** Scene view, Game view, Hierarchy, Inspector, Project browser and Console, in Unity 5's layout with dockable tabs.
+- **Panels:** Scene view, Game view, Hierarchy, Inspector, Project browser, Console and Tasks with dockable tabs. The layout is our own, drawn with lines rather than filled blocks: Hierarchy and Project stack as collapsible sections in an unboxed sidebar; the other regions are boxed panes with tabs in their top border; borders double as splitters; a single top line shows the scene, play controls and background work; Ctrl+P opens a command palette.
 - **Never blocks:** the UI thread only handles input, layout and drawing.
     - Imports, asset builds, script compiles, bakes and player builds run as cancellable background jobs that report progress to a task panel.
     - Panels show placeholders or stale data until results land.
@@ -346,8 +349,8 @@ The editor is the engine plus editor services and a shared AnsiDotNet cell inter
 - **Play mode:** snapshot the world, run it, then restore the snapshot on stop. This is fast because of contiguous storage. Multiplayer play mode can run host and clients side by side.
 - **Hot reload:** game code recompiles into a new collectible `AssemblyLoadContext`, and world state survives through serialization.
 - **Undo:** every edit goes through `SceneDocument`. Value edits (Inspector fields, gizmo drags) record only the changed component bytes of one entity; structural edits record whole-scene text splices. History is strictly LIFO and each entry verifies its target before applying.
-- **Fault isolation:** game systems, extension panels, drawers and menu commands can throw without closing the editor. Play pauses on a system fault so its state stays inspectable.
-- **Extensibility:** modules add panels, gizmos, importers, menu items and Inspector drawers through the same registration API the built-in tools use.
+- **Fault isolation:** game systems, extension panels, drawers and commands can throw without closing the editor. Play pauses on a system fault so its state stays inspectable.
+- **Extensibility:** modules add panels, gizmos, importers, palette commands and Inspector drawers through the same registration API the built-in tools use.
 
 ## Web target
 
@@ -419,7 +422,9 @@ The editor (`src/Gamegrl.Editor`) is a JIT host that takes a project root and a 
 | Area | What exists |
 | --- | --- |
 | Hosts | Desktop: monospace glyph atlas, cell styles, full-resolution Scene/Game textures aligned to cells. Terminal (`--terminal` over a TTY, `--stdio` over streams): no SDL, font or display server; headless Vulkan renders two pixels per cell and nonblocking readbacks feed `▀` previews. A bounded latest-frame writer isolates slow terminals. `--colors` and `--ascii` select fallback profiles. Classic terminals deliver key pulses only (no releases); held-key gameplay needs the desktop host |
-| Panels and docking | Hierarchy, generated-field Inspector, Scene and Game tabs, Project, Console, Tasks. Tabs move and reorder among four resizable dock regions; wheel scrolls crowded tab strips. Layouts last for the session |
+| Panels and docking | Hierarchy, generated-field Inspector, Scene and Game tabs, Project, Console (level filters with counts), Tasks. The sidebar stacks its panels as collapsible sections; the other regions are boxed panes with tabs and panel status in the top border and an accent border while focused. Tabs move and reorder among the four regions; borders are the splitters; Ctrl+B hides the sidebar. Layouts last for the session |
+| Commands | One top line (scene, unsaved dot, play/pause, warnings, background work) and a Ctrl+P palette over every registered command, filtered by subsequence, with shortcut hints |
+| Look | `CellTheme` tokens with a single pink accent; `[ bracket ]` buttons, status-dot toggles, foldout component headers; slim scrollbars on the border beside each scroll view (half-row thumb, draggable) |
 | Scene editing | Create entities, cubes, cameras and sprites; add/remove components (defaults from generated `Reset`); assign assets from a picker; instantiate prefabs from Project. Orbit/pan/zoom camera, mesh picking, framing, world-axis move gizmo with parent-space conversion |
 | Undo | `SceneDocument`: per-entity component-byte entries for value edits, whole-scene text splices for structural edits, dirty tracked by history position. Play snapshots the edit scene and time; Stop restores them and the selection |
 | Inspector metadata | `[Header]`, `[Tooltip]` and numeric `[Range]` compile into `IFieldVisitor.Metadata` calls. Ranges constrain edits, never loading. GG0104 rejects invalid ranges |
@@ -427,15 +432,15 @@ The editor (`src/Gamegrl.Editor`) is a JIT host that takes a project root and a 
 | Jobs and builds | Imports, reads, saves and game builds run as cancellable worker jobs whose results apply between frames. Source changes trigger debounced builds into marked, leased session directories; outputs stay available for rollback and retire on background workers |
 | Hot reload | Collectible game assemblies share the host's engine assemblies. Reload preserves serialized entity state and selection and resets undo across schema changes. A failed build or load rolls back to the previous assembly with history intact; if that also fails, the scene is held as text until code loads |
 | Play | Startup runs only on entering play. Pause/Resume; a throwing system pauses play and logs its stack trace. Resources: unmanaged values checkpoint automatically; mutable ones need a clone delegate or fresh-play factory. Game-view input activates on click; `ActionMap` provides rebindable keyboard/mouse bindings |
-| Extensions | `IEditorExtension` registers panels, menu commands and typed component drawers through `EditorRegistry`, the same path as built-ins. Extensions load with game code (`--extension path.dll`) and unregister in reverse order on reload. Failures render inline instead of closing the editor |
-| Recovery | On terminal EOF or hangup, dirty scenes are copied to `Library/recovery`; File / Recover disconnected scene reopens the newest copy |
+| Extensions | `IEditorExtension` registers panels, palette commands and typed component drawers through `EditorRegistry`, the same path as built-ins. Extensions load with game code (`--extension path.dll`) and unregister in reverse order on reload. Failures render inline instead of closing the editor |
+| Recovery | On terminal EOF or hangup, dirty scenes are copied to `Library/recovery`; the "File: Recover disconnected scene" command reopens the newest copy |
 | Efficiency | Steady-state frames allocate nothing (tested). Clicks and drags never serialize the scene |
 
-**Validation:** 35 engine tests under JIT and NativeAOT; 33 JIT editor tests covering undo/redo (text and per-entity), dirty tracking, held scenes, play restore, malformed scenes, jobs, picking, collectible reload, UI input and layout, commit-before-click, splitter drags, panel rewind, zero-allocation frames, file workflows and terminal output. The opt-in SDL/Vulkan smoke test (`--graphics`, `--terminal-smoke`) and `scripts/terminal-cli-smoke.py` drive the full workflow; they have not been re-run since the incident under Open questions.
+**Validation:** 35 engine tests under JIT and NativeAOT; 35 JIT editor tests covering undo/redo (text and per-entity), dirty tracking, held scenes, play restore, malformed scenes, jobs, picking, collectible reload, UI input and layout, commit-before-click, splitter drags and highlights, border scrollbars, panel rewind, zero-allocation frames, file workflows and terminal output. The opt-in SDL/Vulkan smoke test (`--graphics`, `--terminal-smoke`) and `scripts/terminal-cli-smoke.py` drive the full workflow; they were updated for the new layout and palette but have not been re-run since the incident under Open questions.
 
-**Follow-ups:** persistent layouts, floating windows, automatic extension compilation, gamepad/touch/XR bindings, and migration policies for mutable resources across schema changes. The re-theme is under discussion.
+**Follow-ups:** persistent layouts, floating windows, automatic extension compilation, gamepad/touch/XR bindings, and migration policies for mutable resources across schema changes, a theme file with hot reload, an option to use the terminal's own background, and draggable sidebar section heights.
 
-**Commits:** `2fc2768` shell, `227460b` file workflow, `7a8eb07` metadata, `9237df9` input, `6566f93` resource sessions, `1d2a919` docking and extensions, `961f6c5` build workspaces, `96e99d2` shared cell interface, `be108f6` terminal recovery. Review fixes: `389a892` fault isolation, `4b63143` commit before click, `a55a69e` splitter drags, `fd12f18` held scenes, `274f486` inverse cells, `623d04b` per-entity undo, `3490c21` component defaults, `bcd5772` allocation-free frames.
+**Commits:** `2fc2768` shell, `227460b` file workflow, `7a8eb07` metadata, `9237df9` input, `6566f93` resource sessions, `1d2a919` docking and extensions, `961f6c5` build workspaces, `96e99d2` shared cell interface, `be108f6` terminal recovery. Review fixes: `389a892` fault isolation, `4b63143` commit before click, `a55a69e` splitter drags, `fd12f18` held scenes, `274f486` inverse cells, `623d04b` per-entity undo, `3490c21` component defaults, `bcd5772` allocation-free frames. Layout: `0b71a9d` line-drawn layout, command palette and theme.
 
 **Milestone 2 (Data): done, 2026-11-16.** The NativeAOT player loads `Assets/main.scene` from a memory-mapped `spinners.ggpak`. The scene holds three instances of `tower.prefab` (which nests `speck.prefab`) with per-instance overrides, a glTF mesh and a PNG texture, all decoded by our own importers. `Spinners.Build run` runs the same game from the live asset database with file watching.
 
@@ -482,6 +487,7 @@ The editor (`src/Gamegrl.Editor`) is a JIT host that takes a project root and a 
 
 | Question | Notes |
 | --- | --- |
+| How should in-scene and in-view debug interfaces be drawn? | The editor's chrome moved from `Gamegrl.UI` to cells, so the editor no longer dogfoods the runtime UI library. Grid-aligned cell drawing is the wrong tool inside Scene and Game views; those overlays should use pixel UI (or a successor). Not urgent |
 | What logged the user out at about 05:46 on 2026-11-16? | It happened after the desktop and headless smoke tests passed. Coredumps show KDE portal and Plasma crashes, with an X11 I/O failure in Plasma's stack. Kernel GPU and OOM logs aren't readable from this account, so the cause is unconfirmed. Graphics smoke tests are paused until it's understood; checking `journalctl -k` and `dmesg` as root is the next step |
 
 ## Resolved questions
