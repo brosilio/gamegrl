@@ -27,6 +27,7 @@ internal sealed class GameCode : IDisposable
     private readonly List<ISystem> _wrappers = new();
     private string? _assemblyName;
     private bool _started;
+    private ResourceSession? _resources;
     private Input? _input;
     private readonly struct InputScope : IDisposable
     {
@@ -75,19 +76,26 @@ internal sealed class GameCode : IDisposable
     public void Start(App app)
     {
         if (_started || _registration is null) return;
+        _resources = _registration.BeginResourceSession();
         _started = true;
         using var scope = new InputScope(app.World, _input);
-        foreach (var start in _registration.StartActionsList) start(app);
+        try { foreach (var start in _registration.StartActionsList) start(app); }
+        catch { Stop(app); throw; }
     }
     public void Stop(App app)
     {
         if (!_started || _registration is null) return;
         using var scope = new InputScope(app.World, _input);
-        foreach (var stop in _registration.StopActionsList.Reverse()) stop(app);
-        _started = false;
+        try { foreach (var stop in _registration.StopActionsList.Reverse()) stop(app); }
+        finally { _resources?.Dispose(); _resources = null; _started = false; }
     }
     // The restored live world already contains startup entities after a code swap.
-    public void Resume() => _started = true;
+    public void Resume()
+    {
+        if (_registration is null) return;
+        _resources = _registration.BeginResourceSession();
+        _started = true;
+    }
     public void Unload(App app)
     {
         Stop(app);

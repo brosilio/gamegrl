@@ -2,6 +2,7 @@ using Gamegrl.Tests;
 
 CoreTests.Register();
 InputTests.Register();
+ResourceTests.Register();
 VkLayoutTests.Register();
 SceneTests.Register();
 MetadataTests.Register();

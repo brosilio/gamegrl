@@ -32,6 +32,7 @@ internal sealed partial class EditorHost : IDisposable
     private bool _importPending, _buildPending, _importAgain, _buildAgain;
     private string? _reloadDll;
     private bool _loaded;
+    private long _editClock;
     private bool _closeRequested;
     public void RequestClose()
     {
@@ -127,15 +128,28 @@ internal sealed partial class EditorHost : IDisposable
         Document.Restore(state);
         Document.SelectSceneId(selectedId);
         Document.ClearHistory();
-        if (playing) _game.Resume();
+        if (playing)
+        {
+            try { _game.Resume(); }
+            catch (Exception e) { Document.Stop(); _app.RestoreClock(_editClock); Log.Error("Resume after reload: " + e.Message); }
+        }
         if (!_loaded) Import();
     }
     public void StopPlay() { if (Document.Playing) TogglePlay(); }
     private void TogglePlay()
     {
-        if (!_loaded || _gameDll is null || Files.Busy || Files.Dialog != SceneFileDialog.None) return;
-        if (Document.Playing) { _game.Stop(_app); Document.Stop(); _app.QuitRequested = false; }
-        else { Document.Play(); _game.Start(_app); }
+        if (Document.Playing)
+        {
+            try { _game.Stop(_app); }
+            finally { Document.Stop(); _app.RestoreClock(_editClock); _app.QuitRequested = false; }
+        }
+        else
+        {
+            if (!_loaded || _gameDll is null || Files.Busy || Files.Dialog != SceneFileDialog.None) return;
+            _editClock = _app.CaptureClock(); _app.RestoreClock(0); Document.Play();
+            try { _game.Start(_app); }
+            catch (Exception e) { Document.Stop(); _app.RestoreClock(_editClock); Log.Error("Enter play mode: " + e.Message); }
+        }
     }
     private void Update()
     {

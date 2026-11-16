@@ -20,6 +20,9 @@ public sealed class EngineBuilder
     internal readonly List<Action<App>> StopActions = new();
 
     private readonly List<int> _resourceSlots = new();
+    private readonly Dictionary<int, ResourcePolicy> _resourcePolicies = new();
+
+    public ResourceSession BeginResourceSession() => new(World, _resourcePolicies.Values);
 
     private EngineBuilder(World? world) => World = world ?? new World();
 
@@ -71,6 +74,33 @@ public sealed class EngineBuilder
     {
         World.SetResource(value, out int slot);
         _resourceSlots.Add(slot);
+        _resourcePolicies[slot] = new ResourcePolicy(slot, ResourceSession.CaptureValue<T>, null);
+        return this;
+    }
+
+    /// <summary>Register a mutable resource with an independent deep-copy function for play checkpoints.</summary>
+    public EngineBuilder SetResource<T>(T value, Func<T, T> clone)
+    {
+        SetResource(value);
+        int slot = _resourceSlots[^1];
+        _resourcePolicies[slot] = new ResourcePolicy(slot, world =>
+        {
+            T copy = clone(world.Resource<T>());
+            return () => world.SetResource(clone(copy));
+        }, null);
+        return this;
+    }
+
+    /// <summary>Use a fresh resource per play session, then restore the untouched edit instance on Stop.</summary>
+    public EngineBuilder SetResourceFactory<T>(Func<T> factory)
+    {
+        SetResource(factory());
+        int slot = _resourceSlots[^1];
+        _resourcePolicies[slot] = new ResourcePolicy(slot, world =>
+        {
+            T edit = world.Resource<T>();
+            return () => world.SetResource(edit);
+        }, world => world.SetResource(factory()));
         return this;
     }
 
@@ -178,6 +208,11 @@ public sealed class App : IDisposable
         Schedule.Run(Phase.Render, World);
         Schedule.Run(Phase.Last, World);
     }
+
+    /// <summary>Preserve fractional fixed-step time across editor play sessions.</summary>
+    public long CaptureClock() => _accumulatorNs;
+    public void RestoreClock(long accumulatorNanoseconds)
+    { _accumulatorNs = accumulatorNanoseconds; _last = Stopwatch.GetTimestamp(); }
 
     public TimeSpan Uptime => Stopwatch.GetElapsedTime(_start);
 

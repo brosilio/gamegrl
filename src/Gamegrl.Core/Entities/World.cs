@@ -499,6 +499,9 @@ public sealed unsafe class World : IDisposable
 
     public void RemoveResource<T>() => RemoveResource(ResourceId<T>.Value);
 
+    /// <summary>Snapshot the occupied resource slots, for session lifetime tracking.</summary>
+    public int[] ResourceSlots() => Enumerable.Range(0, _resources.Length).Where(i => _resources[i] is not null).ToArray();
+
     public bool HasResource<T>()
     {
         int id = ResourceId<T>.Value;
