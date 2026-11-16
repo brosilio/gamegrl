@@ -79,8 +79,19 @@ internal sealed partial class EditorHost
         }
         _ui.Draw.PopClip();
         var content = new Rect(area.X, strip.Bottom, area.W, Math.Max(1, area.H - strip.H));
-        if (Docks.Selected(region) is { } selected) Registry.FindPanel(selected)!.Draw(_context, content);
+        if (Docks.Selected(region) is { } selected) DrawPanel(Registry.FindPanel(selected)!, content);
         else _ui.TextIn(content with { H = 1 }, "Drop a tab here", _ui.Theme.TextDim);
+    }
+    private void DrawPanel(EditorPanel panel, Rect content)
+    {
+        var checkpoint = _ui.Save();
+        try { panel.Draw(_context, content); }
+        catch (Exception e)
+        {
+            _ui.Rewind(checkpoint);
+            Report("Panel " + panel.Title, e);
+            _ui.TextIn(content with { H = 1 }, panel.Title + " failed: " + e.Message, _ui.Theme.Error);
+        }
     }
     private void FinishDockDrag()
     {

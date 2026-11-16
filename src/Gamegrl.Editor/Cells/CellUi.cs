@@ -80,6 +80,17 @@ public sealed class CellUi
         _commit = false;
     }
     public void CommitTextEdit() => _commit = true;
+    /// <summary>Stack depths before a caller-supplied draw, so a throwing panel or drawer cannot unbalance the frame.</summary>
+    public readonly record struct Checkpoint(int Areas, int Ids, int Scrolls, int Clips, int OverlayClips, bool InPopup);
+    public Checkpoint Save() => new(_areas.Count, _ids.Count, _scroll.Count, _main.ClipDepth, _overlay.ClipDepth, _inPopup);
+    public void Rewind(in Checkpoint checkpoint)
+    {
+        while (_areas.Count > checkpoint.Areas) _areas.Pop();
+        while (_ids.Count > checkpoint.Ids) _ids.Pop();
+        while (_scroll.Count > checkpoint.Scrolls) _scroll.Pop();
+        _main.PopClipsTo(checkpoint.Clips); _overlay.PopClipsTo(checkpoint.OverlayClips);
+        _inPopup = checkpoint.InPopup;
+    }
     public uint Id(string text)
     {
         uint hash = _ids.Peek(); foreach (char c in text) hash = (hash ^ c) * 16777619;

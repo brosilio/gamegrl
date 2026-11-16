@@ -35,6 +35,8 @@ public sealed class CellDraw
     public bool Transparent(int x, int y) => _transparent[y * Surface.Width + x];
     public void PushClip(Rect rect) { _clips.Push(Surface.Clip); Surface.Clip = Surface.Clip.Intersect(To(rect)); }
     public void PopClip() => Surface.Clip = _clips.Pop();
+    public int ClipDepth => _clips.Count;
+    public void PopClipsTo(int depth) { while (_clips.Count > depth) PopClip(); }
     public void Rect(Rect rect, Color32 color)
     {
         var area = Surface.Clip.Intersect(To(rect));

@@ -47,6 +47,23 @@ internal static class CellUiTests
             ui.CommitTextEdit(); input.BeginFrame(); input.OnKey((int)Key.Backspace, false, false); Draw();
             Check(value == "" && !ui.WantsKeyboard);
         });
+        test("Cell UI: rewinding after a throwing panel restores areas, ids, clips and popup state", () =>
+        {
+            var ui = new CellUi(); var input = new Input();
+            ui.Begin(input, null, new Vector2(40, 10), 1);
+            var checkpoint = ui.Save(); uint before = ui.Id("probe");
+            try
+            {
+                ui.BeginArea(new Rect(2, 2, 10, 3)); ui.PushId("panel"); ui.BeginScroll(new Rect(2, 2, 10, 3), "s");
+                ui.BeginPopup(new Rect(5, 5, 8, 3));
+                throw new InvalidOperationException("panel bug");
+            }
+            catch (InvalidOperationException) { ui.Rewind(checkpoint); }
+            Check(ui.Id("probe") == before && ui.Remaining == new Rect(0, 0, 40, 10));
+            Check(ui.Draw.Clip == new Rect(0, 0, 40, 10));
+            ui.Label("after"); ui.End();
+            Check(ui.Draw.Surface[0, 0].Rune.Value == 'a');
+        });
         test("Terminal viewport: half-block colors, BGRA order, clipping and low color output", () =>
         {
             var surface = new Surface(5, 3);

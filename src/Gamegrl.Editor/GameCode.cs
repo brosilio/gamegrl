@@ -44,7 +44,7 @@ internal sealed class GameCode : IDisposable
         }
         public void Dispose() { if (_previous is not null) _world.SetResource(_previous); }
     }
-    private sealed class PlaySystem(ISystem inner, SceneDocument document, Input? input) : ISystem
+    private sealed class PlaySystem(GameCode owner, ISystem inner, SceneDocument document, Input? input) : ISystem
     {
         public string Name => inner.Name;
         public Phase Phase => inner.Phase;
@@ -52,11 +52,15 @@ internal sealed class GameCode : IDisposable
         public void Initialize(World world) { using var scope = new InputScope(world, input); inner.Initialize(world); }
         public void Run(World world)
         {
-            if (!document.Playing) return;
+            if (!document.Playing || owner.Paused) return;
             using var scope = new InputScope(world, input);
-            inner.Run(world);
+            // Game code must never take the editor down: pause play so the faulting state stays inspectable.
+            try { inner.Run(world); }
+            catch (Exception e) { owner.Paused = true; Log.Error($"{inner.Name} threw; play mode paused.\n{e}"); }
         }
     }
+    /// <summary>Play systems are skipped while paused. Set by the user or by a faulting system.</summary>
+    public bool Paused { get; set; }
     public void Load(string path, App app, SceneDocument document, Input? input = null, EditorRegistry? registry = null, IReadOnlyList<string>? extensions = null)
     {
         _input = input;
@@ -71,7 +75,7 @@ internal sealed class GameCode : IDisposable
         _registration = EngineBuilder.ForWorld(app.World).AddModule(module);
         foreach (var system in _registration.Systems)
         {
-            var wrapper = new PlaySystem(system, document, input);
+            var wrapper = new PlaySystem(this, system, document, input);
             _wrappers.Add(wrapper);
             app.Schedule.Add(wrapper);
         }
@@ -89,7 +93,7 @@ internal sealed class GameCode : IDisposable
     {
         if (_started || _registration is null) return;
         _resources = _registration.BeginResourceSession();
-        _started = true;
+        _started = true; Paused = false;
         using var scope = new InputScope(app.World, _input);
         try { foreach (var start in _registration.StartActionsList) start(app); }
         catch { Stop(app); throw; }
@@ -99,7 +103,7 @@ internal sealed class GameCode : IDisposable
         if (!_started || _registration is null) return;
         using var scope = new InputScope(app.World, _input);
         try { foreach (var stop in _registration.StopActionsList.Reverse()) stop(app); }
-        finally { _resources?.Dispose(); _resources = null; _started = false; }
+        finally { _resources?.Dispose(); _resources = null; _started = false; Paused = false; }
     }
     // The restored live world already contains startup entities after a code swap.
     public void Resume()

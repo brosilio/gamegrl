@@ -136,6 +136,7 @@ internal sealed partial class EditorHost : IDisposable
         string? previous = _gameDll;
         try { _game.Stop(_app); } catch (Exception e) { Log.Error("Stop before reload: " + e.Message); }
         _app.World.Clear(); _game.Unload(_app);
+        _reported.Clear();
         void RestoreState()
         {
             Document.Restore(state); Document.SelectSceneId(selectedId); Document.ClearHistory();
@@ -177,6 +178,7 @@ internal sealed partial class EditorHost : IDisposable
         if (Document.Playing)
         {
             try { _game.Stop(_app); }
+            catch (Exception e) { Report("Stop play mode", e); }
             finally { Document.Stop(); _app.RestoreClock(_editClock); _app.QuitRequested = false; }
         }
         else
@@ -187,7 +189,22 @@ internal sealed partial class EditorHost : IDisposable
             catch (Exception e) { Document.Stop(); _app.RestoreClock(_editClock); Log.Error("Enter play mode: " + e.Message); }
         }
     }
+    private readonly Dictionary<string, string> _reported = new(StringComparer.Ordinal);
+    /// <summary>Logs a failure once per source until its text changes, so a fault repeating every frame cannot flood the Console.</summary>
+    internal void Report(string source, Exception e)
+    {
+        string text = e.ToString();
+        if (_reported.TryGetValue(source, out var last) && last == text) return;
+        _reported[source] = text;
+        Log.Error(source + ": " + text);
+    }
     private void Update()
+    {
+        // The editor outlives its own bugs: a failed frame is logged and the next frame starts clean.
+        try { UpdateFrame(); }
+        catch (Exception e) { Report("Editor frame", e); }
+    }
+    private void UpdateFrame()
     {
         var input = _app.World.Resource<Input>();
         var platform = _app.World.Resource<PlatformContext>();
@@ -222,7 +239,7 @@ internal sealed partial class EditorHost : IDisposable
         _layout.Arrange(w, h, (int)_left, (int)_right, (int)_bottom);
         foreach (var region in Enum.GetValues<DockRegion>()) DrawDock(CellDraw.From(_layout.Region(region)), region);
         FinishDockDrag();
-        _ui.TextIn(new Rect(0, h - 1, w, 1), ScenePath + (Document.Dirty ? " *" : "") + "    " + (Document.Playing ? "Playing" : "Editing") + (Jobs.Busy ? "    Working…" : ""), _ui.Theme.TextDim);
+        _ui.TextIn(new Rect(0, h - 1, w, 1), ScenePath + (Document.Dirty ? " *" : "") + "    " + (Document.Playing ? _game.Paused ? "Paused" : "Playing" : "Editing") + (Jobs.Busy ? "    Working…" : ""), _ui.Theme.TextDim);
         bool click = input.WasPressed(MouseButton.Left) || input.WasPressed(MouseButton.Right) || input.WasPressed(MouseButton.Middle);
         if (click) _gameFocused = _gameArea.W > 0 && _ui.IsHovered(_gameArea);
         if (_gameArea.W <= 0 || !Document.Playing || _ui.WantsKeyboard) _gameFocused = false;
@@ -248,18 +265,23 @@ internal sealed partial class EditorHost : IDisposable
     private void Toolbar(float width)
     {
         _ui.BeginArea(new Rect(0, 0, width, 1));
-        _ui.Row(6, 6, 6, 6, 7, 9, 5, 8, -1);
+        _ui.Row(6, 6, 6, 6, 8, 7, 9, 5, 8, -1);
         if (_ui.Button("Save")) Files.Save();
         if (_ui.Button("Undo")) Document.Undo();
         if (_ui.Button("Redo")) Document.Redo();
         if (_ui.Button(Document.Playing ? "Stop" : "Play")) TogglePlay();
+        if (_ui.Button(_game.Paused ? "Resume" : "Pause") && Document.Playing) _game.Paused = !_game.Paused;
         if (_ui.Button("Build")) BuildGame();
         if (_ui.Button("Reimport")) Import();
         if (_ui.Button("New")) Files.RequestNew();
         if (_ui.Button("Save As")) Files.SaveAs();
         var menus = Registry.Menus.ToArray();
         if (_ui.Combo(_ui.Next(), "editor-menu", ref _menuSelection, new[] { "Menu" }.Concat(menus.Select(m => m.Label)).ToArray()) && _menuSelection > 0)
-        { menus[_menuSelection - 1].Execute(_context); _menuSelection = 0; }
+        {
+            var menu = menus[_menuSelection - 1]; _menuSelection = 0;
+            try { menu.Execute(_context); }
+            catch (Exception e) { Report("Menu " + menu.Label, e); }
+        }
         _ui.EndArea();
     }
     private void EnsureTarget(ref GpuTexture? color, ref GpuTexture? depth, Rect area)

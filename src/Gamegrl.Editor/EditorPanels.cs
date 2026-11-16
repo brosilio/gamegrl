@@ -59,7 +59,7 @@ internal sealed partial class EditorHost
             _ui.EndScroll(); return;
         }
         if (_ui.Input.WasPressed(MouseButton.Left) || _ui.Input.WasReleased(MouseButton.Left)) Document.BeginEdit();
-        _ui.PushId(world.Get<SceneId>(e).Value);
+        _ui.PushId(world.Has<SceneId>(e) ? world.Get<SceneId>(e).Value : e.Index);
         if (_ui.Button("Make root")) world.SetParent(e, default);
         if (_ui.Button("Parent to next root"))
         {
@@ -82,7 +82,14 @@ internal sealed partial class EditorHost
             _ui.Header(info.Name[(info.Name.LastIndexOf('.') + 1)..]);
             if (_ui.Button("×")) remove = type;
             var pointer = archetype.Ptr(archetype.ColumnOf(type), row);
-            if (!Registry.DrawComponent(info.StableId, (nint)pointer, _context)) info.Serializer?.Visit(pointer, _inspector);
+            var checkpoint = _ui.Save();
+            try { if (!Registry.DrawComponent(info.StableId, (nint)pointer, _context)) info.Serializer?.Visit(pointer, _inspector); }
+            catch (Exception ex)
+            {
+                _ui.Rewind(checkpoint);
+                Report("Inspector " + info.Name, ex);
+                _ui.TextIn(_ui.Next(), "Drawer failed: " + ex.Message, _ui.Theme.Error);
+            }
             _ui.PopId();
             _ui.Separator();
         }
