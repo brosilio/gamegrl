@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Gamegrl.Core/Gamegrl.Core.csproj" />
+    <Project Path="src/Gamegrl.Generators/Gamegrl.Generators.csproj" />
+    <Project Path="src/Gamegrl.Platform/Gamegrl.Platform.csproj" />
+    <Project Path="src/Gamegrl.Platform.Sdl3/Gamegrl.Platform.Sdl3.csproj" />
+    <Project Path="src/Gamegrl.Rhi/Gamegrl.Rhi.csproj" />
+    <Project Path="src/Gamegrl.Rhi.Vulkan/Gamegrl.Rhi.Vulkan.csproj" />
+    <Project Path="src/Gamegrl.Rendering/Gamegrl.Rendering.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Gamegrl.Tests/Gamegrl.Tests.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/Spinners/Spinners.csproj" />
+  </Folder>
+</Solution>

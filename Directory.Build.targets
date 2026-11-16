@@ -1,0 +1,7 @@
+<Project>
+  <!-- Every engine and game project gets the Gamegrl source generator (opt out with GamegrlGenerators=false). -->
+  <ItemGroup Condition="'$(MSBuildProjectName)' != 'Gamegrl.Generators' and '$(GamegrlGenerators)' != 'false'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)src/Gamegrl.Generators/Gamegrl.Generators.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+</Project>

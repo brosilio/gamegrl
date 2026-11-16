@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../Gamegrl.Core/Gamegrl.Core.csproj" />
+    <ProjectReference Include="../Gamegrl.Platform/Gamegrl.Platform.csproj" />
+  </ItemGroup>
+</Project>
