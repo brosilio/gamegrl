@@ -126,10 +126,10 @@ internal sealed class SceneFiles(string root, SceneDocument document, EditorJobs
     {
         path = ValidatePath(root, path);
         Busy = true;
-        string before = document.Text;
+        long before = document.Revision;
         jobs.Run("Open " + path, _ => File.ReadAllText(Path.Combine(root, path)), text =>
         {
-            if (document.Playing || document.Text != before) { Log.Warn("Open cancelled because the scene changed while loading."); return; }
+            if (document.Playing || document.Revision != before) { Log.Warn("Open cancelled because the scene changed while loading."); return; }
             document.Open(text); CurrentPath = path; _generation++;
             Log.Info("Opened " + path);
         }, () => Busy = false);

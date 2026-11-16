@@ -102,6 +102,40 @@ Test("A held scene survives failed code loads verbatim, blocks edits and returns
     doc.Restore(doc.Text);
     Check(doc.Held is null && world.EntityCount == 1 && doc.Text == edit);
 });
+Test("Entity value edits record component bytes, keep entity references across rebuilds and track dirty by history", () =>
+{
+    using var world = new World();
+    var target = world.Spawn(new Name("Target"), SceneId.New(), LocalTransform.Identity);
+    var mover = world.Spawn(new Name("Mover"), SceneId.New(), LocalTransform.Identity, new Gamegrl.Tests.Follow { Target = target, Speed = 1 });
+    var doc = new SceneDocument(world) { Selected = mover };
+    doc.Open(doc.Text);
+    string original = doc.Text;
+    long revision = doc.Revision;
+    doc.BeginEntityEdit(doc.Selected);
+    world.Get<Gamegrl.Tests.Follow>(doc.Selected).Speed = 2;
+    world.Get<LocalTransform>(doc.Selected).Position.Y = 3;
+    doc.CommitEdit();
+    Check(doc.Dirty && doc.CanUndo && doc.Revision > revision);
+    doc.BeginEntityEdit(doc.Selected); doc.CommitEdit(); // an idle click records nothing
+    // A structural edit on top, then undo it: the world is rebuilt and every handle changes.
+    doc.Edit(() => world.Spawn(new Name("Extra"), SceneId.New()));
+    doc.Undo();
+    Check(world.EntityCount == 2);
+    doc.Undo();
+    Check(doc.Text == original && !doc.Dirty, "undoing back to the saved state is clean again");
+    var follow = world.Get<Gamegrl.Tests.Follow>(doc.Selected);
+    Check(follow.Speed == 1 && world.IsAlive(follow.Target) && world.Get<Name>(follow.Target).ToString() == "Target", "entity fields resolve to the rebuilt target");
+    doc.Redo();
+    Check(world.Get<Gamegrl.Tests.Follow>(doc.Selected).Speed == 2 && world.Get<LocalTransform>(doc.Selected).Position.Y == 3 && doc.Dirty);
+    doc.Redo();
+    Check(world.EntityCount == 3 && !doc.CanRedo);
+    doc.MarkSaved(doc.Text);
+    Check(!doc.Dirty);
+    doc.BeginEntityEdit(doc.Selected);
+    world.Remove<Gamegrl.Tests.Follow>(doc.Selected); // structural change bypassing Edit
+    doc.CommitEdit();
+    Check(!doc.CanUndo && doc.Dirty, "untracked structure resets history and stays dirty");
+});
 Test("Invalid scene does not destroy the edit world", () =>
 {
     using var world = new World();
@@ -264,4 +298,14 @@ static WeakReference ReloadGame(string dll, App app, SceneDocument doc)
     app.World.Clear();
     game.Unload(app);
     return reference;
+}
+
+namespace Gamegrl.Tests
+{
+    /// <summary>A component with an entity field, for undo tests that rebuild the world between entries.</summary>
+    public struct Follow : IComponent
+    {
+        public Entity Target;
+        public float Speed;
+    }
 }

@@ -58,19 +58,11 @@ internal sealed partial class EditorHost
             _ui.Label("Stop play mode to edit", true);
             _ui.EndScroll(); return;
         }
-        if (_ui.Input.WasPressed(MouseButton.Left) || _ui.Input.WasReleased(MouseButton.Left)) Document.BeginEdit();
+        // Value edits capture only this entity's component bytes; structural buttons below use Document.Edit.
+        if (_ui.IsHovered(area) && (_ui.Input.WasPressed(MouseButton.Left) || _ui.Input.WasReleased(MouseButton.Left))) Document.BeginEntityEdit(e);
         _ui.PushId(world.Has<SceneId>(e) ? world.Get<SceneId>(e).Value : e.Index);
-        if (_ui.Button("Make root")) world.SetParent(e, default);
-        if (_ui.Button("Parent to next root"))
-        {
-            foreach (var a in world.Archetypes)
-            {
-                bool found = false;
-                foreach (var parent in a.Entities)
-                    if (parent != e && !world.HasParent(parent)) { world.SetParent(e, parent); found = true; break; }
-                if (found) break;
-            }
-        }
+        if (_ui.Button("Make root")) Document.Edit(() => world.SetParent(e, default));
+        if (_ui.Button("Parent to next root")) Document.Edit(() => ParentToNextRoot(world, e));
         var (archetype, row) = world.Locate(e);
         int remove = -1;
         foreach (int type in archetype.Types)
@@ -93,7 +85,7 @@ internal sealed partial class EditorHost
             _ui.PopId();
             _ui.Separator();
         }
-        if (remove >= 0) world.RemoveRaw(e, remove);
+        if (remove >= 0) Document.Edit(() => world.RemoveRaw(e, remove));
         var available = Enumerable.Range(0, ComponentRegistry.Count).Select(ComponentRegistry.Get)
             .Where(c => !c.Released && c.Serializer is not null && !archetype.Set.Contains(c.Id)
                 && c.Id != Component<SceneId>.Id && c.Id != Component<PrefabInstance>.Id).ToArray();
@@ -101,7 +93,7 @@ internal sealed partial class EditorHost
         {
             _componentChoice = Math.Clamp(_componentChoice, 0, available.Length - 1);
             _ui.Combo(_ui.Next(), "component-choice", ref _componentChoice, available.Select(c => c.Name).ToArray());
-            if (_ui.Button("Add component"))
+            if (_ui.Button("Add component")) Document.Edit(() =>
             {
                 var info = available[_componentChoice];
                 var data = new byte[info.Size];
@@ -110,11 +102,17 @@ internal sealed partial class EditorHost
                 if (info.Id == Component<Camera>.Id) world.Get<Camera>(e) = Camera.Perspective();
                 if (info.Id == Component<MeshRenderer>.Id) world.Get<MeshRenderer>(e) = new MeshRenderer { Mesh = BuiltinAssets.Cube, Color = Vector4.One };
                 if (info.Id == Component<Sprite>.Id) world.Get<Sprite>(e) = Sprite.Of(BuiltinAssets.White, new Vector2(64));
-            }
+            });
         }
         _ui.PopId();
         if (_ui.Active == 0 && !_ui.WantsKeyboard || _ui.Input.WasReleased(MouseButton.Left) && !_ui.WantsKeyboard) Document.CommitEdit();
         _ui.EndScroll();
+    }
+    private static void ParentToNextRoot(World world, Entity e)
+    {
+        foreach (var a in world.Archetypes)
+            foreach (var parent in a.Entities)
+                if (parent != e && !world.HasParent(parent)) { world.SetParent(e, parent); return; }
     }
     private void Project(Rect area)
     {
@@ -198,7 +196,7 @@ internal sealed partial class EditorHost
                     _ui.Draw.Rect(new Rect(end.X, end.Y, 1, 1), color);
                     if (hit && input.WasPressed(MouseButton.Left) && _dragAxis < 0)
                     {
-                        Document.BeginEdit(); _dragAxis = axis;
+                        Document.BeginEntityEdit(selected); _dragAxis = axis;
                         _axisScreen = Vector2.Normalize(segment); _axisScale = length / Math.Max(1, segment.Length());
                         _ui.Active = _ui.Id("translate");
                     }

@@ -140,7 +140,7 @@ internal sealed partial class EditorHost : IDisposable
         void RestoreState(bool schemaMayChange)
         {
             Document.Restore(state); Document.SelectSceneId(selectedId);
-            if (schemaMayChange) Document.ClearHistory();
+            if (schemaMayChange) { Document.ClearHistory(); Document.RecheckSaved(); }
             if (playing) _game.Resume();
         }
         try
