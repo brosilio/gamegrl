@@ -5,7 +5,7 @@ using Gamegrl.Platform;
 using Gamegrl.UI;
 using Gamegrl.UI.Fonts;
 
-if (args.Contains("--graphics")) return Gamegrl.Tests.GraphicsSmoke.Run();
+if (args.Contains("--graphics") || args.Contains("--terminal-smoke")) return Gamegrl.Tests.GraphicsSmoke.Run(args.Contains("--terminal-smoke"));
 
 int failed = 0, total = 0;
 void Check(bool condition, string message = "Assertion failed") { if (!condition) throw new Exception(message); }
@@ -18,6 +18,7 @@ void Test(string name, Action body)
 Gamegrl.Tests.SceneFilesTests.Register(Test);
 Gamegrl.Tests.ExtensionTests.Register(Test);
 Gamegrl.Tests.BuildWorkspaceTests.Register(Test);
+Gamegrl.Tests.CellUiTests.Register(Test);
 
 Test("Undo/redo coalesces a drag, restores hierarchy and selection, branches history", () =>
 {
@@ -187,24 +188,23 @@ Test("TrueType glyph coverage, UI clipping, button clicks and text input", () =>
 });
 Test("Inspector metadata: edits clamp ranges, idle drawing preserves data and headers add layout", () =>
 {
-    var font = FontAtlas.Bake(new TrueTypeFont(File.ReadAllBytes(fontPath)), 14);
-    var ui = new Ui(font);
+    var ui = new CellUi();
     var input = new Input();
     var inspector = new InspectorVisitor(ui, () => []);
     float value = 5;
     void Draw(FieldMetadata metadata)
     {
-        ui.Begin(input, null, new Vector2(400, 300), 5, null);
+        ui.Begin(input, null, new Vector2(50, 20), 5);
         inspector.Metadata(metadata);
         inspector.Field("Speed", ref value);
         ui.End();
     }
     var range = new FieldMetadata(Minimum: 0, Maximum: 10);
-    input.OnMouseMove(new Vector2(200, 10), Vector2.Zero); input.OnMouseButton(0, true);
+    input.OnMouseMove(new Vector2(25, 0.2f), Vector2.Zero); input.OnMouseButton(0, true);
     Draw(range);
-    input.BeginFrame(); input.OnMouseMove(new Vector2(1200, 10), new Vector2(1000, 0)); Draw(range);
+    input.BeginFrame(); input.OnMouseMove(new Vector2(1025, 0.2f), new Vector2(1000, 0)); Draw(range);
     Check(value == 10);
-    input.BeginFrame(); input.OnMouseMove(new Vector2(1180, 10), new Vector2(-20, 0)); Draw(range);
+    input.BeginFrame(); input.OnMouseMove(new Vector2(1022.5f, 0.2f), new Vector2(-2.5f, 0)); Draw(range);
     Check(value == 9);
     input.BeginFrame(); input.OnMouseButton(0, false); Draw(range);
     value = 99; input.BeginFrame(); Draw(range); Check(value == 99);

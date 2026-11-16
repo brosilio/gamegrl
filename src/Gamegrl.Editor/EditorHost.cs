@@ -26,8 +26,19 @@ internal sealed partial class EditorHost : IDisposable
     private readonly List<string> _extensionPaths = new();
     public void AddExtension(string path) => _extensionPaths.Add(Path.GetFullPath(path));
     private readonly RenderContext _render;
-    private readonly Ui _ui;
-    private readonly UiRenderer _renderer;
+    private readonly CellUi _ui;
+    private readonly Input _cellInput = new();
+    private readonly CellRenderer? _renderer;
+    private readonly TerminalDisplay? _terminal;
+    private readonly TerminalViewport? _sceneTerminal, _gameTerminal;
+    internal int CellWidth => _renderer?.CellWidth ?? 1;
+    internal int CellHeight => _renderer?.CellHeight ?? 2;
+    internal CellUi Ui => _ui;
+    internal Rect SceneArea => _sceneArea;
+    internal Rect GameArea => _gameArea;
+    internal Rect PixelRect(Rect rect) => new(rect.X * CellWidth, rect.Y * CellHeight, rect.W * CellWidth, rect.H * CellHeight);
+    private readonly EditorCellLayout _layout = new();
+    internal Rect DockArea(DockRegion region) => _dockAreas.GetValueOrDefault(region);
     private readonly SceneCamera _camera = new();
     private readonly Query _cameras;
     private readonly Dictionary<ulong, bool> _expanded = new();
@@ -35,7 +46,7 @@ internal sealed partial class EditorHost : IDisposable
     private GpuTexture? _sceneColor, _sceneDepth, _gameColor, _gameDepth;
     private Rect _sceneArea, _gameArea;
     private int _menuSelection;
-    private float _left = 230, _right = 320, _bottom = 210;
+    private float _left = 26, _right = 38, _bottom = 12;
     private double _clock;
     private bool _importPending, _buildPending, _importAgain, _buildAgain;
     private BuildOutput? _reloadBuild;
@@ -52,14 +63,15 @@ internal sealed partial class EditorHost : IDisposable
     public SceneDocument Document { get; }
     public EditorJobs Jobs { get; } = new();
 
-    public EditorHost(App app, EditorAssets assets, string root, string project, string fontPath)
+    public EditorHost(App app, EditorAssets assets, string root, string project, string? fontPath, TerminalDisplay? terminal = null, bool ascii = false)
     {
         _app = app; _assets = assets; _root = root; _project = project;
         _render = app.World.Resource<RenderContext>();
         _render.DrawMainCamera = false;
-        var font = FontAtlas.Bake(new TrueTypeFont(File.ReadAllBytes(fontPath)), 14);
-        _ui = new Ui(font);
-        _renderer = new UiRenderer(_render.Device, _render.Swapchain.Format, font);
+        _ui = new CellUi(ascii);
+        _terminal = terminal;
+        if (terminal is null) _renderer = new CellRenderer(_render.Device, _render.Swapchain.Format, fontPath ?? throw new ArgumentNullException(nameof(fontPath)));
+        else { _sceneTerminal = new TerminalViewport(_render.Device); _gameTerminal = new TerminalViewport(_render.Device); }
         _inspector = new InspectorVisitor(_ui, () => new[] { ("None", Guid.Empty), ("Cube", BuiltinAssets.Cube.Guid), ("White", BuiltinAssets.White.Guid) }
             .Concat(_assets.Files.Select(path => (path, _assets.FindByPath(path)))).ToArray());
         Document = new SceneDocument(app.World, assets.PrefabText);
@@ -148,6 +160,16 @@ internal sealed partial class EditorHost : IDisposable
         _activeBuild?.Dispose(); _activeBuild = output;
         if (!_loaded) Import();
     }
+    internal void RecoverOnDisconnect(Action completed)
+    {
+        StopPlay(); Document.CommitEdit();
+        if (!Document.Dirty) { completed(); return; }
+        string text = Document.Text;
+        string directory = Path.Combine(_root, "Library", "recovery");
+        string path = Path.Combine(directory, DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N") + ".scene");
+        Jobs.Run("Recover disconnected scene", _ => { Directory.CreateDirectory(directory); File.WriteAllText(path, text); return path; },
+            recovered => Log.Info("Disconnected scene recovered to " + recovered), completed);
+    }
     public void StopPlay() { if (Document.Playing) TogglePlay(); }
     private void TogglePlay()
     {
@@ -170,7 +192,12 @@ internal sealed partial class EditorHost : IDisposable
         var platform = _app.World.Resource<PlatformContext>();
         var (w, h) = platform.MainWindow.PixelSize;
         _clock += _app.World.Resource<Time>().Delta;
-        _ui.Begin(input, platform.Platform, new Vector2(w, h), _clock, _renderer.FontTexture);
+        _cellInput.RouteFrom(input, true, default);
+        _cellInput.ScaleMouse(new Vector2(1f / CellWidth, 1f / CellHeight));
+        w = Math.Max(1, w / CellWidth); h = Math.Max(1, h / CellHeight);
+        input = _cellInput;
+        _ui.KeyboardNavigation = !_gameFocused;
+        _ui.Begin(input, platform.Platform, new Vector2(w, h), _clock);
         _ui.Draw.Rect(_ui.Screen, _ui.Theme.Background);
         if (Files.Dialog != SceneFileDialog.None)
         {
@@ -179,28 +206,26 @@ internal sealed partial class EditorHost : IDisposable
             FileDialog(); _ui.End(); return;
         }
         Toolbar(w);
-        float availableH = Math.Max(100, h - 62);
-        _left = Math.Clamp(_left, 120, Math.Max(120, w * 0.35f));
-        _right = Math.Clamp(_right, 150, Math.Max(150, w * 0.4f));
-        _bottom = Math.Clamp(_bottom, 80, Math.Max(80, availableH * 0.65f));
-        float middleW = Math.Max(1, w - _left - _right - 8), topH = availableH - _bottom - 4;
-        _left = _ui.Splitter(new Rect(_left, 32, 4, availableH), "left", _left, true, 120, Math.Max(120, w * 0.35f));
-        _right = w - _ui.Splitter(new Rect(w - _right - 4, 32, 4, availableH), "right", w - _right, true, w * 0.6f, w - 150);
-        float split = _ui.Splitter(new Rect(_left + 4, 32 + topH, middleW, 4), "bottom", 32 + topH, false, 100, h - 110);
-        _bottom = h - 30 - split - 4;
+        float availableH = Math.Max(4, h - 3);
+        _left = Math.Clamp(_left, 10, Math.Max(10, w * 0.3f));
+        _right = Math.Clamp(_right, 12, Math.Max(12, w * 0.35f));
+        _bottom = Math.Clamp(_bottom, 3, Math.Max(3, availableH * 0.55f));
+        float middleW = Math.Max(1, w - _left - _right - 2), topH = Math.Max(2, availableH - _bottom - 1);
+        _left = _ui.Splitter(new Rect(_left, 2, 1, availableH), "left", _left, true, 10, Math.Max(10, w * 0.3f));
+        _right = w - _ui.Splitter(new Rect(w - _right - 1, 2, 1, availableH), "right", w - _right, true, w * 0.65f, Math.Max(w * 0.65f, w - 12));
+        float split = _ui.Splitter(new Rect(_left + 1, 2 + topH, middleW, 1), "bottom", 2 + topH, false, 4, Math.Max(4, h - 5));
+        _bottom = h - 2 - split;
         Docks.Sync(Registry.Panels);
         _sceneArea = _gameArea = default;
         _dockAreas.Clear();
-        DrawDock(new Rect(0, 32, _left, availableH), DockRegion.Left);
-        DrawDock(new Rect(w - _right, 32, _right, availableH), DockRegion.Right);
-        DrawDock(new Rect(_left + 4, 32, middleW, Math.Max(1, topH)), DockRegion.Center);
-        DrawDock(new Rect(_left + 4, 32 + topH + 4, middleW, _bottom), DockRegion.Bottom);
+        _layout.Arrange(w, h, (int)_left, (int)_right, (int)_bottom);
+        foreach (var region in Enum.GetValues<DockRegion>()) DrawDock(CellDraw.From(_layout.Region(region)), region);
         FinishDockDrag();
-        _ui.TextIn(new Rect(0, h - 26, w, 26), ScenePath + (Document.Dirty ? " *" : "") + "    " + (Document.Playing ? "Playing" : "Editing") + (Jobs.Busy ? "    Working…" : ""), _ui.Theme.TextDim);
+        _ui.TextIn(new Rect(0, h - 1, w, 1), ScenePath + (Document.Dirty ? " *" : "") + "    " + (Document.Playing ? "Playing" : "Editing") + (Jobs.Busy ? "    Working…" : ""), _ui.Theme.TextDim);
         bool click = input.WasPressed(MouseButton.Left) || input.WasPressed(MouseButton.Right) || input.WasPressed(MouseButton.Middle);
         if (click) _gameFocused = _gameArea.W > 0 && _ui.IsHovered(_gameArea);
         if (_gameArea.W <= 0 || !Document.Playing || _ui.WantsKeyboard) _gameFocused = false;
-        GameInput.RouteFrom(input, _gameFocused, _gameArea.Min, [Key.F5]);
+        GameInput.RouteFrom(_app.World.Resource<Input>(), _gameFocused, PixelRect(_gameArea).Min, [Key.F5]);
         if (!_ui.WantsKeyboard && !_gameFocused)
         {
             if (input.Ctrl && input.WasPressed(Key.S)) { if (input.Shift) Files.SaveAs(); else Files.Save(); }
@@ -220,8 +245,8 @@ internal sealed partial class EditorHost : IDisposable
     }
     private void Toolbar(float width)
     {
-        _ui.BeginArea(new Rect(5, 4, width - 10, 25));
-        _ui.Row(65, 65, 65, 65, 65, 90, 65, 75, -1);
+        _ui.BeginArea(new Rect(0, 0, width, 1));
+        _ui.Row(6, 6, 6, 6, 7, 9, 5, 8, -1);
         if (_ui.Button("Save")) Files.Save();
         if (_ui.Button("Undo")) Document.Undo();
         if (_ui.Button("Redo")) Document.Redo();
@@ -237,11 +262,11 @@ internal sealed partial class EditorHost : IDisposable
     }
     private void EnsureTarget(ref GpuTexture? color, ref GpuTexture? depth, Rect area)
     {
-        int w = Math.Max(1, (int)area.W), h = Math.Max(1, (int)area.H);
+        int w = Math.Max(1, (int)area.W * CellWidth), h = Math.Max(1, (int)area.H * CellHeight);
         if (color?.Width == w && color.Height == h) return;
-        if (color is not null) { _renderer.Forget(color); color.Dispose(); }
+        if (color is not null) { _renderer?.Forget(color); color.Dispose(); }
         depth?.Dispose();
-        color = _render.Device.CreateTexture(new TextureDesc(w, h, _render.Swapchain.Format, TextureUsage.RenderTarget | TextureUsage.Sampled));
+        color = _render.Device.CreateTexture(new TextureDesc(w, h, _render.Swapchain.Format, TextureUsage.RenderTarget | TextureUsage.Sampled | TextureUsage.CopySrc));
         depth = _render.Device.CreateTexture(new TextureDesc(w, h, RenderContext.DepthFormat, TextureUsage.DepthStencil));
     }
     private void Render()
@@ -249,14 +274,20 @@ internal sealed partial class EditorHost : IDisposable
         if (!_render.HasFrame) return;
         var frame = _render.Frame;
         if (_sceneArea.W > 0 && _sceneColor is not null)
-            _render.Scene.DrawView(frame.Commands, new ViewDesc { Color = _sceneColor, Depth = _sceneDepth!, ViewProjection = _camera.Matrix(_sceneArea.W / _sceneArea.H), ClearColor = new Vector4(0.08f, 0.09f, 0.12f, 1), DebugLines = true });
+            _render.Scene.DrawView(frame.Commands, new ViewDesc { Color = _sceneColor, Depth = _sceneDepth!, ViewProjection = _camera.Matrix(_sceneColor.Width / (float)_sceneColor.Height), ClearColor = new Vector4(0.08f, 0.09f, 0.12f, 1), DebugLines = true });
         if (_gameArea.W > 0 && _gameColor is not null)
         {
-            MainCameraSystem.TryMainCamera(_cameras, _gameArea.W / _gameArea.H, out var matrix, out var clear);
+            MainCameraSystem.TryMainCamera(_cameras, _gameColor.Width / (float)_gameColor.Height, out var matrix, out var clear);
             _render.Scene.DrawView(frame.Commands, new ViewDesc { Color = _gameColor, Depth = _gameDepth!, ViewProjection = matrix, ClearColor = clear, Sprites = true });
         }
+        if (_terminal is not null)
+        {
+            if (_sceneArea.W > 0 && _sceneColor is not null) _sceneTerminal!.Capture(frame.Commands, _sceneColor);
+            if (_gameArea.W > 0 && _gameColor is not null) _gameTerminal!.Capture(frame.Commands, _gameColor);
+            _terminal.Publish(_ui.Draw.Surface); return;
+        }
         frame.Commands.BeginRenderPass(new RenderPassDesc { Color = new ColorAttachment { Texture = frame.Backbuffer, Load = LoadOp.Clear, Store = StoreOp.Store, ClearColor = new Vector4(0.1f, 0.1f, 0.1f, 1) } });
-        _renderer.Render(frame.Commands, frame.FrameIndex, _ui.Draw, frame.Backbuffer.Width, frame.Backbuffer.Height);
+        _renderer!.Render(frame.Commands, frame.FrameIndex, _ui.Draw, frame.Backbuffer.Width, frame.Backbuffer.Height);
         frame.Commands.EndRenderPass();
     }
     public void Dispose()
@@ -270,7 +301,8 @@ internal sealed partial class EditorHost : IDisposable
         _reloadBuild?.Dispose(); _activeBuild?.Dispose(); _builds.Dispose();
         _render.Device.WaitIdle();
         Registry.Dispose();
-        _renderer.Dispose();
+        _sceneTerminal?.Dispose(); _gameTerminal?.Dispose();
+        _renderer?.Dispose();
         _sceneColor?.Dispose(); _sceneDepth?.Dispose(); _gameColor?.Dispose(); _gameDepth?.Dispose();
     }
 }

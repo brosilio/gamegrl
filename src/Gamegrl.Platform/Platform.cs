@@ -11,6 +11,8 @@ public struct WindowDesc
 }
 
 /// <summary>An OS window. Engine code never sees the backend's types.</summary>
+public interface IOffscreenWindow : IWindow;
+
 public interface IWindow : IDisposable
 {
     /// <summary>The drawable size in pixels (not points), which is what swapchains need.</summary>

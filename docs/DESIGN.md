@@ -29,7 +29,7 @@ Started 2026-11-16.
 | 2026-11-16 | Shaders | Compiled offline to bytecode (Slang); pipelines compiled and cached on the client | See Platform and graphics |
 | 2026-11-16 | Physics | Hand-rolled, separate 2D and 3D engines | Speed is the top priority |
 | 2026-11-16 | Physics determinism | Bit-identical across platforms and architectures | Needed for lockstep and rollback crossplay (consoles included) |
-| 2026-11-16 | Editor UI | In-house immediate-mode UI on the engine's own renderer | Shared with in-game debug UI |
+| 2026-11-16 | Editor UI | AnsiDotNet cell surfaces and layout, shared between desktop and terminal hosts | Desktop composites full-resolution viewports aligned to cell boundaries; terminal uses asynchronous colored-cell previews |
 | 2026-11-16 | Editor responsiveness | The editor UI thread never blocks; long work runs as cancellable background jobs | A direct fix for Unity's editor freezes |
 | 2026-11-16 | Asset loading | Streaming: on-demand, ref-counted, chunked, budgeted | See Assets and serialization |
 | 2026-11-16 | Scene format | Our own line-oriented text format | Merge-friendly, generated parser |
@@ -328,7 +328,7 @@ The asset workflow follows Unity: an `Assets/` folder, `.meta` sidecars with GUI
 
 ## Editor
 
-The editor is the engine plus an editor module, drawn with our own immediate-mode UI on the engine's own renderer.
+The editor is the engine plus editor services and a shared AnsiDotNet cell interface. The desktop host draws glyph cells on the engine renderer and composites full-resolution Scene/Game textures into grid-aligned rectangles. The terminal host uses ANSI/VT output with headless Vulkan viewports converted to colored cells.
 
 - **Panels:** Scene view, Game view, Hierarchy, Inspector, Project browser and Console, in Unity 5's layout with dockable tabs.
 - **Never blocks:** the UI thread only handles input, layout and drawing.
@@ -405,8 +405,11 @@ Multiplayer, web and XR ship in milestones 5 to 7, but their constraints apply f
 
 ## Status
 
-**Milestone 3 (Editor shell): complete, locally validated on Linux.**
-- `Gamegrl.UI`: in-house TrueType parser and antialiased coverage rasterizer, font atlas, draw lists, renderer, buttons, checkboxes, number dragging, vectors, colors, text fields with clipboard, trees, scrolling popups, tabs, scroll views, splitters and images. Uses the system DejaVu Sans font; `GAMEGRL_FONT` overrides its path.
+**Milestone 3 (Editor shell): complete; cell-interface migration under validation.**
+- Editor presentation now uses the sibling `ansidotnet` projects (`AnsiDotNet` and `AnsiDotNet.Layout`) by project reference. A shared `CellUi` paints styled `Surface` cells; AnsiDotNet owns dock/row layout, wide-cell handling and terminal diff encoding. `Gamegrl.UI` remains available for runtime UI and supplies glyph/quad rendering primitives to the thin desktop compositor; the editor no longer instantiates its raster widgets or layout engine.
+- Desktop: monospace glyph atlas, cell backgrounds/styles, full-resolution grid-aligned Scene/Game textures. Terminal (`--terminal` over a TTY, `--stdio` over streams): no SDL, font or display server; headless Vulkan renders two vertical pixels per cell and nonblocking readbacks feed `▀` previews. Offscreen frame acquisition polls fences rather than waiting. A bounded latest-frame output worker isolates slow writes, skips unchanged surfaces and uses AnsiDotNet color reduction/diffing. `--colors` and `--ascii` provide explicit fallback profiles. Classic terminal keys are pulses (the upstream input event model does not expose key releases); exact held-key gameplay remains available in the desktop host.
+- Both hosts share Hierarchy, Inspector, Scene/Game, Project, Console, Tasks, docking, file dialogs, undo, play resources, code reload and extensions. Input coordinates and viewport aspect ratios follow the cell-to-pixel mapping. Tab/arrow navigation, Enter/Space activation, Unicode-aware text editing, selection and paste work alongside mouse input. On terminal disconnect, dirty edit scenes are copied to `Library/recovery`; File / Recover disconnected scene reopens the newest copy as untitled.
+
 - `Gamegrl.Editor`: a standalone JIT host that accepts a project root and a game `.csproj`. Hierarchy, generated-field Inspector, Scene/Game tabs, Project, Console and Tasks. Tabs can be moved and reordered among four resizable dock regions; wheel scrolling reaches overflowing tab strips. Create empty entities, cubes, cameras and sprites; add/remove components; assign assets from a picker; instantiate prefabs from Project; save scenes. Editor orbit/pan/zoom camera, mesh picking, framing and a world-axis move gizmo (including parent-space conversion).
 - Edit commands store serialized text diffs, coalescing drags and text edits. Undo/redo reconstructs the scene through generated serializers. Play snapshots the serialized edit scene and time; Stop restores them and selection. Game startup runs only when entering play, never a second time during hot reload.
 - Imports, source reads, saves and game builds use cancellable worker jobs; results apply between frames. Rendering reads an in-memory asset catalog. Source changes trigger debounced builds into separate output directories; collectible game assemblies share the host's engine assemblies. Reload preserves serialized entity state and selection, releases old systems/resources/serializers, and resets undo history across schema changes. A failed build keeps the current game running.

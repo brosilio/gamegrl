@@ -5,11 +5,12 @@ APIs. Design and decisions: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Build and run
 
-Needs the .NET 10 SDK, SDL3, a Vulkan 1.3 driver and `glslc` (shaderc).
+Needs the .NET 10 SDK, Vulkan 1.3 (hardware or software), and `glslc` (shaderc). The editor references the sibling `../ansidotnet` repository. SDL3 and a TrueType monospace font are needed for desktop mode; terminal mode needs neither.
 
 ```sh
 ./scripts/ci.sh                                   # build, test (JIT + NativeAOT), publish the sample
-dotnet run --project src/Gamegrl.Editor -- samples/Spinners # JIT editor
+dotnet run --project src/Gamegrl.Editor -- samples/Spinners # desktop cell editor
+dotnet run --project src/Gamegrl.Editor -- samples/Spinners --terminal # real TTY / SSH PTY
 dotnet run --project samples/Spinners/Build -- run      # dev: run from the asset database, edits hot-reload
 dotnet run --project samples/Spinners/Build -- author   # regenerate the sample's prefabs and main.scene
 ./artifacts/spinners/Spinners                           # the NativeAOT player + spinners.ggpak from ci.sh
@@ -17,7 +18,7 @@ dotnet run --project samples/Spinners/Build -- author   # regenerate the sample'
 
 Escape quits the sample.
 
-The editor uses DejaVu Sans on Linux; set `GAMEGRL_FONT` to another TrueType font path if needed.
+The desktop editor uses DejaVu Sans Mono on Linux; set `GAMEGRL_FONT` to another TrueType font path if needed.
 Right-drag orbits the Scene camera, middle-drag pans, the wheel zooms, and F frames the selection.
 Click a mesh to select it; drag its colored axis handles to move it. Project prefab rows instantiate prefabs.
 Ctrl+N creates a scene, Ctrl+S saves, Ctrl+Shift+S saves under a new path, Ctrl+Z/Ctrl+Shift+Z undo/redo,
@@ -40,7 +41,7 @@ dotnet run --project tests/Gamegrl.Editor.Tests -- --graphics # optional desktop
 | `src/Gamegrl.Platform`, `.Sdl3` | Windows and input behind `IPlatform`; the SDL3 backend |
 | `src/Gamegrl.Rhi`, `.Vulkan` | The render hardware interface; the Vulkan 1.3 backend |
 | `src/Gamegrl.UI` | TrueType text, immediate-mode widgets and UI rendering |
-| `src/Gamegrl.Editor` | JIT editor host, scene editing, jobs and collectible game code |
+| `src/Gamegrl.Editor` | Shared AnsiDotNet cell interface, desktop/TTY hosts, headless viewports, scene editing, jobs and collectible game code |
 | `src/Gamegrl.Rendering` | 3D mesh and 2D sprite renderers |
 | `src/Gamegrl.Assets` | Runtime asset formats, the `.ggpak` archive, `IAssetSource` |
 | `src/Gamegrl.AssetPipeline` | Editor-only: `.meta` files, importers (PNG, glTF, scenes, prefabs), cache, packing, watching |
@@ -68,3 +69,24 @@ handles through their lifecycle callbacks.
 Editor builds live in leased session workspaces under the temporary directory. Replaced and failed builds are
 removed in the background, with the current build retained for rollback. Owned stale sessions are reclaimed
 on later startup/build; unrelated directories and live editor sessions are left alone.
+
+The interface is a shared character grid: desktop mode renders sharp glyphs and full-resolution viewport
+textures, while terminal mode sends diffed ANSI cells with half-block color previews. Standard SSH with a PTY
+runs `--terminal` directly. `--stdio --columns 120 --rows 40` provides the same editor through stdin/stdout
+streams for an external transport; that stream mode uses the supplied size. `--colors truecolor|256|16|none`
+and `--ascii` select fallbacks. Terminal preview output keeps only the latest pending frame, so a slow
+connection does not build a video queue or stall editor jobs. Vulkan is required for scene rendering, but a
+display server is not; a software Vulkan driver also works.
+
+Tab or arrow keys move focus, Enter/Space activate controls, Escape cancels fields/dialogs, and mouse reporting
+supports selection, scrolling, docking and splitters. Ctrl+Q requests a clean close. Classic terminal key events
+are pulses; desktop mode retains precise held-key gameplay. Unsaved scenes on terminal disconnect go to
+`Library/recovery` and can be reopened with Menu / File / Recover disconnected scene. Terminal clipboard
+copy/paste uses an internal session buffer plus bracketed paste; it does not read the operator's OS clipboard.
+
+`EditorContext.Ui` is now `CellUi`; extension rectangles and widget sizes are character cells. Fonts and ANSI
+transports stay outside extension code. `Gamegrl.UI` remains an optional runtime/debug UI library.
+
+```sh
+dotnet run --project tests/Gamegrl.Editor.Tests -- --terminal-smoke # headless Vulkan + stream terminal end to end
+```

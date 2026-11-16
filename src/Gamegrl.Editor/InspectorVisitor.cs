@@ -5,7 +5,7 @@ using Gamegrl.UI;
 namespace Gamegrl.Editor;
 
 /// <summary>Edits the very same field stream used by scene files and the AOT player.</summary>
-internal sealed class InspectorVisitor(Ui ui, Func<(string Label, Guid Id)[]> assets) : IFieldVisitor
+internal sealed class InspectorVisitor(CellUi ui, Func<(string Label, Guid Id)[]> assets) : IFieldVisitor
 {
     private FieldMetadata _metadata;
     public void Metadata(in FieldMetadata metadata) => _metadata = metadata;

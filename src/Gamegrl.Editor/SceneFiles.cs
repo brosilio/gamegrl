@@ -23,6 +23,10 @@ internal sealed class SceneFiles(string root, SceneDocument document, EditorJobs
         CurrentPath = null;
         _generation++;
     });
+    public void RequestRecovered(string text) => Navigate(() =>
+    {
+        document.Open(text); document.MarkSaved(""); CurrentPath = null; _generation++;
+    });
     public void RequestClose() => Navigate(() => ExitRequested = true);
     private void Navigate(Action action)
     {

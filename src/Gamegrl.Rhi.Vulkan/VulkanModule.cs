@@ -10,7 +10,7 @@ public sealed class VulkanModule(VulkanOptions? options = null) : IModule
     public void Build(EngineBuilder builder)
     {
         var window = builder.World.Resource<PlatformContext>().MainWindow;
-        var device = new VulkanDevice(window, options);
+        var device = new VulkanDevice(window is IOffscreenWindow ? null : window, options);
         builder.SetResource<GpuDevice>(device);
         builder.OnStop(_ => device.Dispose());
     }

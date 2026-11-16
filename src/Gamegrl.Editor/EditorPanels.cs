@@ -78,7 +78,7 @@ internal sealed partial class EditorHost
             var info = ComponentRegistry.Get(type);
             if (type == Component<SceneId>.Id || type == Component<PrefabInstance>.Id || type == Component<LocalToWorld>.Id) continue;
             _ui.PushId(type);
-            _ui.Row(-1, 24);
+            _ui.Row(-1, 2);
             _ui.Header(info.Name[(info.Name.LastIndexOf('.') + 1)..]);
             if (_ui.Button("×")) remove = type;
             var pointer = archetype.Ptr(archetype.ColumnOf(type), row);
@@ -111,7 +111,7 @@ internal sealed partial class EditorHost
     }
     private void Project(Rect area)
     {
-        _ui.BeginScroll(area.Shrink(5), "project-scroll");
+        _ui.BeginScroll(area.Shrink(1), "project-scroll");
         foreach (string path in _assets.Files)
         {
             if (!_ui.Selectable(_ui.Next(), path, path == Files.CurrentPath)) continue;
@@ -130,7 +130,7 @@ internal sealed partial class EditorHost
     }
     private void ConsolePanel(Rect area)
     {
-        _ui.BeginArea(area.Shrink(5));
+        _ui.BeginArea(area.Shrink(1));
         if (_ui.Button("Clear")) Log.Clear();
         _ui.BeginScroll(_ui.Remaining, "console-scroll");
         foreach (var entry in Log.Snapshot())
@@ -142,7 +142,7 @@ internal sealed partial class EditorHost
     }
     private void Tasks(Rect area)
     {
-        _ui.BeginArea(area.Shrink(5));
+        _ui.BeginArea(area.Shrink(1));
         if (_ui.Button("Cancel tasks")) Jobs.CancelAll();
         foreach (string job in Jobs.Running) _ui.Label(job);
         if (!Jobs.Busy) _ui.Label("No running tasks", true);
@@ -160,7 +160,7 @@ internal sealed partial class EditorHost
         if (!world.IsAlive(selected)) selected = default;
         if (input.WasPressed(Key.F) && !_ui.WantsKeyboard && !selected.IsNull && world.Has<LocalToWorld>(selected))
         { _camera.Target = world.Get<LocalToWorld>(selected).Position; _camera.Distance = 6; }
-        var matrix = _camera.Matrix(_sceneArea.W / _sceneArea.H);
+        var matrix = _camera.Matrix((_sceneArea.W * CellWidth) / (_sceneArea.H * CellHeight));
         for (int i = -20; i <= 20; i++)
         {
             var color = i == 0 ? new Vector4(0.3f, 0.35f, 0.4f, 1) : new Vector4(0.16f, 0.18f, 0.22f, 1);
@@ -184,11 +184,11 @@ internal sealed partial class EditorHost
                     if (!SceneCamera.Project(position + direction * length, matrix, _sceneArea, out var end)) continue;
                     var segment = end - center;
                     float t = Math.Clamp(Vector2.Dot(input.MousePosition - center, segment) / Math.Max(segment.LengthSquared(), 0.001f), 0, 1);
-                    bool hit = Vector2.Distance(input.MousePosition, center + t * segment) < 7 && _ui.IsHovered(_sceneArea);
+                    bool hit = Vector2.Distance(input.MousePosition, center + t * segment) < 0.6f && _ui.IsHovered(_sceneArea);
                     overGizmo |= hit;
                     var color = axis == 0 ? _ui.Theme.AxisX : axis == 1 ? _ui.Theme.AxisY : _ui.Theme.AxisZ;
-                    _ui.Draw.Line(center, end, hit || _dragAxis == axis ? Color32.White : color, 3);
-                    _ui.Draw.Rect(new Rect(end.X - 4, end.Y - 4, 8, 8), color);
+                    _ui.Draw.Line(center, end, hit || _dragAxis == axis ? Color32.White : color, 1);
+                    _ui.Draw.Rect(new Rect(end.X, end.Y, 1, 1), color);
                     if (hit && input.WasPressed(MouseButton.Left) && _dragAxis < 0)
                     {
                         Document.BeginEdit(); _dragAxis = axis;

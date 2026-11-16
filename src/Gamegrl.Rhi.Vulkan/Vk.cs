@@ -40,9 +40,9 @@ internal static class VkConst
     public const uint QueueGraphics = 1;
     public const uint MemoryDeviceLocal = 1, MemoryHostVisible = 2, MemoryHostCoherent = 4;
     public const uint ImageLayoutUndefined = 0, ImageLayoutColorAttachment = 2, ImageLayoutDepthAttachment = 3,
-        ImageLayoutShaderReadOnly = 5, ImageLayoutTransferDst = 7, ImageLayoutPresentSrc = 1000001002;
+        ImageLayoutShaderReadOnly = 5, ImageLayoutTransferSrc = 6, ImageLayoutTransferDst = 7, ImageLayoutPresentSrc = 1000001002;
     public const uint AspectColor = 1, AspectDepth = 2;
-    public const uint ImageUsageTransferDst = 2, ImageUsageSampled = 4, ImageUsageColorAttachment = 0x10, ImageUsageDepthAttachment = 0x20;
+    public const uint ImageUsageTransferSrc = 1, ImageUsageTransferDst = 2, ImageUsageSampled = 4, ImageUsageColorAttachment = 0x10, ImageUsageDepthAttachment = 0x20;
     public const uint BufferUsageTransferSrc = 1, BufferUsageTransferDst = 2, BufferUsageUniform = 0x10, BufferUsageStorage = 0x20,
         BufferUsageIndex = 0x40, BufferUsageVertex = 0x80;
     public const uint FormatR8G8B8A8Unorm = 37, FormatR8G8B8A8Srgb = 43, FormatB8G8R8A8Unorm = 44, FormatB8G8R8A8Srgb = 50,
@@ -71,7 +71,7 @@ internal static class VkConst
         StageLateFragmentTests = 0x200, StageFragmentShader = 0x80, StageVertexShader = 0x8, StageTransfer = 0x1000,
         StageAllCommands = 0x10000, StageBottomOfPipe = 0x2000, StageAllTransfer = 0x1000;
     public const ulong AccessNone = 0, AccessShaderRead = 0x20, AccessColorAttachmentWrite = 0x100, AccessColorAttachmentRead = 0x80,
-        AccessDepthAttachmentRead = 0x200, AccessDepthAttachmentWrite = 0x400, AccessTransferWrite = 0x1000, AccessMemoryRead = 0x8000;
+        AccessDepthAttachmentRead = 0x200, AccessDepthAttachmentWrite = 0x400, AccessTransferRead = 0x800, AccessTransferWrite = 0x1000, AccessMemoryRead = 0x8000;
 
     public const uint DebugSeverityVerbose = 1, DebugSeverityInfo = 0x10, DebugSeverityWarning = 0x100, DebugSeverityError = 0x1000;
     public const uint DebugTypeGeneral = 1, DebugTypeValidation = 2, DebugTypePerformance = 4;
@@ -538,6 +538,7 @@ internal static unsafe class Vk
     public static delegate* unmanaged<nint, VkResult> EndCommandBuffer;
     public static delegate* unmanaged<nint, VkFenceCreateInfo*, void*, ulong*, VkResult> CreateFence;
     public static delegate* unmanaged<nint, ulong, void*, void> DestroyFence;
+    public static delegate* unmanaged<nint, ulong, VkResult> GetFenceStatus;
     public static delegate* unmanaged<nint, uint, ulong*, uint, ulong, VkResult> WaitForFences;
     public static delegate* unmanaged<nint, uint, ulong*, VkResult> ResetFences;
     public static delegate* unmanaged<nint, VkSemaphoreCreateInfo*, void*, ulong*, VkResult> CreateSemaphore;
@@ -571,6 +572,7 @@ internal static unsafe class Vk
     public static delegate* unmanaged<nint, uint, uint, uint, uint, void> CmdDraw;
     public static delegate* unmanaged<nint, uint, uint, uint, int, uint, void> CmdDrawIndexed;
     public static delegate* unmanaged<nint, ulong, ulong, uint, VkBufferCopy*, void> CmdCopyBuffer;
+    public static delegate* unmanaged<nint, ulong, uint, ulong, uint, VkBufferImageCopy*, void> CmdCopyImageToBuffer;
     public static delegate* unmanaged<nint, ulong, ulong, uint, uint, VkBufferImageCopy*, void> CmdCopyBufferToImage;
 
     public static void LoadLoader()
@@ -600,11 +602,11 @@ internal static unsafe class Vk
         EnumerateDeviceExtensionProperties = (delegate* unmanaged<nint, byte*, uint*, VkExtensionProperties*, VkResult>)Instance(i, "vkEnumerateDeviceExtensionProperties");
         CreateDevice = (delegate* unmanaged<nint, VkDeviceCreateInfo*, void*, nint*, VkResult>)Instance(i, "vkCreateDevice");
         GetDeviceProcAddr = (delegate* unmanaged<nint, byte*, nint>)Instance(i, "vkGetDeviceProcAddr");
-        GetPhysicalDeviceSurfaceSupportKHR = (delegate* unmanaged<nint, uint, ulong, uint*, VkResult>)Instance(i, "vkGetPhysicalDeviceSurfaceSupportKHR");
-        GetPhysicalDeviceSurfaceCapabilitiesKHR = (delegate* unmanaged<nint, ulong, VkSurfaceCapabilitiesKHR*, VkResult>)Instance(i, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
-        GetPhysicalDeviceSurfaceFormatsKHR = (delegate* unmanaged<nint, ulong, uint*, VkSurfaceFormatKHR*, VkResult>)Instance(i, "vkGetPhysicalDeviceSurfaceFormatsKHR");
-        GetPhysicalDeviceSurfacePresentModesKHR = (delegate* unmanaged<nint, ulong, uint*, uint*, VkResult>)Instance(i, "vkGetPhysicalDeviceSurfacePresentModesKHR");
-        DestroySurfaceKHR = (delegate* unmanaged<nint, ulong, void*, void>)Instance(i, "vkDestroySurfaceKHR");
+        GetPhysicalDeviceSurfaceSupportKHR = (delegate* unmanaged<nint, uint, ulong, uint*, VkResult>)Instance(i, "vkGetPhysicalDeviceSurfaceSupportKHR", optional: true);
+        GetPhysicalDeviceSurfaceCapabilitiesKHR = (delegate* unmanaged<nint, ulong, VkSurfaceCapabilitiesKHR*, VkResult>)Instance(i, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", optional: true);
+        GetPhysicalDeviceSurfaceFormatsKHR = (delegate* unmanaged<nint, ulong, uint*, VkSurfaceFormatKHR*, VkResult>)Instance(i, "vkGetPhysicalDeviceSurfaceFormatsKHR", optional: true);
+        GetPhysicalDeviceSurfacePresentModesKHR = (delegate* unmanaged<nint, ulong, uint*, uint*, VkResult>)Instance(i, "vkGetPhysicalDeviceSurfacePresentModesKHR", optional: true);
+        DestroySurfaceKHR = (delegate* unmanaged<nint, ulong, void*, void>)Instance(i, "vkDestroySurfaceKHR", optional: true);
         CreateDebugUtilsMessengerEXT = (delegate* unmanaged<nint, VkDebugUtilsMessengerCreateInfoEXT*, void*, ulong*, VkResult>)Instance(i, "vkCreateDebugUtilsMessengerEXT", optional: true);
         DestroyDebugUtilsMessengerEXT = (delegate* unmanaged<nint, ulong, void*, void>)Instance(i, "vkDestroyDebugUtilsMessengerEXT", optional: true);
     }
@@ -614,11 +616,11 @@ internal static unsafe class Vk
         DestroyDevice = (delegate* unmanaged<nint, void*, void>)Device(d, "vkDestroyDevice");
         GetDeviceQueue = (delegate* unmanaged<nint, uint, uint, nint*, void>)Device(d, "vkGetDeviceQueue");
         DeviceWaitIdle = (delegate* unmanaged<nint, VkResult>)Device(d, "vkDeviceWaitIdle");
-        CreateSwapchainKHR = (delegate* unmanaged<nint, VkSwapchainCreateInfoKHR*, void*, ulong*, VkResult>)Device(d, "vkCreateSwapchainKHR");
-        DestroySwapchainKHR = (delegate* unmanaged<nint, ulong, void*, void>)Device(d, "vkDestroySwapchainKHR");
-        GetSwapchainImagesKHR = (delegate* unmanaged<nint, ulong, uint*, ulong*, VkResult>)Device(d, "vkGetSwapchainImagesKHR");
-        AcquireNextImageKHR = (delegate* unmanaged<nint, ulong, ulong, ulong, ulong, uint*, VkResult>)Device(d, "vkAcquireNextImageKHR");
-        QueuePresentKHR = (delegate* unmanaged<nint, VkPresentInfoKHR*, VkResult>)Device(d, "vkQueuePresentKHR");
+        CreateSwapchainKHR = (delegate* unmanaged<nint, VkSwapchainCreateInfoKHR*, void*, ulong*, VkResult>)Device(d, "vkCreateSwapchainKHR", optional: true);
+        DestroySwapchainKHR = (delegate* unmanaged<nint, ulong, void*, void>)Device(d, "vkDestroySwapchainKHR", optional: true);
+        GetSwapchainImagesKHR = (delegate* unmanaged<nint, ulong, uint*, ulong*, VkResult>)Device(d, "vkGetSwapchainImagesKHR", optional: true);
+        AcquireNextImageKHR = (delegate* unmanaged<nint, ulong, ulong, ulong, ulong, uint*, VkResult>)Device(d, "vkAcquireNextImageKHR", optional: true);
+        QueuePresentKHR = (delegate* unmanaged<nint, VkPresentInfoKHR*, VkResult>)Device(d, "vkQueuePresentKHR", optional: true);
         QueueSubmit2 = (delegate* unmanaged<nint, uint, VkSubmitInfo2*, ulong, VkResult>)Device(d, "vkQueueSubmit2");
         QueueWaitIdle = (delegate* unmanaged<nint, VkResult>)Device(d, "vkQueueWaitIdle");
         CreateImageView = (delegate* unmanaged<nint, VkImageViewCreateInfo*, void*, ulong*, VkResult>)Device(d, "vkCreateImageView");
@@ -644,6 +646,7 @@ internal static unsafe class Vk
         EndCommandBuffer = (delegate* unmanaged<nint, VkResult>)Device(d, "vkEndCommandBuffer");
         CreateFence = (delegate* unmanaged<nint, VkFenceCreateInfo*, void*, ulong*, VkResult>)Device(d, "vkCreateFence");
         DestroyFence = (delegate* unmanaged<nint, ulong, void*, void>)Device(d, "vkDestroyFence");
+        GetFenceStatus = (delegate* unmanaged<nint, ulong, VkResult>)Device(d, "vkGetFenceStatus");
         WaitForFences = (delegate* unmanaged<nint, uint, ulong*, uint, ulong, VkResult>)Device(d, "vkWaitForFences");
         ResetFences = (delegate* unmanaged<nint, uint, ulong*, VkResult>)Device(d, "vkResetFences");
         CreateSemaphore = (delegate* unmanaged<nint, VkSemaphoreCreateInfo*, void*, ulong*, VkResult>)Device(d, "vkCreateSemaphore");
@@ -675,6 +678,7 @@ internal static unsafe class Vk
         CmdDraw = (delegate* unmanaged<nint, uint, uint, uint, uint, void>)Device(d, "vkCmdDraw");
         CmdDrawIndexed = (delegate* unmanaged<nint, uint, uint, uint, int, uint, void>)Device(d, "vkCmdDrawIndexed");
         CmdCopyBuffer = (delegate* unmanaged<nint, ulong, ulong, uint, VkBufferCopy*, void>)Device(d, "vkCmdCopyBuffer");
+        CmdCopyImageToBuffer = (delegate* unmanaged<nint, ulong, uint, ulong, uint, VkBufferImageCopy*, void>)Device(d, "vkCmdCopyImageToBuffer");
         CmdCopyBufferToImage = (delegate* unmanaged<nint, ulong, ulong, uint, uint, VkBufferImageCopy*, void>)Device(d, "vkCmdCopyBufferToImage");
     }
 
@@ -686,11 +690,11 @@ internal static unsafe class Vk
         return p;
     }
 
-    private static nint Device(nint device, string name)
+    private static nint Device(nint device, string name, bool optional = false)
     {
         nint p;
         fixed (byte* n = Utf8(name)) p = GetDeviceProcAddr(device, n);
-        if (p == 0) throw new InvalidOperationException($"Vulkan function {name} not found.");
+        if (p == 0 && !optional) throw new InvalidOperationException($"Vulkan function {name} not found.");
         return p;
     }
 

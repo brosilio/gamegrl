@@ -30,7 +30,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
     private readonly nint _queue;
     private readonly uint _queueFamily;
     private readonly VkPhysicalDeviceMemoryProperties _memory;
-    private readonly IWindow _mainWindow;
+    private readonly IWindow? _mainWindow;
     private ulong _mainSurface;
     private readonly ulong _descriptorPool;
     private readonly ulong _uploadPool;
@@ -40,6 +40,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
     private ulong _frameNumber;
     private VulkanSwapchain? _currentSwapchain;
     private uint _currentImage;
+    private bool _offscreenFrame;
     private bool _disposed;
 
     private sealed class PerFrame
@@ -48,18 +49,19 @@ public sealed unsafe class VulkanDevice : GpuDevice
         public nint Cmd;
         public ulong Fence;
         public ulong ImageAcquired;
+        public ulong? Submitted;
         public readonly List<Deferred> Deletes = new();
         public readonly VulkanCommandList List = new();
     }
 
-    public VulkanDevice(IWindow mainWindow, VulkanOptions? options = null)
+    public VulkanDevice(IWindow? mainWindow, VulkanOptions? options = null)
     {
         options ??= new VulkanOptions();
         _mainWindow = mainWindow;
         Vk.LoadLoader();
 
         // Instance.
-        var extensions = new List<string>(mainWindow.VulkanInstanceExtensions);
+        var extensions = new List<string>(mainWindow?.VulkanInstanceExtensions ?? []);
         var layers = new List<string>();
         bool debugUtils = false;
         if (options.Validation && HasInstanceLayer(ValidationLayer))
@@ -112,7 +114,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
             if (Vk.CreateDebugUtilsMessengerEXT(_instance, &mci, null, &m) == VkResult.Success) _messenger = m;
         }
 
-        _mainSurface = mainWindow.CreateVulkanSurface(_instance);
+        _mainSurface = mainWindow?.CreateVulkanSurface(_instance) ?? 0;
 
         // Physical device: Vulkan 1.3, a graphics queue that can present, VK_KHR_swapchain.
         (_physical, _queueFamily) = PickPhysicalDevice(options.PreferDiscrete);
@@ -143,7 +145,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
         f13.Bits[VkPhysicalDeviceVulkan13Features.DynamicRendering] = 1;
         f13.Bits[VkPhysicalDeviceVulkan13Features.Synchronization2] = 1;
         var f2 = new VkPhysicalDeviceFeatures2 { SType = VkStructureType.PhysicalDeviceFeatures2, PNext = &f13 };
-        using (var dext = new Utf8Strings(["VK_KHR_swapchain"]))
+        using (var dext = new Utf8Strings(mainWindow is null ? [] : ["VK_KHR_swapchain"]))
         {
             var dci = new VkDeviceCreateInfo
             {
@@ -169,7 +171,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
             var f = _frames[i] = new PerFrame();
             f.Pool = CreateCommandPool(VkConst.CommandPoolTransient);
             f.Cmd = AllocateCommandBuffer(f.Pool);
-            f.List.Cmd = f.Cmd;
+            f.List.Cmd = f.Cmd; f.List.Device = this;
             f.Fence = CreateFence(signaled: true);
             f.ImageAcquired = CreateSemaphore();
         }
@@ -215,6 +217,11 @@ public sealed unsafe class VulkanDevice : GpuDevice
 
     public override Swapchain CreateSwapchain(IWindow window, bool vsync = true)
     {
+        if (window is IOffscreenWindow)
+        {
+            var size = window.PixelSize;
+            return new VulkanOffscreenSwapchain(this, Math.Max(1, size.Width), Math.Max(1, size.Height));
+        }
         ulong surface;
         if (ReferenceEquals(window, _mainWindow) && _mainSurface != 0)
         {
@@ -259,6 +266,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
         if ((desc.Usage & TextureUsage.Sampled) != 0) usage |= VkConst.ImageUsageSampled | VkConst.ImageUsageTransferDst;
         if ((desc.Usage & TextureUsage.RenderTarget) != 0) usage |= VkConst.ImageUsageColorAttachment;
         if ((desc.Usage & TextureUsage.DepthStencil) != 0) usage |= VkConst.ImageUsageDepthAttachment;
+        if ((desc.Usage & TextureUsage.CopySrc) != 0) usage |= VkConst.ImageUsageTransferSrc;
         if ((desc.Usage & TextureUsage.CopyDst) != 0) usage |= VkConst.ImageUsageTransferDst;
         var ici = new VkImageCreateInfo
         {
@@ -390,6 +398,8 @@ public sealed unsafe class VulkanDevice : GpuDevice
         return new VulkanBindGroup(this, set);
     }
 
+    public override GpuReadback CreateReadback(int width, int height) => new VulkanReadback(this, width, height);
+
     public override GraphicsPipeline CreateGraphicsPipeline(GraphicsPipelineDesc desc) => Pipelines.Create(this, desc);
 
     // ------------------------------------------------------------------ uploads
@@ -461,6 +471,22 @@ public sealed unsafe class VulkanDevice : GpuDevice
     public override bool BeginFrame(Swapchain swapchain, out Frame frame)
     {
         frame = default;
+        if (swapchain is VulkanOffscreenSwapchain offscreen)
+        {
+            var slot = _frames[_frameNumber % FramesInFlight];
+            ulong ready = slot.Fence;
+            var status = Vk.WaitForFences(_device, 1, &ready, 1, 0);
+            if (status == VkResult.Timeout) return false;
+            Vk.Check(status, "vkWaitForFences");
+            FlushDeletes(slot);
+            Vk.Check(Vk.ResetFences(_device, 1, &ready), "vkResetFences");
+            Vk.Check(Vk.ResetCommandPool(_device, slot.Pool, 0), "vkResetCommandPool");
+            var start = new VkCommandBufferBeginInfo { SType = VkStructureType.CommandBufferBeginInfo, Flags = VkConst.CommandBufferOneTimeSubmit };
+            Vk.Check(Vk.BeginCommandBuffer(slot.Cmd, &start), "vkBeginCommandBuffer");
+            _offscreenFrame = true;
+            frame = new Frame(slot.List, offscreen.Texture, (int)(_frameNumber % FramesInFlight), _frameNumber);
+            return true;
+        }
         var sc = (VulkanSwapchain)swapchain;
         var f = _frames[_frameNumber % FramesInFlight];
 
@@ -495,6 +521,15 @@ public sealed unsafe class VulkanDevice : GpuDevice
 
     public override void EndFrame(in Frame frame)
     {
+        if (_offscreenFrame)
+        {
+            var slot = _frames[_frameNumber % FramesInFlight];
+            Vk.Check(Vk.EndCommandBuffer(slot.Cmd), "vkEndCommandBuffer");
+            var buffer = new VkCommandBufferSubmitInfo { SType = VkStructureType.CommandBufferSubmitInfo, CommandBuffer = slot.Cmd };
+            var submission = new VkSubmitInfo2 { SType = VkStructureType.SubmitInfo2, CommandBufferInfoCount = 1, CommandBufferInfos = &buffer };
+            Vk.Check(Vk.QueueSubmit2(_queue, 1, &submission, slot.Fence), "vkQueueSubmit2");
+            slot.Submitted = _frameNumber; _offscreenFrame = false; _frameNumber++; return;
+        }
         var sc = _currentSwapchain ?? throw new InvalidOperationException("EndFrame without BeginFrame.");
         var f = _frames[_frameNumber % FramesInFlight];
         var backbuffer = sc.Images[_currentImage];
@@ -532,9 +567,20 @@ public sealed unsafe class VulkanDevice : GpuDevice
         if (r is VkResult.ErrorOutOfDateKhr or VkResult.SuboptimalKhr) sc.Invalidate();
         else Vk.Check(r, "vkQueuePresentKHR");
 
+        f.Submitted = _frameNumber;
         _currentSwapchain = null;
         _frameNumber++;
     }
+
+    internal bool IsComplete(ulong number)
+    {
+        var slot = _frames[number % FramesInFlight];
+        if (slot.Submitted is not { } submitted) return false;
+        if (submitted > number) return true;
+        if (submitted != number) return false;
+        return Vk.GetFenceStatus(_device, slot.Fence) == VkResult.Success;
+    }
+    internal ulong RecordingFrame => _frameNumber;
 
     public override void WaitIdle() => Vk.DeviceWaitIdle(_device);
 
@@ -657,7 +703,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
                 api = *(uint*)(p + VkPhysicalDevicePropertiesLayout.ApiVersion);
                 type = *(uint*)(p + VkPhysicalDevicePropertiesLayout.DeviceType);
             }
-            if (api < VkConst.ApiVersion13 || !HasDeviceExtension(pd, "VK_KHR_swapchain")) continue;
+            if (api < VkConst.ApiVersion13 || _mainWindow is not null && !HasDeviceExtension(pd, "VK_KHR_swapchain")) continue;
             int family = FindQueueFamily(pd);
             if (family < 0) continue;
             int score = type switch { 2 => preferDiscrete ? 3 : 2, 1 => preferDiscrete ? 2 : 3, 4 => 0, _ => 1 }; // 4 = CPU
@@ -680,6 +726,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
         for (uint i = 0; i < count; i++)
         {
             if ((families[i].QueueFlags & VkConst.QueueGraphics) == 0) continue;
+            if (_mainWindow is null) return (int)i;
             uint present;
             Vk.GetPhysicalDeviceSurfaceSupportKHR(pd, i, _mainSurface, &present);
             if (present != 0) return (int)i;
@@ -744,7 +791,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
     private static uint DebugCallback(uint severity, uint types, VkDebugUtilsMessengerCallbackDataEXT* data, void* user)
     {
         string level = severity >= VkConst.DebugSeverityError ? "error" : "warning";
-        Console.Error.WriteLine($"[vulkan {level}] {Marshal.PtrToStringUTF8((nint)data->Message)}");
+        Log.Warn($"[vulkan {level}] {Marshal.PtrToStringUTF8((nint)data->Message)}");
         return 0;
     }
 

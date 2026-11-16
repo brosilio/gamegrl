@@ -15,24 +15,33 @@ internal sealed partial class EditorHost
     private void RegisterPanels()
     {
         _context = new EditorContext(_app, _ui, Document, Jobs);
-        Registry.AddPanel("hierarchy", "Hierarchy", DockRegion.Left, (_, r) => Hierarchy(r.Shrink(5)));
+        Registry.AddPanel("hierarchy", "Hierarchy", DockRegion.Left, (_, r) => Hierarchy(r.Shrink(1)));
         Registry.AddPanel("scene", "Scene", DockRegion.Center, (_, r) =>
         {
-            _sceneArea = r; EnsureTarget(ref _sceneColor, ref _sceneDepth, r); _ui.Image(r, _sceneColor!);
+            _sceneArea = r; EnsureTarget(ref _sceneColor, ref _sceneDepth, r); _ui.Image(r, _sceneColor!); _sceneTerminal?.Paint(_ui.Draw, r, _sceneColor!);
             SceneInteraction(_ui.Input);
         });
         Registry.AddPanel("game", "Game", DockRegion.Center, (_, r) =>
         {
-            _gameArea = r; EnsureTarget(ref _gameColor, ref _gameDepth, r); _ui.Image(r, _gameColor!);
-            _app.World.Resource<Gamegrl.Rendering.ScreenSize>() = new() { Width = (int)r.W, Height = (int)r.H };
+            _gameArea = r; EnsureTarget(ref _gameColor, ref _gameDepth, r); _ui.Image(r, _gameColor!); _gameTerminal?.Paint(_ui.Draw, r, _gameColor!);
+            _app.World.Resource<Gamegrl.Rendering.ScreenSize>() = new() { Width = _gameColor!.Width, Height = _gameColor.Height };
         });
-        Registry.AddPanel("inspector", "Inspector", DockRegion.Right, (_, r) => Inspector(r.Shrink(5)));
+        Registry.AddPanel("inspector", "Inspector", DockRegion.Right, (_, r) => Inspector(r.Shrink(1)));
         Registry.AddPanel("project", "Project", DockRegion.Bottom, (_, r) => Project(r));
         Registry.AddPanel("console", "Console", DockRegion.Bottom, (_, r) => ConsolePanel(r));
         Registry.AddPanel("tasks", "Tasks", DockRegion.Bottom, (_, r) => Tasks(r));
         Registry.AddMenu("file.new", "File / New", _ => Files.RequestNew());
         Registry.AddMenu("file.save", "File / Save", _ => Files.Save());
         Registry.AddMenu("file.saveAs", "File / Save As", _ => Files.SaveAs());
+        Registry.AddMenu("file.recover", "File / Recover disconnected scene", _ =>
+        {
+            Jobs.Run("Read recovered scene", _ =>
+            {
+                string directory = Path.Combine(_root, "Library", "recovery");
+                string? path = Directory.Exists(directory) ? Directory.EnumerateFiles(directory, "*.scene").OrderDescending(StringComparer.Ordinal).FirstOrDefault() : null;
+                return path is null ? throw new FileNotFoundException("No disconnected scene recovery is available.") : File.ReadAllText(path);
+            }, Files.RequestRecovered);
+        });
         Registry.AddMenu("layout.reset", "Layout / Reset", _ =>
         {
             foreach (var panel in Registry.Panels) Docks.Move(panel.Id, panel.Region);
@@ -50,7 +59,7 @@ internal sealed partial class EditorHost
         float total = Docks.Tabs(region).Sum(id => _ui.Font.Measure(Registry.FindPanel(id)!.Title) + _ui.Theme.Padding * 4 + 1);
         uint scrollId = _ui.Id("dock-scroll#" + region);
         float scroll = _ui.GetFloat(scrollId);
-        if (_ui.IsHovered(strip)) scroll -= _ui.Input.Wheel.Y * 40;
+        if (_ui.IsHovered(strip)) scroll -= _ui.Input.Wheel.Y * 4;
         scroll = Math.Clamp(scroll, 0, Math.Max(0, total - strip.W));
         _ui.SetFloat(scrollId, scroll);
         float x = strip.X - scroll;
@@ -62,21 +71,21 @@ internal sealed partial class EditorHost
             var tab = new Rect(x, strip.Y, width, strip.H);
             bool clicked = _ui.Behavior(tab, _ui.Id("dock#" + id), out bool hover, out _);
             if (hover && _ui.Input.WasPressed(MouseButton.Left)) { _dragTab = id; _tabPress = _ui.Mouse; }
-            if (clicked && Vector2.Distance(_tabPress, _ui.Mouse) < 5) Docks.Select(region, id);
+            if (clicked && Vector2.Distance(_tabPress, _ui.Mouse) < 1) Docks.Select(region, id);
             _ui.Draw.Rect(tab, Docks.Selected(region) == id ? _ui.Theme.Panel : hover ? _ui.Theme.WidgetHover : _ui.Theme.PanelHeader);
-            if (Docks.Selected(region) == id) _ui.Draw.Rect(tab with { H = 2 }, _ui.Theme.Accent);
+            if (Docks.Selected(region) == id) _ui.Draw.Rect(tab with { H = 1 }, _ui.Theme.Accent);
             _ui.TextIn(tab, panel.Title, _ui.Theme.Text);
             x += width + 1;
         }
         _ui.Draw.PopClip();
         var content = new Rect(area.X, strip.Bottom, area.W, Math.Max(1, area.H - strip.H));
         if (Docks.Selected(region) is { } selected) Registry.FindPanel(selected)!.Draw(_context, content);
-        else _ui.TextIn(content with { H = 30 }, "Drop a tab here", _ui.Theme.TextDim);
+        else _ui.TextIn(content with { H = 1 }, "Drop a tab here", _ui.Theme.TextDim);
     }
     private void FinishDockDrag()
     {
         if (_dragTab is not { } id) return;
-        bool dragged = Vector2.Distance(_tabPress, _ui.Mouse) >= 5;
+        bool dragged = Vector2.Distance(_tabPress, _ui.Mouse) >= 1;
         if (dragged) _ui.Tooltip("Dock " + Registry.FindPanel(id)?.Title);
         if (!_ui.Input.WasReleased(MouseButton.Left)) return;
         if (dragged)

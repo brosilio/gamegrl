@@ -46,6 +46,7 @@ public enum TextureUsage
     RenderTarget = 2,
     DepthStencil = 4,
     CopyDst = 8,
+    CopySrc = 16,
 }
 
 public enum IndexFormat { UInt16, UInt32 }
@@ -180,6 +181,13 @@ public abstract class GpuTexture : GpuResource
     public TextureUsage Usage { get; protected set; }
 }
 
+/// <summary>A bounded asynchronous texture download. A successful read consumes the pending copy.</summary>
+public abstract class GpuReadback : GpuResource
+{
+    public abstract bool Pending { get; }
+    public abstract bool TryRead(Span<byte> destination);
+}
+
 public abstract class GpuSampler : GpuResource;
 public abstract class GpuShader : GpuResource;
 public abstract class BindGroupLayout : GpuResource;
@@ -207,6 +215,7 @@ public abstract class CommandList
     public abstract void SetIndexBuffer(GpuBuffer buffer, IndexFormat format, long offset = 0);
     public abstract void SetViewport(float x, float y, float width, float height);
     public abstract void SetScissor(int x, int y, int width, int height);
+    public abstract void CopyToReadback(GpuTexture texture, GpuReadback readback);
     public abstract void Draw(int vertexCount, int instanceCount = 1, int firstVertex = 0, int firstInstance = 0);
     public abstract void DrawIndexed(int indexCount, int instanceCount = 1, int firstIndex = 0, int vertexOffset = 0, int firstInstance = 0);
 }
@@ -230,6 +239,7 @@ public abstract class GpuDevice : IDisposable
 
     public abstract GpuBuffer CreateBuffer(in BufferDesc desc);
     public abstract GpuTexture CreateTexture(in TextureDesc desc);
+    public abstract GpuReadback CreateReadback(int width, int height);
     public abstract GpuSampler CreateSampler(in SamplerDesc desc);
     public abstract GpuShader CreateShader(in ShaderDesc desc);
     public abstract BindGroupLayout CreateBindGroupLayout(ReadOnlySpan<BindingLayout> entries);

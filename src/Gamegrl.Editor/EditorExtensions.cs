@@ -10,11 +10,11 @@ public delegate void ComponentDrawer<T>(ref T component, EditorContext context) 
 
 public sealed class EditorContext
 {
-    internal EditorContext(App app, Ui ui, SceneDocument document, EditorJobs jobs)
+    internal EditorContext(App app, CellUi ui, SceneDocument document, EditorJobs jobs)
     { App = app; Ui = ui; Document = document; Jobs = jobs; }
     public App App { get; }
     public World World => App.World;
-    public Ui Ui { get; }
+    public CellUi Ui { get; }
     public SceneDocument Document { get; }
     public EditorJobs Jobs { get; }
     public void Edit(Action edit) => Document.Edit(edit);

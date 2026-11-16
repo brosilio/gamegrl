@@ -6,8 +6,9 @@ internal sealed partial class EditorHost
 {
     private void FileDialog()
     {
-        float width = Math.Min(560, _ui.Screen.W - 20);
-        var area = new Rect((_ui.Screen.W - width) / 2, Math.Max(10, (_ui.Screen.H - 220) / 2), width, 220);
+        if (!_ui.WantsKeyboard && _ui.Input.WasPressed(Gamegrl.Platform.Key.Escape)) { Files.Cancel(); return; }
+        float width = Math.Min(64, _ui.Screen.W - 2);
+        var area = new Rect((_ui.Screen.W - width) / 2, Math.Max(1, (_ui.Screen.H - 12) / 2), width, 12);
         _ui.BeginPopup(area);
         _ui.Header(Files.Dialog == SceneFileDialog.Unsaved ? "Unsaved scene" : Files.Dialog == SceneFileDialog.Overwrite ? "Replace scene?" : "Save scene as");
         if (Files.Busy) _ui.Label("Saving…");

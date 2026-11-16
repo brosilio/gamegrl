@@ -10,6 +10,7 @@ public static partial class RenderExtract
     [System(Phase.Render, Order = -500)]
     private static void CollectMeshes(in LocalToWorld transform, in MeshRenderer renderer, [Res] in RenderContext ctx)
     {
+        if (!ctx.HasFrame) return;
         int slot = ctx.ResolveMesh(renderer.Mesh);
         if (slot >= 0) ctx.MeshInstances.Add(new MeshInstance { Model = transform.Value, Color = renderer.Color, Mesh = slot });
     }
@@ -17,6 +18,7 @@ public static partial class RenderExtract
     [System(Phase.Render, Order = -500)]
     private static void CollectSprites(in LocalTransform transform, in Sprite sprite, [Res] in RenderContext ctx)
     {
+        if (!ctx.HasFrame) return;
         int slot = ctx.ResolveTexture(sprite.Texture);
         if (slot < 0) return;
         float angle = 2f * MathF.Atan2(transform.Rotation.Z, transform.Rotation.W); // rotation about z

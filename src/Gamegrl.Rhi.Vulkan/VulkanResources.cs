@@ -140,3 +140,36 @@ internal enum DeferredKind : byte
 }
 
 internal readonly record struct Deferred(DeferredKind Kind, ulong Handle, ulong Memory);
+
+internal sealed class VulkanOffscreenSwapchain : Swapchain
+{
+    public GpuTexture Texture { get; }
+    public VulkanOffscreenSwapchain(VulkanDevice device, int width, int height)
+    {
+        Width = width; Height = height; Format = TextureFormat.Bgra8Srgb;
+        Texture = device.CreateTexture(new TextureDesc(width, height, Format, TextureUsage.RenderTarget));
+    }
+    public override void Dispose() => Texture.Dispose();
+}
+
+internal sealed unsafe class VulkanReadback : GpuReadback
+{
+    private readonly VulkanDevice _device;
+    internal readonly VulkanBuffer Buffer;
+    internal readonly int Width, Height;
+    internal ulong? Frame;
+    public VulkanReadback(VulkanDevice device, int width, int height)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width); ArgumentOutOfRangeException.ThrowIfNegativeOrZero(height);
+        _device = device; Width = width; Height = height;
+        Buffer = (VulkanBuffer)device.CreateBuffer(new BufferDesc(checked(width * height * 4), BufferUsage.CopyDst, MemoryKind.Upload));
+    }
+    public override bool Pending => Frame is not null;
+    public override bool TryRead(Span<byte> destination)
+    {
+        if (destination.Length < Width * Height * 4) throw new ArgumentException("Readback destination is too small.");
+        if (Frame is not { } frame || !_device.IsComplete(frame)) return false;
+        new ReadOnlySpan<byte>(Buffer.Mapped, Width * Height * 4).CopyTo(destination); Frame = null; return true;
+    }
+    public override void Dispose() { Buffer.Dispose(); Frame = null; }
+}

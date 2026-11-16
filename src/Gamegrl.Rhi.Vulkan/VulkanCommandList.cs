@@ -3,6 +3,7 @@ namespace Gamegrl.Rhi.Vulkan;
 internal sealed unsafe class VulkanCommandList : CommandList
 {
     public nint Cmd;
+    public VulkanDevice Device = null!;
     private ulong _layout;
     private int _targetWidth, _targetHeight;
     private VulkanTexture? _passColor, _passDepth;
@@ -114,6 +115,24 @@ internal sealed unsafe class VulkanCommandList : CommandList
         Vk.CmdSetScissor(Cmd, 0, 1, &r);
     }
 
+    public override void CopyToReadback(GpuTexture texture, GpuReadback readback)
+    {
+        var source = (VulkanTexture)texture; var target = (VulkanReadback)readback;
+        if (target.Pending) throw new InvalidOperationException("Readback is still pending.");
+        if (source.Width != target.Width || source.Height != target.Height || source.Format is not (TextureFormat.Rgba8Unorm or TextureFormat.Rgba8Srgb or TextureFormat.Bgra8Unorm or TextureFormat.Bgra8Srgb))
+            throw new ArgumentException("Readback requires a matching four-byte color texture.");
+        if ((source.Usage & TextureUsage.CopySrc) == 0) throw new ArgumentException("Texture does not have CopySrc usage.");
+        uint old = source.Layout;
+        Barriers.Transition(Cmd, source, VkConst.ImageLayoutTransferSrc);
+        var copy = new VkBufferImageCopy
+        {
+            ImageSubresource = new VkImageSubresourceLayers { AspectMask = VkConst.AspectColor, LayerCount = 1 },
+            ImageExtent = new VkExtent3D { Width = (uint)source.Width, Height = (uint)source.Height, Depth = 1 },
+        };
+        Vk.CmdCopyImageToBuffer(Cmd, source.Image, VkConst.ImageLayoutTransferSrc, target.Buffer.Handle, 1, &copy);
+        Barriers.Transition(Cmd, source, old); target.Frame = Device.RecordingFrame;
+    }
+
     public override void Draw(int vertexCount, int instanceCount = 1, int firstVertex = 0, int firstInstance = 0) =>
         Vk.CmdDraw(Cmd, (uint)vertexCount, (uint)instanceCount, (uint)firstVertex, (uint)firstInstance);
 
@@ -166,6 +185,7 @@ internal static unsafe class Barriers
         VkConst.ImageLayoutDepthAttachment => (VkConst.StageEarlyFragmentTests | VkConst.StageLateFragmentTests,
             VkConst.AccessDepthAttachmentWrite | VkConst.AccessDepthAttachmentRead),
         VkConst.ImageLayoutShaderReadOnly => (VkConst.StageFragmentShader | VkConst.StageVertexShader, VkConst.AccessShaderRead),
+        VkConst.ImageLayoutTransferSrc => (VkConst.StageTransfer, VkConst.AccessTransferRead),
         VkConst.ImageLayoutTransferDst => (VkConst.StageTransfer, VkConst.AccessTransferWrite),
         VkConst.ImageLayoutPresentSrc => (source ? VkConst.StageColorAttachmentOutput : VkConst.StageBottomOfPipe, VkConst.AccessNone),
         _ => (VkConst.StageAllCommands, VkConst.AccessMemoryRead),

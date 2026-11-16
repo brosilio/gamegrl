@@ -101,6 +101,9 @@ public sealed class Input
         _text.Append(source._text);
     }
 
+    /// <summary>Convert pointer positions and deltas into a host's logical coordinate system.</summary>
+    public void ScaleMouse(Vector2 scale) { MousePosition *= scale; MouseDelta *= scale; }
+
     // Platform backends feed events through these.
     public void OnKey(int hidUsage, bool down, bool repeat)
     {
