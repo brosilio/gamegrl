@@ -17,7 +17,7 @@ internal sealed class CellRenderer : IDisposable
     public int CellHeight { get; }
     public CellRenderer(GpuDevice device, TextureFormat format, string fontPath)
     {
-        var characters = FontAtlas.DefaultCharacters().Concat(Enumerable.Range(0x2500, 256)).Concat(Enumerable.Range(0x2800, 256));
+        var characters = FontAtlas.DefaultCharacters().Concat(Enumerable.Range(0x2500, 256)).Concat(Enumerable.Range(0x2010, 0x30)).Concat(Enumerable.Range(0x2800, 256));
         _font = FontAtlas.Bake(new TrueTypeFont(File.ReadAllBytes(fontPath)), 14, characters, 1024);
         CellWidth = (int)MathF.Ceiling(_font.Measure("M")); CellHeight = (int)MathF.Ceiling(_font.LineHeight);
         _renderer = new UiRenderer(device, format, _font);
@@ -30,7 +30,7 @@ internal sealed class CellRenderer : IDisposable
         for (int y = 0; y < cells.Surface.Height; y++)
         for (int x = 0; x < cells.Surface.Width; x++)
         {
-            var (_, bg) = Colors(cells.Surface[x, y].Style);
+            var (_, bg) = Colors(cells.Surface[x, y].Style, cells.Base);
             if (!cells.Transparent(x, y)) _draw.Rect(new Rect(x * CellWidth, y * CellHeight, CellWidth, CellHeight), bg);
         }
         Span<char> glyph = stackalloc char[2];
@@ -38,7 +38,7 @@ internal sealed class CellRenderer : IDisposable
         for (int x = 0; x < cells.Surface.Width; x++)
         {
             var cell = cells.Surface[x, y]; var style = cell.Style;
-            var (fg, _) = Colors(style);
+            var (fg, _) = Colors(style, cells.Base);
             if (style.Has(TextAttributes.Dim)) fg = new Color32((byte)(fg.R / 2), (byte)(fg.G / 2), (byte)(fg.B / 2));
             var rect = new Rect(x * CellWidth, y * CellHeight, CellWidth, CellHeight);
             if (cell.IsContinuation || cell.Rune.Value is 0 or 32 || style.Has(TextAttributes.Hidden)) continue;
@@ -57,12 +57,12 @@ internal sealed class CellRenderer : IDisposable
     private static int CellWidthOf(Rune rune) => Math.Max(1, AnsiDotNet.CellWidth.Of(rune));
     public Rect Pixels(Rect rect) => new(rect.X * CellWidth, rect.Y * CellHeight, rect.W * CellWidth, rect.H * CellHeight);
     /// <summary>Resolve default colors on their own channel before inverse swaps them.</summary>
-    private static (Color32 Foreground, Color32 Background) Colors(Style style)
+    private static (Color32 Foreground, Color32 Background) Colors(Style style, Style defaults)
     {
-        var fg = Resolve(style.Foreground, 0xdcdde0); var bg = Resolve(style.Background, 0x1e1f22);
+        var fg = Resolve(style.Foreground, defaults.Foreground); var bg = Resolve(style.Background, defaults.Background);
         return style.Has(TextAttributes.Inverse) ? (bg, fg) : (fg, bg);
     }
-    private static Color32 Resolve(Color color, uint fallback)
-    { var (r, g, b) = (color.Kind == ColorKind.Default ? Color.FromHex(fallback) : color).ToRgb(); return new(r, g, b); }
+    private static Color32 Resolve(Color color, Color fallback)
+    { var (r, g, b) = (color.Kind == ColorKind.Default ? fallback : color).ToRgb(); return new(r, g, b); }
     public void Dispose() => _renderer.Dispose();
 }

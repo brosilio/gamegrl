@@ -51,8 +51,7 @@ internal sealed class InspectorVisitor(CellUi ui, Func<AssetChoices> assets) : I
     {
         Decoration(); ui.PushId(name);
         var rect = ui.Next();
-        ui.Target.Rect(rect, ui.Theme.PanelHeader);
-        ui.TextIn(rect, name, ui.Theme.Text);
+        ui.TextIn(rect, name, ui.Theme.Dim);
         if (_metadata.Tooltip is { } tooltip && ui.IsHovered(rect)) ui.Tooltip(tooltip);
         ui.Indent(); _metadata = default;
     }
@@ -136,7 +135,7 @@ internal sealed class InspectorVisitor(CellUi ui, Func<AssetChoices> assets) : I
             v.Index.TryFormat(s[1..], out length, default, CultureInfo.InvariantCulture);
             length++;
         }
-        ui.TextIn(Property(n), s[..length], ui.Theme.TextDim);
+        ui.TextIn(Property(n), s[..length], ui.Theme.Dim);
     }
     public void Enum(string n, ref long v, ReadOnlySpan<string> names, ReadOnlySpan<long> values)
     {

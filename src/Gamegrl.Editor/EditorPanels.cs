@@ -9,7 +9,7 @@ namespace Gamegrl.Editor;
 internal sealed partial class EditorHost
 {
     private static readonly string[] CreateKinds = ["Empty", "Cube", "Camera", "Sprite"];
-    private int _newKind, _componentChoice;
+    private int _newKind;
     private readonly List<Entity> _roots = new();
     // Add-component choices for the selected archetype, rebuilt only when it, the registry or game code changes.
     private readonly List<int> _componentIds = new();
@@ -18,22 +18,24 @@ internal sealed partial class EditorHost
     private int _codeGeneration;
     private readonly List<(string Text, LogLevel Level)> _consoleLines = new();
     private long _consoleVersion = -1;
+    /// <summary>Console entries per level: info, warning, error.</summary>
+    private readonly int[] _consoleCounts = new int[3];
+    private bool _showInfo = true, _showWarnings = true, _showErrors = true;
 
+    /// <summary>A kind picker with create and delete beside it, then the entity tree; its scrollbar sits on the sidebar rule.</summary>
     private void Hierarchy(Rect area)
     {
-        _ui.BeginArea(area);
-        _ui.Row(-1, -1);
-        if (_ui.Button("Create")) Document.Edit(CreateEntity);
-        if (_ui.Button("Delete") && _app.World.IsAlive(Document.Selected)) Document.Edit(DeleteSelected);
-        _ui.Combo(_ui.Next(), "create-kind", ref _newKind, CreateKinds);
-        _ui.BeginScroll(_ui.Remaining, "hierarchy-scroll");
+        float kind = Math.Max(0, area.W - 7);
+        _ui.Combo(new Rect(area.X, area.Y, kind, 1), "create-kind", ref _newKind, CreateKinds);
+        if (_ui.Button(new Rect(area.X + kind + 1, area.Y, 3, 1), "Create", "+")) Document.Edit(CreateEntity);
+        if (_ui.Link(new Rect(area.X + kind + 4, area.Y, 3, 1), "Delete", "×", _ui.Theme.Dim, CanEditSelection)) Document.Edit(DeleteSelected);
+        _ui.BeginScroll(new Rect(area.X, area.Y + 1, area.W, Math.Max(0, area.H - 1)), "hierarchy-scroll");
         _roots.Clear();
         foreach (var archetype in _app.World.Archetypes)
             foreach (var e in archetype.Entities)
                 if (!_app.World.HasParent(e)) _roots.Add(e);
         foreach (var e in _roots) EntityRow(e, 0);
         _ui.EndScroll();
-        _ui.EndArea();
     }
 
     private void CreateEntity()
@@ -93,8 +95,6 @@ internal sealed partial class EditorHost
         bool click = _ui.Input.WasPressed(MouseButton.Left) || _ui.Input.WasReleased(MouseButton.Left);
         if (click && _ui.IsHovered(area)) Document.BeginEntityEdit(e);
         _ui.PushId(world.Has<SceneId>(e) ? world.Get<SceneId>(e).Value : e.Index);
-        if (_ui.Button("Make root")) MakeRoot(e);
-        if (_ui.Button("Parent to next root")) ParentToNextRoot(e);
         var (archetype, row) = world.Locate(e);
         int remove = -1;
         foreach (int type in archetype.Types)
@@ -102,20 +102,25 @@ internal sealed partial class EditorHost
             if (type == Component<SceneId>.Id || type == Component<PrefabInstance>.Id || type == Component<LocalToWorld>.Id) continue;
             var info = ComponentRegistry.Get(type);
             _ui.PushId(type);
-            _ui.Row(-1, 2);
-            _ui.Header(info.Name.AsSpan(info.Name.LastIndexOf('.') + 1));
-            if (_ui.Button("×")) remove = type;
-            DrawComponent(info, archetype.Ptr(archetype.ColumnOf(type), row));
+            _ui.Row(-1, 1);
+            bool open = _ui.Foldout(_ui.Next(), info.Name.AsSpan(info.Name.LastIndexOf('.') + 1));
+            if (_ui.Link(_ui.Next(), "Remove component", "×", _ui.Theme.Dim)) remove = type;
+            if (open)
+            {
+                _ui.Indent();
+                DrawComponent(info, archetype.Ptr(archetype.ColumnOf(type), row));
+                _ui.Unindent();
+            }
             _ui.PopId();
-            _ui.Separator();
         }
         if (remove >= 0) RemoveComponent(e, remove);
         RefreshComponentChoices(archetype);
         if (_componentIds.Count > 0)
         {
-            _componentChoice = Math.Clamp(_componentChoice, 0, _componentIds.Count - 1);
-            _ui.Combo(_ui.Next(), "component-choice", ref _componentChoice, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_componentNames));
-            if (_ui.Button("Add component")) AddComponent(e, _componentIds[_componentChoice]);
+            // Entry 0 is the prompt; picking any other entry adds that component at once.
+            int choice = 0;
+            if (_ui.Combo(_ui.Next(), "component-choice", ref choice, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_componentNames)) && choice > 0)
+                AddComponent(e, _componentIds[choice - 1]);
         }
         _ui.PopId();
         if (!_ui.WantsKeyboard && (_ui.Active == 0 || _ui.Input.WasReleased(MouseButton.Left))) Document.CommitEdit();
@@ -144,6 +149,7 @@ internal sealed partial class EditorHost
         _componentKey = key;
         _componentIds.Clear();
         _componentNames.Clear();
+        _componentNames.Add("+ add component");
         for (int id = 0; id < ComponentRegistry.Count; id++)
         {
             var info = ComponentRegistry.Get(id);
@@ -182,10 +188,15 @@ internal sealed partial class EditorHost
 
     private void Project(Rect area)
     {
-        _ui.BeginScroll(area.Shrink(1), "project-scroll");
+        _ui.BeginScroll(area, "project-scroll");
         foreach (string path in _assets.Files)
         {
-            if (!_ui.Selectable(_ui.Next(), path, path == Files.CurrentPath)) continue;
+            if (!_ui.RowVisible())
+            {
+                _ui.Next();
+                continue;
+            }
+            if (!_ui.Selectable(_ui.Next(), path, path == Files.CurrentPath, path.LastIndexOf('/') + 1)) continue;
             if (path.EndsWith(".scene", StringComparison.Ordinal)) Files.RequestOpen(path);
             else if (path.EndsWith(".prefab", StringComparison.Ordinal)) InstantiatePrefab(path);
         }
@@ -199,39 +210,71 @@ internal sealed partial class EditorHost
         if (entities.Length > 0) Document.Selected = entities[0];
     });
 
+    /// <summary>Split log entries into lines and count levels only when the log changes.</summary>
+    private void RefreshConsole()
+    {
+        if (_consoleVersion == Log.Version) return;
+        _consoleVersion = Log.Version;
+        _consoleLines.Clear();
+        Array.Clear(_consoleCounts);
+        foreach (var entry in Log.Snapshot())
+        {
+            _consoleCounts[entry.Level == LogLevel.Error ? 2 : entry.Level == LogLevel.Warning ? 1 : 0]++;
+            foreach (var line in entry.Message.Split('\n')) _consoleLines.Add((line.TrimEnd('\r'), entry.Level));
+        }
+    }
+
+    /// <summary>Level filters as status-dot toggles with counts, a clear link, then the filtered log.</summary>
     private void ConsolePanel(Rect area)
     {
-        _ui.BeginArea(area.Shrink(1));
-        if (_ui.Button("Clear")) Log.Clear();
-        if (_consoleVersion != Log.Version)
-        {
-            // Split log entries into lines only when the log changes.
-            _consoleVersion = Log.Version;
-            _consoleLines.Clear();
-            foreach (var entry in Log.Snapshot())
-                foreach (var line in entry.Message.Split('\n')) _consoleLines.Add((line.TrimEnd('\r'), entry.Level));
-        }
-        _ui.BeginScroll(_ui.Remaining, "console-scroll");
+        RefreshConsole();
+        var theme = _ui.Theme;
+        float x = area.X;
+        x = ConsoleFilter(x, area.Y, "console-info", "info", _consoleCounts[0], ref _showInfo, theme.Text);
+        x = ConsoleFilter(x, area.Y, "console-warnings", "warn", _consoleCounts[1], ref _showWarnings, theme.Warning);
+        ConsoleFilter(x, area.Y, "console-errors", "error", _consoleCounts[2], ref _showErrors, theme.Error);
+        if (_ui.Link(new Rect(area.Right - 5, area.Y, 5, 1), "Clear", "clear", theme.Dim)) Log.Clear();
+        _ui.BeginScroll(new Rect(area.X, area.Y + 1, area.W, Math.Max(0, area.H - 1)), "console-scroll");
         foreach (var (text, level) in _consoleLines)
         {
+            if (!(level == LogLevel.Error ? _showErrors : level == LogLevel.Warning ? _showWarnings : _showInfo)) continue;
             if (!_ui.RowVisible())
             {
                 _ui.Next();
                 continue;
             }
-            var color = level == LogLevel.Error ? _ui.Theme.Error : level == LogLevel.Warning ? _ui.Theme.Warning : _ui.Theme.Text;
+            var color = level == LogLevel.Error ? theme.Error : level == LogLevel.Warning ? theme.Warning : theme.Text;
             _ui.TextIn(_ui.Next(), text, color);
         }
         _ui.EndScroll();
-        _ui.EndArea();
+    }
+
+    private float ConsoleFilter(float x, float y, string label, string name, int count, ref bool value, Color32 dot)
+    {
+        Span<char> text = stackalloc char[32];
+        name.CopyTo(text);
+        int length = name.Length;
+        text[length++] = ' ';
+        if (count.TryFormat(text[length..], out int digits, default, System.Globalization.CultureInfo.InvariantCulture)) length += digits;
+        float width = length + 2;
+        _ui.Toggle(new Rect(x, y, width, 1), label, text[..length], ref value, dot);
+        return x + width + 2;
     }
 
     private void Tasks(Rect area)
     {
-        _ui.BeginArea(area.Shrink(1));
-        if (_ui.Button("Cancel tasks")) Jobs.CancelAll();
-        foreach (string job in Jobs.Running) _ui.Label(job);
-        if (!Jobs.Busy) _ui.Label("No running tasks", true);
+        _ui.BeginArea(area);
+        if (!Jobs.Busy) _ui.Label("no running tasks", true);
+        else
+        {
+            if (_ui.Link(new Rect(area.Right - 10, area.Y, 10, 1), "Cancel tasks", "cancel all", _ui.Theme.Dim)) Jobs.CancelAll();
+            foreach (string job in Jobs.Running)
+            {
+                var row = _ui.Next();
+                _ui.TextIn(row with { W = 2 }, "●", _ui.Theme.Accent);
+                _ui.TextIn(row with { X = row.X + 2, W = Math.Max(0, row.W - 13) }, job, _ui.Theme.Text);
+            }
+        }
         _ui.EndArea();
     }
 

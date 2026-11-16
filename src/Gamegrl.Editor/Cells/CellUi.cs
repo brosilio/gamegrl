@@ -22,7 +22,7 @@ public sealed class CellUi
         public void Reset(Rect rect) { Rect = rect; Y = rect.Y; Indent = 0; RowCount = Column = 0; }
     }
 
-    private const uint ScrollContentSalt = 0x5bd1e995, SplitterAnchorSalt = 0x9e3779b9;
+    private const uint ScrollContentSalt = 0x5bd1e995, SplitterAnchorSalt = 0x9e3779b9, ScrollbarSalt = 0x27d4eb2f;
     private readonly List<Area> _areas = new();
     private int _areaDepth;
     private readonly Stack<uint> _ids = new();
@@ -34,7 +34,7 @@ public sealed class CellUi
     private readonly CellDraw _main = new(), _overlay = new();
     private readonly List<Rect> _overlays = new();
     private readonly Dictionary<string, Rect> _controls = new(StringComparer.Ordinal);
-    private Rect? _popup, _previousPopup;
+    private Rect? _popup, _previousPopup, _hotSplitter;
     private bool _inPopup, _claimed, _commit;
     private uint _editId, _keyboardFocus;
     private string _buffer = "";
@@ -53,7 +53,7 @@ public sealed class CellUi
     public CellDraw Draw => _inPopup ? _overlay : _main;
     public CellDraw Target => Draw;
     public CellFont Font { get; } = new();
-    public Theme Theme { get; } = new() { RowHeight = 1, Padding = 0, Spacing = 0, Indent = 1, TabHeight = 1, SplitterThickness = 1, ScrollbarWidth = 1 };
+    public CellTheme Theme { get; } = new();
     public Input Input { get; private set; } = null!;
     public Rect Screen { get; private set; }
     public Vector2 Mouse => Input.MousePosition;
@@ -76,12 +76,13 @@ public sealed class CellUi
         _platform = platform;
         _time = time;
         Screen = new Rect(0, 0, Math.Max(1, (int)size.X), Math.Max(1, (int)size.Y));
+        _main.Base = _overlay.Base = new AnsiDotNet.Style(CellDraw.Color(Theme.Text), CellDraw.Color(Theme.Background));
         _main.Reset((int)Screen.W, (int)Screen.H);
         _overlay.Reset((int)Screen.W, (int)Screen.H);
         _overlays.Clear();
         _controls.Clear();
         _previousPopup = _popup;
-        _popup = null;
+        _popup = _hotSplitter = null;
         _inPopup = false;
         _claimed = false;
         _previousFocusable.Clear();
@@ -122,6 +123,7 @@ public sealed class CellUi
 
     public void End()
     {
+        if (_hotSplitter is { } splitter) _main.Recolor(splitter, Theme.Accent);
         foreach (var rectangle in _overlays) _main.Composite(_overlay, rectangle);
         if (Input.WasReleased(MouseButton.Left)) Active = 0;
         if (!_claimed) Focus = 0;
@@ -129,6 +131,16 @@ public sealed class CellUi
     }
 
     public void CommitTextEdit() => _commit = true;
+
+    /// <summary>
+    /// Hold keyboard focus this frame for input the caller draws itself, such as a command palette: text fields,
+    /// keyboard navigation and editor shortcuts stay out while it is held.
+    /// </summary>
+    public void CaptureKeyboard(uint id)
+    {
+        Focus = id;
+        _claimed = true;
+    }
 
     /// <summary>Stack depths before a caller-supplied draw, so a throwing panel or drawer cannot unbalance the frame.</summary>
     public readonly record struct Checkpoint(int Areas, int Ids, int Scrolls, int Clips, int OverlayClips, bool InPopup);
@@ -270,7 +282,7 @@ public sealed class CellUi
     {
         var row = Next();
         int label = (int)(row.W * Theme.LabelWidthRatio);
-        TextIn(row with { W = label }, name, Theme.TextDim);
+        TextIn(row with { W = label }, name, Theme.Dim);
         return new Rect(row.X + label, row.Y, Math.Max(0, row.W - label), 1);
     }
 
@@ -282,13 +294,16 @@ public sealed class CellUi
         Draw.PopClip();
     }
 
-    public void Label(ReadOnlySpan<char> text, bool dim = false) => TextIn(Next(), text, dim ? Theme.TextDim : Theme.Text);
+    public void Label(ReadOnlySpan<char> text, bool dim = false) => TextIn(Next(), text, dim ? Theme.Dim : Theme.Text);
 
+    /// <summary>A section label followed by a faint rule to the end of the row.</summary>
     public void Header(ReadOnlySpan<char> text)
     {
         var row = Next();
-        Draw.Rect(row, Theme.PanelHeader);
-        TextIn(row, text, Theme.Text);
+        Draw.PushClip(row);
+        float x = Draw.Text(row.Min, text, Theme.Dim) + 1;
+        Draw.Repeat(new Rect(x, row.Y, Math.Max(0, row.Right - x), 1), '─', Theme.Border);
+        Draw.PopClip();
     }
 
     public void Separator()
@@ -307,8 +322,8 @@ public sealed class CellUi
         _inPopup = true;
         _overlays.Add(rect);
         Draw.PushClip(Screen);
-        Draw.Rect(rect, Theme.PanelHeader);
-        TextIn(rect, text, Theme.Text);
+        Draw.Rect(rect, Theme.Raised);
+        TextIn(rect with { X = rect.X + 1, W = rect.W - 1 }, text, Theme.Text);
         Draw.PopClip();
         _inPopup = popup;
     }
@@ -317,37 +332,91 @@ public sealed class CellUi
 
     public bool Button(string label) => Button(Next(), label);
 
-    public bool Button(Rect rect, string label)
+    public bool Button(Rect rect, string label) => Button(rect, label, label);
+
+    /// <summary>
+    /// A text button: <c>[ text ]</c> when the rectangle has room for brackets, bare text otherwise. No fill;
+    /// hover and keyboard focus take the accent. <paramref name="label"/> is the id and automation name.
+    /// </summary>
+    public bool Button(Rect rect, string label, ReadOnlySpan<char> text)
     {
         _controls[label] = rect;
         uint id = Id(label);
         bool result = Activate(rect, id, out bool hover, out bool held);
         bool focused = Focused(id);
-        Draw.Rect(rect, held ? Theme.WidgetActive : hover ? Theme.WidgetHover : Theme.Widget);
-        float width = Font.Measure(label) + (focused ? 1 : 0);
-        float x = rect.X + Math.Max(0, (rect.W - width) * 0.5f);
+        if (held) Draw.Rect(rect, Theme.Raised);
+        float width = Font.Measure(text);
+        bool brackets = rect.W >= width + 4;
+        float x = rect.X + MathF.Floor(Math.Max(0, (rect.W - width - (brackets ? 4 : 0)) * 0.5f));
+        var frame = focused ? Theme.Accent : Theme.Dim;
         Draw.PushClip(rect);
-        if (focused) x = Draw.Text(new Vector2(x, rect.Y), ">", Theme.Accent);
-        Draw.Text(new Vector2(x, rect.Y), label, focused ? Theme.Accent : Theme.Text);
+        if (brackets) x = Draw.Text(new Vector2(x, rect.Y), "[ ", frame);
+        x = Draw.Text(new Vector2(x, rect.Y), text, hover || held || focused ? Theme.Accent : Theme.Text);
+        if (brackets) Draw.Text(new Vector2(x, rect.Y), " ]", frame);
         Draw.PopClip();
         return result;
     }
 
-    public bool Selectable(Rect rect, ReadOnlySpan<char> label, bool selected)
+    /// <summary>Bare clickable text in <paramref name="color"/>, accented on hover; drawn faint and inert when disabled.</summary>
+    public bool Link(Rect rect, string label, ReadOnlySpan<char> text, Color32 color, bool enabled = true)
     {
+        _controls[label] = rect;
+        if (!enabled)
+        {
+            TextIn(rect, text, Theme.Border, 0.5f);
+            return false;
+        }
         uint id = Id(label);
-        bool result = Activate(rect, id, out bool hover, out _);
-        if (selected || hover || Focused(id)) Draw.Rect(rect, selected ? Theme.Selection : Theme.WidgetHover);
-        TextIn(rect, label, Theme.Text);
+        bool result = Activate(rect, id, out bool hover, out bool held);
+        TextIn(rect, text, hover || held || Focused(id) ? Theme.Accent : color, 0.5f);
         return result;
     }
 
-    public bool Checkbox(Rect rect, string id, ref bool value)
+    /// <summary>A list row; the first <paramref name="dimPrefix"/> characters (such as a directory) are drawn dim.</summary>
+    public bool Selectable(Rect rect, ReadOnlySpan<char> label, bool selected, int dimPrefix = 0)
     {
-        bool clicked = Activate(rect, Id(id), out _, out _);
+        uint id = Id(label);
+        bool result = Activate(rect, id, out bool hover, out _);
+        if (selected) Draw.Rect(rect, Theme.Selection);
+        else if (hover || Focused(id)) Draw.Rect(rect, Theme.Raised);
+        Draw.PushClip(rect);
+        dimPrefix = Math.Clamp(dimPrefix, 0, label.Length);
+        float x = Draw.Text(rect.Min, label[..dimPrefix], Theme.Dim);
+        Draw.Text(new Vector2(x, rect.Y), label[dimPrefix..], selected ? Theme.Accent : Theme.Text);
+        Draw.PopClip();
+        return result;
+    }
+
+    public bool Checkbox(Rect rect, string id, ref bool value) => Toggle(rect, id, default, ref value, Theme.Accent);
+
+    /// <summary>A status-dot toggle: <c>●</c> in <paramref name="dot"/> when on, a dim <c>○</c> when off, then the text.</summary>
+    public bool Toggle(Rect rect, string label, ReadOnlySpan<char> text, ref bool value, Color32 dot)
+    {
+        _controls[label] = rect;
+        uint id = Id(label);
+        bool clicked = Activate(rect, id, out bool hover, out _);
         if (clicked) value = !value;
-        TextIn(rect, value ? "[✓]" : "[ ]", Theme.Text);
+        if (hover || Focused(id)) Draw.Rect(rect, Theme.Raised);
+        Draw.PushClip(rect);
+        float x = Draw.Text(rect.Min, value ? "●" : "○", value ? dot : Theme.Dim);
+        if (!text.IsEmpty) Draw.Text(new Vector2(x + 1, rect.Y), text, value ? Theme.Text : Theme.Dim);
+        Draw.PopClip();
         return clicked;
+    }
+
+    /// <summary>A collapsible section header (<c>▾ label</c>); returns whether it is open. State is kept per id.</summary>
+    public bool Foldout(Rect rect, ReadOnlySpan<char> label, bool defaultOpen = true)
+    {
+        uint id = Id(label, "#fold");
+        bool open = _bools.GetValueOrDefault(id, defaultOpen);
+        if (Activate(rect, id, out bool hover, out _)) open = !open;
+        _bools[id] = open;
+        if (hover || Focused(id)) Draw.Rect(rect, Theme.Raised);
+        Draw.PushClip(rect);
+        float x = Draw.Text(rect.Min, open ? "▾" : "▸", Theme.Dim);
+        Draw.Text(new Vector2(x + 1, rect.Y), label, Focused(id) ? Theme.Accent : Theme.Text);
+        Draw.PopClip();
+        return open;
     }
 
     public bool TreeNode(Rect rect, ulong key, ReadOnlySpan<char> label, bool hasChildren, bool selected, ref bool open, float depth)
@@ -356,7 +425,8 @@ public sealed class CellUi
         uint id = Id(key);
         bool clicked = Activate(rect, id, out bool hover, out _);
         bool focused = Focused(id);
-        if (selected || hover || focused) Draw.Rect(rect, selected ? Theme.Selection : Theme.WidgetHover);
+        if (selected) Draw.Rect(rect, Theme.Selection);
+        else if (hover || focused) Draw.Rect(rect, Theme.Raised);
         if (focused && hasChildren)
         {
             if (Input.WasPressed(Key.Left)) open = false;
@@ -368,18 +438,21 @@ public sealed class CellUi
             clicked = false;
         }
         Draw.PushClip(rect);
-        float x = Draw.Text(rect.Min, hasChildren ? open ? "▾" : "▸" : " ", Theme.Text);
-        x = Draw.Text(new Vector2(x, rect.Y), selected ? "*" : focused ? ">" : " ", Theme.Text);
-        Draw.Text(new Vector2(x, rect.Y), label, Theme.Text);
+        float x = Draw.Text(rect.Min, hasChildren ? open ? "▾" : "▸" : " ", Theme.Dim);
+        Draw.Text(new Vector2(x + 1, rect.Y), label, selected ? Theme.Accent : Theme.Text);
         Draw.PopClip();
         return clicked;
     }
 
+    /// <summary>
+    /// A draggable border. It draws nothing itself: the caller's lines are the splitter, and while hovered or dragged
+    /// they are recolored to the accent at the end of the frame, after everything has drawn over them.
+    /// </summary>
     public float Splitter(Rect rect, string id, float position, bool vertical, float min, float max)
     {
         uint key = Id(id);
         Behavior(rect, key, out bool hover, out bool held);
-        Draw.Rect(rect, hover || held ? Theme.Accent : Theme.Border);
+        if (hover || held) _hotSplitter = rect;
         // Track the drag from its anchor: sub-cell mouse motion accumulates instead of rounding away each frame.
         float mouse = vertical ? Mouse.X : Mouse.Y;
         if (held && Input.WasPressed(MouseButton.Left)) SetFloat(key ^ SplitterAnchorSalt, position - mouse);
@@ -408,26 +481,58 @@ public sealed class CellUi
         if (focused.Bottom > rect.Bottom) SetFloat(key, Math.Min(limit, offset + focused.Bottom - rect.Bottom));
     }
 
+    /// <summary>
+    /// Ends a scroll view. When content overflows, a slim scrollbar replaces the column just right of the view (the
+    /// pane border or sidebar rule) if that column is visible, else the view's own last column: a faint <c>▕</c> track
+    /// with a right-half thumb drawn in half-row steps. The bar can be clicked or dragged.
+    /// </summary>
     public void EndScroll()
     {
         var (key, rect, offset) = _scroll.Pop();
         float used = EndArea() + offset;
         SetFloat(key ^ ScrollContentSalt, used);
-        if (used > rect.H && rect.W > 0)
-            Draw.Text(new Vector2(rect.Right - 1, rect.Y + (rect.H - 1) * offset / Math.Max(1, used - rect.H)), "█", Theme.TextDim);
+        int rows = (int)rect.H;
+        if (used <= rect.H || rows < 1 || rect.W < 1) return;
+        float x = Draw.Clip.Contains(new Vector2(rect.Right + 0.5f, rect.Y + 0.5f)) ? rect.Right : rect.Right - 1;
+        Behavior(new Rect(x, rect.Y, 1, rows), key ^ ScrollbarSalt, out bool hover, out bool held);
+        float limit = used - rect.H;
+        if (held)
+        {
+            offset = Math.Clamp((Mouse.Y - rect.Y) / rect.H * used - rect.H * 0.5f, 0, limit);
+            SetFloat(key, offset);
+        }
+        int halves = rows * 2;
+        int length = Math.Clamp((int)MathF.Round(halves * rect.H / used), 2, halves);
+        int start = (int)MathF.Round((halves - length) * offset / limit);
+        var thumb = hover || held ? Theme.Accent : Theme.Dim;
+        for (int r = 0; r < rows; r++)
+        {
+            bool top = 2 * r >= start && 2 * r < start + length, bottom = 2 * r + 1 >= start && 2 * r + 1 < start + length;
+            char c = top && bottom ? '▐' : top ? '▝' : bottom ? '▗' : '▕';
+            Draw.Glyph(x, rect.Y + r, c, top || bottom ? thumb : Theme.Border);
+        }
     }
 
     /// <summary>True if a row at the current layout position would be inside the clip; lets long lists skip drawing.</summary>
     public bool RowVisible(float height = 1) => A.Y + height > Draw.Clip.Y && A.Y < Draw.Clip.Bottom;
 
-    public void BeginPopup(Rect rect)
+    /// <summary>A raised, boxed overlay; an optional title sits in its top border.</summary>
+    public void BeginPopup(Rect rect, ReadOnlySpan<char> title = default)
     {
         _overlays.Add(rect);
         _inPopup = true;
         _popup = rect;
         Draw.PushClip(Screen);
-        Draw.Rect(rect, Theme.PanelHeader);
-        Draw.RectOutline(rect, Theme.Border);
+        Draw.Rect(rect, Theme.Raised);
+        Draw.Box(rect, Theme.Border);
+        if (!title.IsEmpty)
+        {
+            Draw.PushClip(new Rect(rect.X + 1, rect.Y, Math.Max(0, rect.W - 2), 1));
+            float x = Draw.Text(new Vector2(rect.X + 1, rect.Y), " ", Theme.Text);
+            x = Draw.Text(new Vector2(x, rect.Y), title, Theme.Text);
+            Draw.Text(new Vector2(x, rect.Y), " ", Theme.Text);
+            Draw.PopClip();
+        }
         BeginArea(rect.Shrink(1));
     }
 
@@ -443,10 +548,10 @@ public sealed class CellUi
         _controls[label] = rect;
         uint id = Id(label);
         bool open = _bools.GetValueOrDefault(id);
-        if (Activate(rect, id, out _, out _)) open = !open;
-        Draw.Rect(rect, Theme.Widget);
-        TextIn(rect with { W = Math.Max(0, rect.W - 2) }, selected >= 0 && selected < items.Length ? items[selected] : "", Theme.Text);
-        TextIn(rect with { X = rect.Right - 1, W = 1 }, "▾", Theme.Text);
+        if (Activate(rect, id, out bool hover, out _)) open = !open;
+        if (hover || open || Focused(id)) Draw.Rect(rect, Theme.Raised);
+        TextIn(rect with { W = Math.Max(0, rect.W - 2) }, selected >= 0 && selected < items.Length ? items[selected] : "", Focused(id) ? Theme.Accent : Theme.Text);
+        TextIn(rect with { X = rect.Right - 1, W = 1 }, "▾", Theme.Dim);
         bool changed = false;
         if (open)
         {
@@ -514,8 +619,8 @@ public sealed class CellUi
         {
             value += MouseDelta.X * speed * 8 * (Input.Shift ? 0.1f : 1);
             value.TryFormat(chars, out length, "0.###", CultureInfo.InvariantCulture);
-            Draw.Rect(rect, Theme.WidgetActive);
-            TextIn(rect, chars[..length], Theme.Text);
+            Draw.Rect(rect, Theme.Raised);
+            TextIn(rect, chars[..length], Theme.Accent);
             return true;
         }
         if (!TextField(rect, label, chars[..length], out var text) || !float.TryParse(text, CultureInfo.InvariantCulture, out var parsed)) return false;
@@ -573,7 +678,7 @@ public sealed class CellUi
             Focus = id;
             changed = EditKeys(rect, current, started, hover, held, out committed);
         }
-        Draw.Rect(rect, hover ? Theme.WidgetHover : Theme.Field);
+        if (_editId == id || hover) Draw.Rect(rect, Theme.Raised);
         ReadOnlySpan<char> visible = _editId == id ? _buffer : current;
         int start = 0;
         if (_editId == id)

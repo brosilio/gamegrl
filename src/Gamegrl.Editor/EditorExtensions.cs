@@ -4,7 +4,8 @@ namespace Gamegrl.Editor;
 
 public enum DockRegion { Left, Center, Right, Bottom }
 public sealed record EditorPanel(string Id, string Title, DockRegion Region, Action<EditorContext, Rect> Draw);
-public sealed record EditorMenuItem(string Id, string Label, Action<EditorContext> Execute);
+/// <summary>A command palette entry. <paramref name="Shortcut"/> is display text only, such as "Ctrl+S".</summary>
+public sealed record EditorCommand(string Id, string Label, Action<EditorContext> Execute, string? Shortcut = null);
 public interface IEditorExtension { void Register(EditorRegistry registry); }
 public delegate void ComponentDrawer<T>(ref T component, EditorContext context) where T : unmanaged, IComponent;
 
@@ -24,12 +25,13 @@ public sealed class EditorContext
 public sealed class EditorRegistry : IDisposable
 {
     private readonly Dictionary<string, EditorPanel> _panels = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, EditorMenuItem> _menus = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, EditorCommand> _commands = new(StringComparer.Ordinal);
     private readonly Dictionary<ulong, Action<nint, EditorContext>> _drawers = new();
-    /// <summary>Changes whenever a panel, menu or drawer is added or removed, so hosts can cache derived lists.</summary>
+    /// <summary>Changes whenever a panel, command or drawer is added or removed, so hosts can cache derived lists.</summary>
     public int Version { get; private set; }
     public IReadOnlyCollection<EditorPanel> Panels => _panels.Values;
-    public IReadOnlyCollection<EditorMenuItem> Menus => _menus.Values;
+    public IReadOnlyCollection<EditorCommand> Commands => _commands.Values;
+    public EditorCommand? FindCommand(string id) => _commands.GetValueOrDefault(id);
     public EditorPanel? FindPanel(string id) => _panels.GetValueOrDefault(id);
     public void AddPanel(string id, string title, DockRegion region, Action<EditorContext, Rect> draw)
     {
@@ -37,10 +39,10 @@ public sealed class EditorRegistry : IDisposable
         _panels.Add(id, new(id, title, region, draw));
         Version++;
     }
-    public void AddMenu(string id, string label, Action<EditorContext> execute)
+    public void AddCommand(string id, string label, Action<EditorContext> execute, string? shortcut = null)
     {
         ValidateId(id);
-        _menus.Add(id, new(id, label, execute));
+        _commands.Add(id, new(id, label, execute, shortcut));
         Version++;
     }
     public unsafe void AddDrawer<T>(ComponentDrawer<T> drawer) where T : unmanaged, IComponent
@@ -54,7 +56,7 @@ public sealed class EditorRegistry : IDisposable
         draw(pointer, context); return true;
     }
     public bool RemovePanel(string id) => Changed(_panels.Remove(id));
-    public bool RemoveMenu(string id) => Changed(_menus.Remove(id));
+    public bool RemoveCommand(string id) => Changed(_commands.Remove(id));
     public bool RemoveDrawer<T>() where T : unmanaged, IComponent => Changed(_drawers.Remove(ComponentRegistry.Get(Component<T>.Id).StableId));
     private bool Changed(bool removed)
     {
@@ -69,12 +71,12 @@ public sealed class EditorRegistry : IDisposable
     public IDisposable Register(IEditorExtension extension)
     {
         var panels = new Dictionary<string, EditorPanel>(_panels, StringComparer.Ordinal);
-        var menus = new Dictionary<string, EditorMenuItem>(_menus, StringComparer.Ordinal);
+        var commands = new Dictionary<string, EditorCommand>(_commands, StringComparer.Ordinal);
         var drawers = new Dictionary<ulong, Action<nint, EditorContext>>(_drawers);
         void Restore()
         {
             _panels.Clear(); foreach (var item in panels) _panels.Add(item.Key, item.Value);
-            _menus.Clear(); foreach (var item in menus) _menus.Add(item.Key, item.Value);
+            _commands.Clear(); foreach (var item in commands) _commands.Add(item.Key, item.Value);
             _drawers.Clear(); foreach (var item in drawers) _drawers.Add(item.Key, item.Value);
             Version++;
         }
@@ -90,7 +92,7 @@ public sealed class EditorRegistry : IDisposable
     }
     public void Dispose()
     {
-        _drawers.Clear(); _menus.Clear(); _panels.Clear();
+        _drawers.Clear(); _commands.Clear(); _panels.Clear();
         Version++;
     }
 }

@@ -27,12 +27,12 @@ internal static class ExtensionTests
             registry.AddPanel("builtin", "Built-in", DockRegion.Center, (_, _) => { });
             using (registry.Register(new Extension()))
             {
-                Check(registry.FindPanel("extra") is not null && registry.Menus.Count == 1);
+                Check(registry.FindPanel("extra") is not null && registry.Commands.Count == 1);
                 var builder = EngineBuilder.Create(); builder.WorkerThreads = 0;
                 using var app = builder.Build();
                 var document = new SceneDocument(app.World);
                 var context = new EditorContext(app, null!, document, new EditorJobs());
-                registry.Menus.Single().Execute(context); Check(app.World.EntityCount == 1);
+                registry.Commands.Single().Execute(context); Check(app.World.EntityCount == 1);
                 unsafe
                 {
                     var value = LocalTransform.Identity;
@@ -41,7 +41,7 @@ internal static class ExtensionTests
                 }
                 context.Jobs.Dispose();
             }
-            Check(registry.FindPanel("extra") is null && registry.Menus.Count == 0 && registry.FindPanel("builtin") is not null);
+            Check(registry.FindPanel("extra") is null && registry.Commands.Count == 0 && registry.FindPanel("builtin") is not null);
             try { registry.Register(new Broken()); throw new Exception("Expected extension failure"); }
             catch (InvalidOperationException) { }
             Check(registry.FindPanel("partial") is null && registry.FindPanel("builtin") is not null);
@@ -53,7 +53,7 @@ internal static class ExtensionTests
         public void Register(EditorRegistry registry)
         {
             registry.AddPanel("extra", "Extra", DockRegion.Bottom, (_, _) => { });
-            registry.AddMenu("spawn", "Create / Empty", context => context.Edit(() => context.World.Spawn()));
+            registry.AddCommand("spawn", "Create: Empty", context => context.Edit(() => context.World.Spawn()));
             registry.AddDrawer<LocalTransform>((ref LocalTransform value, EditorContext _) => value.Position.X = 17);
         }
     }

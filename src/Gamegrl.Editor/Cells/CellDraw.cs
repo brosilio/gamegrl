@@ -11,6 +11,8 @@ public sealed class CellDraw
     private readonly Stack<AnsiDotNet.Rect> _clips = new();
     private bool[] _transparent = [];
     public bool Ascii { get; set; }
+    /// <summary>Text and background every cell starts a frame with; set from the theme.</summary>
+    public Style Base { get; set; } = new(AnsiDotNet.Color.FromHex(0xdedee4), AnsiDotNet.Color.FromHex(0x16161b));
     public Surface Surface { get; } = new(1, 1);
     public List<(Rect Area, GpuTexture Texture)> Images { get; } = new();
     public Rect Clip => From(Surface.Clip);
@@ -24,7 +26,7 @@ public sealed class CellDraw
     public static Color Color(Color32 c) => AnsiDotNet.Color.Rgb(c.R, c.G, c.B);
     public void Reset(int width, int height)
     {
-        Surface.Resize(width, height); Surface.ResetClip(); Surface.Clear(new Style(AnsiDotNet.Color.FromHex(0xdcdde0), AnsiDotNet.Color.FromHex(0x1e1f22)));
+        Surface.Resize(width, height); Surface.ResetClip(); Surface.Clear(Base);
         if (_transparent.Length != width * height) _transparent = new bool[width * height]; else Array.Clear(_transparent);
         _clips.Clear(); Images.Clear();
     }
@@ -45,10 +47,42 @@ public sealed class CellDraw
     public void Rect(Rect rect, Color32 color)
     {
         var area = Surface.Clip.Intersect(To(rect));
-        Surface.Fill(area, ' ', new Style(AnsiDotNet.Color.FromHex(0xdcdde0), Color(color)));
+        Surface.Fill(area, ' ', Base.WithBackground(Color(color)));
         for (int y = area.Y; y < area.Bottom; y++) for (int x = area.X; x < area.Right; x++) _transparent[y * Surface.Width + x] = false;
     }
-    public void RectOutline(Rect rect, Color32 color) => Surface.DrawBox(To(rect), Color(color), Ascii ? BoxStyle.Ascii : BoxStyle.Rounded);
+    /// <summary>A square-cornered single-line border on the rectangle's edge cells, keeping their backgrounds.</summary>
+    public void Box(Rect rect, Color32 color)
+    {
+        var r = To(rect);
+        if (r.Width < 2 || r.Height < 2) return;
+        int right = r.Right - 1, bottom = r.Bottom - 1;
+        Glyph(r.X, r.Y, '┌', color); Glyph(right, r.Y, '┐', color);
+        Glyph(r.X, bottom, '└', color); Glyph(right, bottom, '┘', color);
+        for (int x = r.X + 1; x < right; x++) { Glyph(x, r.Y, '─', color); Glyph(x, bottom, '─', color); }
+        for (int y = r.Y + 1; y < bottom; y++) { Glyph(r.X, y, '│', color); Glyph(right, y, '│', color); }
+    }
+
+    /// <summary>Set one cell's character and foreground inside the clip, keeping its background.</summary>
+    public void Glyph(float x, float y, char c, Color32 color)
+    {
+        int cx = (int)MathF.Floor(x), cy = (int)MathF.Floor(y);
+        if (!Surface.Clip.Contains(cx, cy)) return;
+        var rune = Ascii && c > 127 ? AsciiFallback(new System.Text.Rune(c)) : new System.Text.Rune(c);
+        Surface.SetCell(cx, cy, rune, Surface[cx, cy].Style.WithForeground(Color(color)));
+    }
+
+    /// <summary>Change the foreground of every cell in the rectangle, keeping characters; used for hover highlights.</summary>
+    public void Recolor(Rect rect, Color32 color)
+    {
+        var area = Surface.Clip.Intersect(To(rect));
+        var foreground = Color(color);
+        for (int y = area.Y; y < area.Bottom; y++)
+            for (int x = area.X; x < area.Right; x++)
+            {
+                var cell = Surface[x, y];
+                if (!cell.IsContinuation) Surface.SetCell(x, y, cell.Rune, cell.Style.WithForeground(foreground));
+            }
+    }
     /// <summary>Write one line of text; returns the column after it.</summary>
     public float Text(Vector2 pos, ReadOnlySpan<char> text, Color32 color)
     {
@@ -79,6 +113,17 @@ public sealed class CellDraw
         0x2713 => 'x',
         0x25be or 0x25bc => 'v',
         0x25b8 or 0x25b6 => '>',
+        0x25cf => '*',
+        0x25cb => 'o',
+        0x25a0 => '#',
+        0x2016 or 0x2502 or 0x2503 or 0x2595 => '|',
+        0x2590 or 0x259d or 0x2597 => '#',
+        0x00b7 => '.',
+        0x00ab => '<',
+        0x00bb or 0x203a => '>',
+        0x00d7 => 'x',
+        0x2026 => '~',
+        0x250c or 0x2510 or 0x2514 or 0x2518 or 0x252c or 0x2534 or 0x253c or 0x251c or 0x2524 => '+',
         >= 0x2500 and <= 0x257f => '-',
         _ => '.',
     });

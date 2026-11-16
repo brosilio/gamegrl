@@ -9,7 +9,7 @@ public sealed class Extension : IEditorExtension
     {
         registry.AddPanel("fixture", "Fixture", DockRegion.Right, (context, area) =>
         { context.Ui.BeginArea(area); context.Ui.Label("Editor extension"); context.Ui.EndArea(); });
-        registry.AddMenu("fixture.create", "Fixture / Create", context => context.Edit(() => context.World.Spawn()));
+        registry.AddCommand("fixture.create", "Fixture: Create", context => context.Edit(() => context.World.Spawn()));
         registry.AddDrawer<Spinner>((ref Spinner spinner, EditorContext context) =>
             context.Ui.DragFloat(context.Ui.Property("Speed"), "speed", ref spinner.DegreesPerSecond));
     }

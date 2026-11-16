@@ -96,18 +96,20 @@ def main():
                 process = subprocess.Popen(COMMAND + [str(root), str(PROJECT), '--stdio', '--columns', '100', '--rows', '32', '--colors', 'none', '--ascii'], stdin=subprocess.PIPE, stdout=sink, stderr=subprocess.PIPE, env=environment)
                 try:
                     read = output.read_bytes
-                    wait_for(read, lambda b: screen(b, 100, 32)[-1].startswith('Assets/main.scene'), process)
+                    wait_for(read, lambda b: screen(b, 100, 32)[0].startswith('Assets/main.scene'), process)
                     if recover:
-                        click(lambda b: (process.stdin.write(b), process.stdin.flush()), 70, 0)
+                        process.stdin.write(b'\x10'); process.stdin.flush()  # Ctrl+P opens the command palette.
+                        wait_for(read, lambda b: any('File: Save' in row for row in screen(b, 100, 32)), process)
+                        process.stdin.write(b'recover'); process.stdin.flush()
                         wait_for(read, lambda b: any('Recover disconnected scene' in row for row in screen(b, 100, 32)), process)
-                        click(lambda b: (process.stdin.write(b), process.stdin.flush()), 70, 6)
+                        process.stdin.write(b'\r'); process.stdin.flush()
                     else:
                         process.stdin.write(b'\x0e'); process.stdin.flush()  # Ctrl+N.
-                    wait_for(read, lambda b: screen(b, 100, 32)[-1].startswith('Untitled *'), process)
+                    wait_for(read, lambda b: screen(b, 100, 32)[0].startswith('Untitled *'), process)
                     if recover:
                         process.stdin.write(b'\x11'); process.stdin.flush()  # Ctrl+Q.
                         wait_for(read, lambda b: any('Unsaved scene' in row for row in screen(b, 100, 32)), process)
-                        click(lambda b: (process.stdin.write(b), process.stdin.flush()), 50, 13)
+                        click(lambda b: (process.stdin.write(b), process.stdin.flush()), 50, 12)  # Discard.
                     else:
                         process.stdin.close()  # EOF must save the dirty document and exit.
                     process.wait(timeout=15)
@@ -130,12 +132,12 @@ def main():
         environment.update(TERM='xterm-256color', COLORTERM='truecolor')
         process = subprocess.Popen(COMMAND + [str(root), str(PROJECT), '--terminal'], stdin=slave, stdout=slave, stderr=subprocess.PIPE, env=environment)
         try:
-            wait_for(read_pty, lambda b: screen(b, 100, 24)[-1].startswith('Assets/main.scene'), process)
+            wait_for(read_pty, lambda b: screen(b, 100, 24)[0].startswith('Assets/main.scene'), process)
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 110, 0, 0))
             process.send_signal(signal.SIGWINCH)
-            wait_for(read_pty, lambda b: screen(b, 110, 30)[-1].startswith('Assets/main.scene'), process)
+            wait_for(read_pty, lambda b: screen(b, 110, 30)[0].startswith('Assets/main.scene'), process)
             os.write(master, b'\x0e')
-            wait_for(read_pty, lambda b: screen(b, 110, 30)[-1].startswith('Untitled *'), process)
+            wait_for(read_pty, lambda b: screen(b, 110, 30)[0].startswith('Untitled ●'), process)
             process.send_signal(signal.SIGHUP)
             until = time.monotonic() + 15
             while process.poll() is None and time.monotonic() < until: read_pty(); time.sleep(.02)
@@ -146,7 +148,7 @@ def main():
         finally:
             if process.poll() is None: process.kill(); process.wait()
             os.close(master); os.close(slave)
-    print('Terminal CLI smoke passed: pipe transport, ASCII/monochrome, EOF recovery, recovery menu, clean close, PTY resize, SIGHUP and raw-mode restoration.')
+    print('Terminal CLI smoke passed: pipe transport, ASCII/monochrome, EOF recovery, recovery command, clean close, PTY resize, SIGHUP and raw-mode restoration.')
 
 
 if __name__ == '__main__':

@@ -46,10 +46,9 @@ internal sealed partial class EditorHost : IDisposable
     private readonly InspectorVisitor _inspector;
     private GpuTexture? _sceneColor, _sceneDepth, _gameColor, _gameDepth;
     private Rect _sceneArea, _gameArea;
-    private int _menuSelection, _menuVersion = -1, _docksVersion = -1;
-    private readonly List<EditorMenuItem> _menuItems = new();
-    private string[] _menuLabels = ["Menu"];
-    private float _left = 26, _right = 38, _bottom = 12;
+    private int _docksVersion = -1;
+    private const float DefaultLeft = 28, DefaultRight = 40, DefaultBottom = 10;
+    private float _left = DefaultLeft, _right = DefaultRight, _bottom = DefaultBottom;
     private double _clock;
     private bool _importPending, _buildPending, _importAgain, _buildAgain;
     private BuildOutput? _reloadBuild;
@@ -244,21 +243,19 @@ internal sealed partial class EditorHost : IDisposable
         w = Math.Max(1, w / CellWidth);
         h = Math.Max(1, h / CellHeight);
         input = _cellInput;
-        _ui.KeyboardNavigation = !_gameFocused;
+        _ui.KeyboardNavigation = !_gameFocused && !_paletteOpen;
         _ui.Begin(input, platform.Platform, new Vector2(w, h), _clock);
-        _ui.Draw.Rect(_ui.Screen, _ui.Theme.Background);
         if (Files.Dialog != SceneFileDialog.None)
         {
             _sceneArea = _gameArea = default;
             GameInput.RouteFrom(input, false, default);
             _gameFocused = false;
+            _paletteOpen = false;
             FileDialog();
             _ui.End();
             _terminal?.Publish(_ui.Draw.Surface);
             return;
         }
-        Toolbar(w);
-        Splitters(w, h);
         if (_docksVersion != Registry.Version)
         {
             _docksVersion = Registry.Version;
@@ -266,10 +263,16 @@ internal sealed partial class EditorHost : IDisposable
         }
         _sceneArea = _gameArea = default;
         _dockAreas.Clear();
-        _layout.Arrange(w, h, (int)_left, (int)_right, (int)_bottom);
+        _tabRects.Clear();
+        _left = Math.Clamp(_left, 12, Math.Max(12, w * 0.4f));
+        _right = Math.Clamp(_right, 16, Math.Max(16, w * 0.45f));
+        _bottom = Math.Clamp(_bottom, 3, Math.Max(3, (h - 1) * 0.6f));
+        _layout.Arrange(w, h, _sidebarHidden ? 0 : (int)_left, (int)_right, (int)_bottom);
+        TopLine(CellDraw.From(_layout.Top));
         foreach (var region in DockLayout.Regions) DrawDock(CellDraw.From(_layout.Region(region)), region);
+        Splitters(w, h);
         FinishDockDrag();
-        StatusBar(new Rect(0, h - 1, w, 1));
+        Palette();
         RouteGameInput(input);
         Shortcuts(input);
         if (_closeRequested)
@@ -282,30 +285,21 @@ internal sealed partial class EditorHost : IDisposable
         _terminal?.Publish(_ui.Draw.Surface);
     }
 
+    /// <summary>
+    /// The borders are the splitters: the sidebar rule, the pair of box edges between the panes and the right pane,
+    /// and the scene pane's bottom edge (the bottom pane's top edge holds its tabs). New sizes apply next frame.
+    /// </summary>
     private void Splitters(float w, float h)
     {
-        float availableH = Math.Max(4, h - 3);
-        _left = Math.Clamp(_left, 10, Math.Max(10, w * 0.3f));
-        _right = Math.Clamp(_right, 12, Math.Max(12, w * 0.35f));
-        _bottom = Math.Clamp(_bottom, 3, Math.Max(3, availableH * 0.55f));
-        float middleW = Math.Max(1, w - _left - _right - 2), topH = Math.Max(2, availableH - _bottom - 1);
-        _left = _ui.Splitter(new Rect(_left, 2, 1, availableH), "left", _left, true, 10, Math.Max(10, w * 0.3f));
-        _right = w - _ui.Splitter(new Rect(w - _right - 1, 2, 1, availableH), "right", w - _right, true, w * 0.65f, Math.Max(w * 0.65f, w - 12));
-        float split = _ui.Splitter(new Rect(_left + 1, 2 + topH, middleW, 1), "bottom", 2 + topH, false, 4, Math.Max(4, h - 5));
-        _bottom = h - 2 - split;
-    }
-
-    private void StatusBar(Rect rect)
-    {
-        var color = _ui.Theme.TextDim;
-        _ui.Draw.PushClip(rect);
-        var at = rect.Min;
-        at.X = _ui.Draw.Text(at, ScenePath, color);
-        if (Document.Dirty) at.X = _ui.Draw.Text(at, " *", color);
-        at.X = _ui.Draw.Text(at with { X = at.X + 4 }, Document.Playing ? _game.Paused ? "Paused" : "Playing" : "Editing", color);
-        if (Document.Held is not null) at.X = _ui.Draw.Text(at with { X = at.X + 4 }, "Scene held until the game builds", _ui.Theme.Warning);
-        if (Jobs.Busy) _ui.Draw.Text(at with { X = at.X + 4 }, "Working…", color);
-        _ui.Draw.PopClip();
+        if (!_sidebarHidden && _layout.Rule.Width > 0)
+            _left = _ui.Splitter(CellDraw.From(_layout.Rule), "left", _left, true, 12, Math.Max(12, w * 0.4f));
+        var right = CellDraw.From(_layout.Region(DockRegion.Right));
+        if (right.W > 0 && right.X > 0)
+            _right = w - _ui.Splitter(new Rect(right.X - 1, right.Y, 2, right.H), "right", right.X, true, w - Math.Max(16, w * 0.45f), w - 16);
+        var center = CellDraw.From(_layout.Region(DockRegion.Center));
+        var bottom = CellDraw.From(_layout.Region(DockRegion.Bottom));
+        if (center.W > 2 && center.H > 0 && bottom.H > 0)
+            _bottom = h - _ui.Splitter(new Rect(center.X + 1, center.Bottom - 1, center.W - 2, 1), "bottom", bottom.Y, false, 4, Math.Max(4, h - 3));
     }
 
     private void RouteGameInput(Input input)
@@ -321,7 +315,12 @@ internal sealed partial class EditorHost : IDisposable
     {
         if (_ui.WantsKeyboard) return;
         if (input.WasPressed(Key.F5)) TogglePlay();
-        if (_gameFocused || !input.Ctrl) return;
+        if (_gameFocused) return;
+        if (input.WasPressed(Key.F6)) TogglePause();
+        if (input.WasPressed(Key.Delete) && _focusRegion != DockRegion.Bottom && CanEditSelection) Document.Edit(DeleteSelected);
+        if (!input.Ctrl) return;
+        if (input.WasPressed(Key.P)) OpenPalette();
+        if (input.WasPressed(Key.B)) _sidebarHidden = !_sidebarHidden;
         if (input.WasPressed(Key.S))
         {
             if (input.Shift) Files.SaveAs();
@@ -334,39 +333,6 @@ internal sealed partial class EditorHost : IDisposable
             else Document.Undo();
         }
         if (input.WasPressed(Key.Y)) Document.Redo();
-    }
-
-    private void Toolbar(float width)
-    {
-        if (_menuVersion != Registry.Version)
-        {
-            // Menu labels change only with registrations; rebuild then, not every frame.
-            _menuVersion = Registry.Version;
-            _menuItems.Clear();
-            _menuItems.AddRange(Registry.Menus);
-            _menuLabels = new string[_menuItems.Count + 1];
-            _menuLabels[0] = "Menu";
-            for (int i = 0; i < _menuItems.Count; i++) _menuLabels[i + 1] = _menuItems[i].Label;
-        }
-        _ui.BeginArea(new Rect(0, 0, width, 1));
-        _ui.Row(6, 6, 6, 6, 8, 7, 9, 5, 8, -1);
-        if (_ui.Button("Save")) Files.Save();
-        if (_ui.Button("Undo")) Document.Undo();
-        if (_ui.Button("Redo")) Document.Redo();
-        if (_ui.Button(Document.Playing ? "Stop" : "Play")) TogglePlay();
-        if (_ui.Button(_game.Paused ? "Resume" : "Pause") && Document.Playing) _game.Paused = !_game.Paused;
-        if (_ui.Button("Build")) BuildGame();
-        if (_ui.Button("Reimport")) Import();
-        if (_ui.Button("New")) Files.RequestNew();
-        if (_ui.Button("Save As")) Files.SaveAs();
-        if (_ui.Combo(_ui.Next(), "editor-menu", ref _menuSelection, _menuLabels) && _menuSelection > 0)
-        {
-            var menu = _menuItems[_menuSelection - 1];
-            _menuSelection = 0;
-            try { menu.Execute(_context); }
-            catch (Exception e) { Report("Menu " + menu.Label, e); }
-        }
-        _ui.EndArea();
     }
 
     private void EnsureTarget(ref GpuTexture? color, ref GpuTexture? depth, Rect area)

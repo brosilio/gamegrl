@@ -56,17 +56,8 @@ internal static class GraphicsSmoke
         { Frame(() => Point(point, true)); Frame(() => Point(point, false)); Frame(); }
         void Button(string label)
         { var rect = editor.Ui.ControlRect(label) ?? throw new Exception("Missing control: " + label); Click(rect.Center); }
-        Rect Tab(string id, DockRegion region)
-        {
-            var area = editor.DockArea(region); float x = area.X;
-            foreach (string tab in editor.Docks.Tabs(region))
-            {
-                float width = editor.Ui.Font.Measure(editor.Registry.FindPanel(tab)!.Title);
-                if (tab == id) return new Rect(x, area.Y, width, 1);
-                x += width + 1;
-            }
-            throw new Exception("Missing tab: " + id);
-        }
+        Rect Tab(string id, DockRegion region) => editor.TabRect(id);
+        void Command(string id) { Check(editor.RunCommand(id), "Missing command: " + id); Frame(); }
         void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
         Wait(() => !editor.Jobs.Busy && app.World.EntityCount > 0);
         if (terminalMode)
@@ -78,8 +69,8 @@ internal static class GraphicsSmoke
         int count = app.World.EntityCount;
         Button("Create"); Check(app.World.EntityCount == count + 1, "Create failed");
         Check(!editor.Document.Selected.IsNull, "Created entity is not selected");
-        Button("Undo"); Check(app.World.EntityCount == count, "Undo failed");
-        Button("Redo"); Check(app.World.EntityCount == count + 1, "Redo failed");
+        Command("edit.undo"); Check(app.World.EntityCount == count, "Undo failed");
+        Command("edit.redo"); Check(app.World.EntityCount == count + 1, "Redo failed");
         var selected = editor.Document.Selected;
         var camera = new SceneCamera(); var area = editor.SceneArea;
         var pixels = editor.PixelRect(area); var matrix = camera.Matrix(pixels.W / pixels.H);
@@ -88,7 +79,7 @@ internal static class GraphicsSmoke
         Check(SceneCamera.Project(position + Vector3.UnitX * length, matrix, area, out var handle), "Gizmo behind camera");
         Frame(() => Point(handle, true)); Frame(() => Point(handle + new Vector2(3, 0))); Frame(() => Point(handle + new Vector2(3, 0), false)); Frame();
         Check(app.World.Get<LocalTransform>(selected).Position.X > position.X, "Move gizmo failed");
-        Button("Undo"); Check(app.World.Get<LocalTransform>(editor.Document.Selected).Position == position, "Gizmo undo failed");
+        Command("edit.undo"); Check(app.World.Get<LocalTransform>(editor.Document.Selected).Position == position, "Gizmo undo failed");
         editor.Document.Selected = default;
         SceneCamera.Project(new Vector3(0, 5, 0), matrix, area, out var meshPoint); Click(meshPoint);
         Check(app.World.IsAlive(editor.Document.Selected) && app.World.Has<MeshRenderer>(editor.Document.Selected), "Scene picking failed");
@@ -116,23 +107,29 @@ internal static class GraphicsSmoke
             Check(editor.GameAssemblyPath == current && File.Exists(current) && editor.Document.Playing && app.World.EntityCount == playingCount, "Rollback failed");
         }
         Button("Stop"); Check(!editor.Document.Playing && editor.Document.Text == before, "Stop restore failed");
-        Click(Tab("scene", DockRegion.Center).Center); Button("Save"); Wait(() => !editor.Jobs.Busy);
+        Click(Tab("scene", DockRegion.Center).Center); Command("file.save"); Wait(() => !editor.Jobs.Busy);
         Check(File.ReadAllText(Path.Combine(root, "Assets/main.scene")) == before && !editor.Document.Dirty, "Save failed");
         Vector2 consoleTab = Tab("console", DockRegion.Bottom).Center, destination = editor.DockArea(DockRegion.Left).Center;
         Frame(() => Point(consoleTab, true)); Frame(() => Point(destination)); Frame(() => Point(destination, false)); Frame();
         Check(editor.Docks.Selected(DockRegion.Left) == "console", "Tab docking failed");
+        Frame(() => { input.OnKey((int)Key.LeftCtrl, true, false); input.OnKey((int)Key.P, true, false); });
+        Frame(() => { input.OnKey((int)Key.LeftCtrl, false, false); input.OnKey((int)Key.P, false, false); input.OnText("toggle sidebar"); });
+        Check(editor.PaletteOpen, "Command palette did not open");
+        Frame(() => input.OnKey((int)Key.Enter, true, false)); Frame(() => input.OnKey((int)Key.Enter, false, false));
+        Check(!editor.PaletteOpen && editor.DockArea(DockRegion.Left).W == 0, "Palette command did not run");
+        Command("view.sidebar");
         editor.Docks.Move("console", DockRegion.Bottom, 1); editor.Docks.Select(DockRegion.Left, "hierarchy"); Frame();
-        Button("New"); Check(app.World.EntityCount == 0 && editor.Files.CurrentPath is null && editor.Document.Dirty, "New failed");
-        Button("Save"); Check(editor.Files.Dialog == SceneFileDialog.SaveAs, "Missing Save As dialog");
+        Command("file.new"); Check(app.World.EntityCount == 0 && editor.Files.CurrentPath is null && editor.Document.Dirty, "New failed");
+        Command("file.save"); Check(editor.Files.Dialog == SceneFileDialog.SaveAs, "Missing Save As dialog");
         Button("destination");
         Frame(() => { input.OnKey((int)Key.LeftCtrl, true, false); input.OnKey((int)Key.A, true, false); });
         Frame(() => { input.OnKey((int)Key.LeftCtrl, false, false); input.OnKey((int)Key.A, false, false); input.OnText("Assets/new.scene"); });
         Frame(() => input.OnKey((int)Key.Enter, true, false)); Frame(() => input.OnKey((int)Key.Enter, false, false));
         Button("Save"); Wait(() => !editor.Jobs.Busy);
         Check(editor.Files.CurrentPath == "Assets/new.scene" && !editor.Document.Dirty, "Save As failed");
-        Button("Save As"); Button("Save"); Wait(() => !editor.Jobs.Busy);
+        Command("file.saveAs"); Button("Save"); Wait(() => !editor.Jobs.Busy);
         Check(editor.Files.Dialog == SceneFileDialog.Overwrite, "Overwrite guard failed"); Button("Cancel");
-        Button("New"); editor.RequestClose(); Frame(); Frame(); Check(editor.Files.Dialog == SceneFileDialog.Unsaved, "Unsaved guard failed");
+        Command("file.new"); editor.RequestClose(); Frame(); Frame(); Check(editor.Files.Dialog == SceneFileDialog.Unsaved, "Unsaved guard failed");
         Button("Cancel"); Check(!editor.Files.ExitRequested, "Close cancellation failed");
         editor.RequestClose(); Frame(); Frame(); Button("Discard"); Check(editor.Files.ExitRequested, "Discard failed");
         if (backend is not null)

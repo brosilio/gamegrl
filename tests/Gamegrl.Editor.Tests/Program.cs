@@ -324,7 +324,7 @@ static WeakReference ReloadGame(string dll, App app, SceneDocument doc)
     var reference = game.ContextReference!;
     app.World.Clear();
     game.Unload(app);
-    if (registry.Panels.Count != 0 || registry.Menus.Count != 0) throw new Exception("Extension registrations survived unload");
+    if (registry.Panels.Count != 0 || registry.Commands.Count != 0) throw new Exception("Extension registrations survived unload");
     game.Load(dll, app, doc, registry: registry, extensions: [plugin]);
     if (registry.FindPanel("fixture") is null) throw new Exception("Extension did not reload");
     doc.Restore(before);
