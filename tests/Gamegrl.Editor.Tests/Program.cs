@@ -83,6 +83,25 @@ Test("Play restores entities and time without adding history", () =>
     doc.Undo();
     Check(world.Get<LocalTransform>(world.Archetypes.First(a => a.Has<LocalTransform>() && a.Count > 0).Entities[0]).Position.Z == 0);
 });
+Test("A held scene survives failed code loads verbatim, blocks edits and returns on restore", () =>
+{
+    using var world = new World();
+    world.SetResource(new Time { Elapsed = 7, FixedDelta = 1f / 60 });
+    var e = world.Spawn(new Name("Kept"), SceneId.New(), LocalTransform.Identity);
+    var doc = new SceneDocument(world) { Selected = e };
+    doc.Open(doc.Text);
+    doc.Edit(() => world.Get<LocalTransform>(doc.Selected).Position.X = 4);
+    string edit = doc.Text;
+    doc.Play();
+    world.Spawn(new Name("Runtime"));
+    doc.Hold(doc.Text);
+    Check(!doc.Playing && world.EntityCount == 0 && doc.Text == edit, "the edit snapshot is held, not the play world");
+    Check(world.Resource<Time>().Elapsed == 7 && !doc.CanUndo && doc.Dirty);
+    doc.Edit(() => world.Spawn(new Name("Blocked")));
+    Check(world.EntityCount == 0 && doc.Text == edit);
+    doc.Restore(doc.Text);
+    Check(doc.Held is null && world.EntityCount == 1 && doc.Text == edit);
+});
 Test("Invalid scene does not destroy the edit world", () =>
 {
     using var world = new World();

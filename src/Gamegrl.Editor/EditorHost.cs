@@ -131,30 +131,41 @@ internal sealed partial class EditorHost : IDisposable
     {
         Document.CommitEdit();
         ulong selectedId = Document.SelectedId;
-        string state = Document.Text;
+        string state = Document.Text; // Held text if a previous load failed, so the scene returns with working code.
         bool playing = Document.Playing;
         string? previous = _gameDll;
-        try { _game.Stop(_app); } catch (Exception e) { Log.Error("Stop before reload: " + e.Message); }
+        try { _game.Stop(_app); } catch (Exception e) { Report("Stop before reload", e); }
         _app.World.Clear(); _game.Unload(_app);
         _reported.Clear();
-        void RestoreState()
+        void RestoreState(bool schemaMayChange)
         {
-            Document.Restore(state); Document.SelectSceneId(selectedId); Document.ClearHistory();
+            Document.Restore(state); Document.SelectSceneId(selectedId);
+            if (schemaMayChange) Document.ClearHistory();
             if (playing) _game.Resume();
         }
         try
         {
             _game.Load(output.AssemblyPath, _app, Document, GameInput, Registry, _extensionPaths);
-            RestoreState();
+            RestoreState(schemaMayChange: true);
         }
         catch (Exception e)
         {
-            Log.Error("Game reload: " + e.Message);
+            Log.Error("Game reload: " + e);
             _app.World.Clear(); _game.Unload(_app); output.Dispose();
-            if (previous is not null)
+            try
             {
+                if (previous is null) throw new InvalidOperationException("No earlier game build to return to.");
+                // Same assembly as before the attempt: undo history stays valid.
                 _game.Load(previous, _app, Document, GameInput, Registry, _extensionPaths);
-                RestoreState();
+                RestoreState(schemaMayChange: false);
+            }
+            catch (Exception rollback)
+            {
+                Log.Error("Previous game build could not be restored; the scene is held unchanged until the game builds again: " + rollback);
+                _app.World.Clear(); _game.Unload(_app);
+                if (playing) _app.RestoreClock(_editClock);
+                Document.Hold(state);
+                _gameDll = null; _activeBuild?.Dispose(); _activeBuild = null;
             }
             return;
         }
@@ -239,7 +250,7 @@ internal sealed partial class EditorHost : IDisposable
         _layout.Arrange(w, h, (int)_left, (int)_right, (int)_bottom);
         foreach (var region in Enum.GetValues<DockRegion>()) DrawDock(CellDraw.From(_layout.Region(region)), region);
         FinishDockDrag();
-        _ui.TextIn(new Rect(0, h - 1, w, 1), ScenePath + (Document.Dirty ? " *" : "") + "    " + (Document.Playing ? _game.Paused ? "Paused" : "Playing" : "Editing") + (Jobs.Busy ? "    Working…" : ""), _ui.Theme.TextDim);
+        _ui.TextIn(new Rect(0, h - 1, w, 1), ScenePath + (Document.Dirty ? " *" : "") + "    " + (Document.Playing ? _game.Paused ? "Paused" : "Playing" : "Editing") + (Document.Held is not null ? "    Scene held until the game builds" : "") + (Jobs.Busy ? "    Working…" : ""), _ui.Theme.TextDim);
         bool click = input.WasPressed(MouseButton.Left) || input.WasPressed(MouseButton.Right) || input.WasPressed(MouseButton.Middle);
         if (click) _gameFocused = _gameArea.W > 0 && _ui.IsHovered(_gameArea);
         if (_gameArea.W <= 0 || !Document.Playing || _ui.WantsKeyboard) _gameFocused = false;

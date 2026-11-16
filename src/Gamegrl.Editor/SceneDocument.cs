@@ -25,9 +25,22 @@ public sealed class SceneDocument(World world, Func<Guid, string?>? prefabs = nu
     }
     public void ClearHistory() { _undo.Clear(); _redo.Clear(); _before = null; _historyState = null; }
     public bool Playing => _playSnapshot is not null;
-    public bool CanUndo => !Playing && _undo.Count > 0;
-    public bool CanRedo => !Playing && _redo.Count > 0;
-    public string Text => Scene.SaveText(World, prefabs);
+    public bool CanUndo => !Playing && Held is null && _undo.Count > 0;
+    public bool CanRedo => !Playing && Held is null && _redo.Count > 0;
+    /// <summary>The scene's text, kept verbatim while no loaded code can represent it. Saving writes it unchanged.</summary>
+    public string? Held { get; private set; }
+    public string Text => Held ?? Scene.SaveText(World, prefabs);
+    /// <summary>Keep the edit scene as text and empty the world, e.g. when game code fails to load.
+    /// Play mode ends and its edit snapshot is what gets held. Restore or Open releases it.</summary>
+    public void Hold(string liveText)
+    {
+        string text = _playSnapshot ?? liveText;
+        if (_playSnapshot is not null && World.HasResource<Time>()) World.Resource<Time>() = _editTime;
+        _playSnapshot = null; _before = null;
+        World.Clear(); Selected = default;
+        ClearHistory();
+        Held = text;
+    }
     public bool Dirty => _dirty;
 
     public void Open(string text)
@@ -42,7 +55,7 @@ public sealed class SceneDocument(World world, Func<Guid, string?>? prefabs = nu
     public void MarkSaved(string text) { _saved = text; _dirty = Text != _saved; }
     public void BeginEdit()
     {
-        if (Playing || _before is not null) return;
+        if (Playing || Held is not null || _before is not null) return;
         _before = Text;
         _beforeSelection = SelectedId;
     }
@@ -62,7 +75,7 @@ public sealed class SceneDocument(World world, Func<Guid, string?>? prefabs = nu
     }
     public void Edit(Action action)
     {
-        if (Playing) return;
+        if (Playing || Held is not null) return;
         BeginEdit();
         try { action(); }
         finally { CommitEdit(); }
@@ -120,6 +133,7 @@ public sealed class SceneDocument(World world, Func<Guid, string?>? prefabs = nu
         Selected = default;
         foreach (var e in loaded)
             if (World.Has<SceneId>(e) && World.Get<SceneId>(e).Value == selection) Selected = e;
+        Held = null;
         _dirty = Text != _saved;
     }
 }
