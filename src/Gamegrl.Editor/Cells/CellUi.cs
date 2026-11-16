@@ -93,7 +93,6 @@ public sealed class CellUi
         foreach (var rectangle in _overlays) _main.Composite(_overlay, rectangle);
         if (Input.WasReleased(MouseButton.Left)) Active = 0;
         if (!_claimed) Focus = 0;
-        if (Input.WasPressed(MouseButton.Left) && !_claimed) Focus = 0;
         _commit = false;
     }
     public void CommitTextEdit() => _commit = true;

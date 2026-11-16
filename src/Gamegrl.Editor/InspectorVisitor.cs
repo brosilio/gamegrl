@@ -62,11 +62,7 @@ internal sealed class InspectorVisitor(CellUi ui, Func<(string Label, Guid Id)[]
     public void Field(string n, ref ushort v) => Number(n, ref v);
     public void Field(string n, ref int v)
     {
-        if (ui.DragInt(Property(n), n, ref v))
-        {
-            v = Constrain(v, _metadata);
-            ui.SetFloat(ui.Id(n + "#acc"), v);
-        }
+        if (ui.DragInt(Property(n), n, ref v)) v = Constrain(v, _metadata);
     }
     public void Field(string n, ref uint v) => Number(n, ref v);
     public void Field(string n, ref long v) => Number(n, ref v);
