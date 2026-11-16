@@ -26,25 +26,45 @@ public sealed class EditorRegistry : IDisposable
     private readonly Dictionary<string, EditorPanel> _panels = new(StringComparer.Ordinal);
     private readonly Dictionary<string, EditorMenuItem> _menus = new(StringComparer.Ordinal);
     private readonly Dictionary<ulong, Action<nint, EditorContext>> _drawers = new();
+    /// <summary>Changes whenever a panel, menu or drawer is added or removed, so hosts can cache derived lists.</summary>
+    public int Version { get; private set; }
     public IReadOnlyCollection<EditorPanel> Panels => _panels.Values;
     public IReadOnlyCollection<EditorMenuItem> Menus => _menus.Values;
     public EditorPanel? FindPanel(string id) => _panels.GetValueOrDefault(id);
     public void AddPanel(string id, string title, DockRegion region, Action<EditorContext, Rect> draw)
-    { ValidateId(id); _panels.Add(id, new(id, title, region, draw)); }
+    {
+        ValidateId(id);
+        _panels.Add(id, new(id, title, region, draw));
+        Version++;
+    }
     public void AddMenu(string id, string label, Action<EditorContext> execute)
-    { ValidateId(id); _menus.Add(id, new(id, label, execute)); }
-    public unsafe void AddDrawer<T>(ComponentDrawer<T> drawer) where T : unmanaged, IComponent =>
+    {
+        ValidateId(id);
+        _menus.Add(id, new(id, label, execute));
+        Version++;
+    }
+    public unsafe void AddDrawer<T>(ComponentDrawer<T> drawer) where T : unmanaged, IComponent
+    {
         _drawers.Add(ComponentRegistry.Get(Component<T>.Id).StableId, (pointer, context) => drawer(ref *(T*)pointer, context));
+        Version++;
+    }
     internal bool DrawComponent(ulong stableId, nint pointer, EditorContext context)
     {
         if (!_drawers.TryGetValue(stableId, out var draw)) return false;
         draw(pointer, context); return true;
     }
-    public bool RemovePanel(string id) => _panels.Remove(id);
-    public bool RemoveMenu(string id) => _menus.Remove(id);
-    public bool RemoveDrawer<T>() where T : unmanaged, IComponent => _drawers.Remove(ComponentRegistry.Get(Component<T>.Id).StableId);
+    public bool RemovePanel(string id) => Changed(_panels.Remove(id));
+    public bool RemoveMenu(string id) => Changed(_menus.Remove(id));
+    public bool RemoveDrawer<T>() where T : unmanaged, IComponent => Changed(_drawers.Remove(ComponentRegistry.Get(Component<T>.Id).StableId));
+    private bool Changed(bool removed)
+    {
+        if (removed) Version++;
+        return removed;
+    }
     private static void ValidateId(string id)
-    { if (string.IsNullOrWhiteSpace(id) || id.Any(char.IsWhiteSpace)) throw new ArgumentException("Editor ids must be nonempty and contain no whitespace.", nameof(id)); }
+    {
+        if (string.IsNullOrWhiteSpace(id) || id.Any(char.IsWhiteSpace)) throw new ArgumentException("Editor ids must be nonempty and contain no whitespace.", nameof(id));
+    }
     /// <summary>Register one extension transactionally; dispose its scope before unloading its assembly.</summary>
     public IDisposable Register(IEditorExtension extension)
     {
@@ -56,6 +76,7 @@ public sealed class EditorRegistry : IDisposable
             _panels.Clear(); foreach (var item in panels) _panels.Add(item.Key, item.Value);
             _menus.Clear(); foreach (var item in menus) _menus.Add(item.Key, item.Value);
             _drawers.Clear(); foreach (var item in drawers) _drawers.Add(item.Key, item.Value);
+            Version++;
         }
         try { extension.Register(this); }
         catch { Restore(); throw; }
@@ -67,35 +88,63 @@ public sealed class EditorRegistry : IDisposable
         private Action? _restore = restore;
         public void Dispose() => Interlocked.Exchange(ref _restore, null)?.Invoke();
     }
-    public void Dispose() { _drawers.Clear(); _menus.Clear(); _panels.Clear(); }
+    public void Dispose()
+    {
+        _drawers.Clear(); _menus.Clear(); _panels.Clear();
+        Version++;
+    }
 }
 
 /// <summary>Tab ownership and selection, independent of rendering or OS input.</summary>
 public sealed class DockLayout
 {
-    private readonly Dictionary<DockRegion, List<string>> _tabs = Enum.GetValues<DockRegion>().ToDictionary(r => r, _ => new List<string>());
-    private readonly Dictionary<DockRegion, string?> _selected = new();
-    public IReadOnlyList<string> Tabs(DockRegion region) => _tabs[region];
-    public string? Selected(DockRegion region) => _selected.GetValueOrDefault(region);
+    public static readonly DockRegion[] Regions = Enum.GetValues<DockRegion>();
+    private readonly List<string>[] _tabs = [new(), new(), new(), new()];
+    private readonly string?[] _selected = new string?[Regions.Length];
+
+    public IReadOnlyList<string> Tabs(DockRegion region) => _tabs[(int)region];
+    public string? Selected(DockRegion region) => _selected[(int)region];
+
+    /// <summary>Drop tabs whose panels are gone and place new panels in their default region.</summary>
     public void Sync(IEnumerable<EditorPanel> panels)
     {
-        var all = panels.ToDictionary(p => p.Id, StringComparer.Ordinal);
-        foreach (var region in _tabs.Keys)
+        var known = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var panel in panels) known.Add(panel.Id);
+        for (int r = 0; r < _tabs.Length; r++)
         {
-            _tabs[region].RemoveAll(id => !all.ContainsKey(id));
-            if (Selected(region) is not { } selected || !_tabs[region].Contains(selected)) _selected[region] = _tabs[region].FirstOrDefault();
+            _tabs[r].RemoveAll(id => !known.Contains(id));
+            if (_selected[r] is not { } selected || !_tabs[r].Contains(selected)) _selected[r] = _tabs[r].Count > 0 ? _tabs[r][0] : null;
         }
-        foreach (var panel in all.Values)
-            if (!_tabs.Values.Any(t => t.Contains(panel.Id))) { _tabs[panel.Region].Add(panel.Id); _selected.TryAdd(panel.Region, panel.Id); if (_selected[panel.Region] is null) _selected[panel.Region] = panel.Id; }
+        foreach (var panel in panels)
+        {
+            if (Find(panel.Id) >= 0) continue;
+            int region = (int)panel.Region;
+            _tabs[region].Add(panel.Id);
+            _selected[region] ??= panel.Id;
+        }
     }
+
     public void Select(DockRegion region, string id)
-    { if (!_tabs[region].Contains(id)) throw new ArgumentException("Panel is not in that region."); _selected[region] = id; }
+    {
+        if (!_tabs[(int)region].Contains(id)) throw new ArgumentException("Panel is not in that region.");
+        _selected[(int)region] = id;
+    }
+
     public void Move(string id, DockRegion target, int index = int.MaxValue)
     {
-        var source = _tabs.FirstOrDefault(pair => pair.Value.Contains(id));
-        if (source.Value is null) throw new ArgumentException("Unknown panel: " + id);
-        source.Value.Remove(id);
-        if (Selected(source.Key) == id) _selected[source.Key] = source.Value.FirstOrDefault();
-        _tabs[target].Insert(Math.Clamp(index, 0, _tabs[target].Count), id); _selected[target] = id;
+        int source = Find(id);
+        if (source < 0) throw new ArgumentException("Unknown panel: " + id);
+        _tabs[source].Remove(id);
+        if (_selected[source] == id) _selected[source] = _tabs[source].Count > 0 ? _tabs[source][0] : null;
+        var tabs = _tabs[(int)target];
+        tabs.Insert(Math.Clamp(index, 0, tabs.Count), id);
+        _selected[(int)target] = id;
+    }
+
+    private int Find(string id)
+    {
+        for (int r = 0; r < _tabs.Length; r++)
+            if (_tabs[r].Contains(id)) return r;
+        return -1;
     }
 }

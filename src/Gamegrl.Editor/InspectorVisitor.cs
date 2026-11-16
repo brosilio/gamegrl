@@ -5,8 +5,15 @@ using Gamegrl.UI;
 namespace Gamegrl.Editor;
 
 /// <summary>Edits the very same field stream used by scene files and the AOT player.</summary>
-internal sealed class InspectorVisitor(CellUi ui, Func<(string Label, Guid Id)[]> assets) : IFieldVisitor
+/// <summary>Asset picker entries; the host rebuilds them only when the asset catalog changes.</summary>
+internal sealed record AssetChoices(string[] Labels, Guid[] Ids)
 {
+    public static readonly AssetChoices Empty = new(["None"], [Guid.Empty]);
+}
+
+internal sealed class InspectorVisitor(CellUi ui, Func<AssetChoices> assets) : IFieldVisitor
+{
+    private static readonly string[] MatrixRows = ["0", "1", "2", "3"];
     private FieldMetadata _metadata;
     public void Metadata(in FieldMetadata metadata) => _metadata = metadata;
     private void Decoration()
@@ -53,8 +60,7 @@ internal sealed class InspectorVisitor(CellUi ui, Func<(string Label, Guid Id)[]
     public void Field(string name, ref bool value) => ui.Checkbox(Property(name), name, ref value);
     private void Number<T>(string name, ref T value) where T : struct, INumber<T>
     {
-        string text = value.ToString(null, CultureInfo.InvariantCulture);
-        if (ui.TextField(Property(name), name, ref text) && T.TryParse(text, CultureInfo.InvariantCulture, out var parsed)) value = Constrain(parsed, _metadata);
+        if (ui.NumberField(Property(name), name, ref value)) value = Constrain(value, _metadata);
     }
     public void Field(string n, ref byte v) => Number(n, ref v);
     public void Field(string n, ref sbyte v) => Number(n, ref v);
@@ -62,7 +68,7 @@ internal sealed class InspectorVisitor(CellUi ui, Func<(string Label, Guid Id)[]
     public void Field(string n, ref ushort v) => Number(n, ref v);
     public void Field(string n, ref int v)
     {
-        if (ui.DragInt(Property(n), n, ref v)) v = Constrain(v, _metadata);
+        if (ui.NumberField(Property(n), n, ref v)) v = Constrain(v, _metadata);
     }
     public void Field(string n, ref uint v) => Number(n, ref v);
     public void Field(string n, ref long v) => Number(n, ref v);
@@ -74,13 +80,13 @@ internal sealed class InspectorVisitor(CellUi ui, Func<(string Label, Guid Id)[]
     public void Field(string n, ref double v) => Number(n, ref v);
     public void Field(string n, ref Vector2 v)
     {
-        Span<float> c = stackalloc float[] { v.X, v.Y };
+        Span<float> c = [v.X, v.Y];
         if (ui.Vector(Property(n), n, c)) v = new(c[0], c[1]);
     }
     public void Field(string n, ref Vector3 v) => ui.Vector3(Property(n), n, ref v);
     public void Field(string n, ref Vector4 v)
     {
-        Span<float> c = stackalloc float[] { v.X, v.Y, v.Z, v.W };
+        Span<float> c = [v.X, v.Y, v.Z, v.W];
         if (ui.Vector(Property(n), n, c)) v = new(c[0], c[1], c[2], c[3]);
     }
     public void Field(string n, ref Quaternion v)
@@ -96,32 +102,45 @@ internal sealed class InspectorVisitor(CellUi ui, Func<(string Label, Guid Id)[]
         for (int i = 0; i < 4; i++)
         {
             var c = new Vector4(v[i, 0], v[i, 1], v[i, 2], v[i, 3]);
-            Field(i.ToString(CultureInfo.InvariantCulture), ref c);
+            Field(MatrixRows[i], ref c);
             v[i, 0] = c.X; v[i, 1] = c.Y; v[i, 2] = c.Z; v[i, 3] = c.W;
         }
         End();
     }
     public void Field(string n, ref Guid v)
     {
-        string s = v.ToString("N");
-        if (ui.TextField(Property(n), n, ref s) && Guid.TryParse(s, out var parsed)) v = parsed;
+        Span<char> s = stackalloc char[32];
+        v.TryFormat(s, out int length, "N");
+        if (ui.TextField(Property(n), n, s[..length], out var text) && Guid.TryParse(text, out var parsed)) v = parsed;
     }
     public void Asset(string n, ref Guid v)
     {
-        var items = assets();
-        Guid current = v;
-        int index = Array.FindIndex(items, item => item.Id == current);
-        if (ui.Combo(Property(n), n, ref index, items.Select(item => item.Label).ToArray()) && index >= 0) v = items[index].Id;
+        var choices = assets();
+        int index = Array.IndexOf(choices.Ids, v);
+        if (ui.Combo(Property(n), n, ref index, choices.Labels) && index >= 0) v = choices.Ids[index];
     }
     public void Field(string n, ref FixedString64 v)
     {
-        string s = v.ToString();
-        if (ui.TextField(Property(n), n, ref s)) v = new FixedString64(s);
+        Span<char> s = stackalloc char[FixedString64.MaxBytes];
+        int length = System.Text.Encoding.UTF8.GetChars(v.Utf8, s);
+        if (ui.TextField(Property(n), n, s[..length], out var text)) v = new FixedString64(text);
     }
-    public void Field(string n, ref Entity v) => ui.TextIn(Property(n), v.ToString(), ui.Theme.TextDim);
+    public void Field(string n, ref Entity v)
+    {
+        Span<char> s = stackalloc char[32];
+        int length = 4;
+        if (v.IsNull) "None".CopyTo(s);
+        else
+        {
+            s[0] = '#';
+            v.Index.TryFormat(s[1..], out length, default, CultureInfo.InvariantCulture);
+            length++;
+        }
+        ui.TextIn(Property(n), s[..length], ui.Theme.TextDim);
+    }
     public void Enum(string n, ref long v, ReadOnlySpan<string> names, ReadOnlySpan<long> values)
     {
         int selected = values.IndexOf(v);
-        if (ui.Combo(Property(n), n, ref selected, names.ToArray()) && selected >= 0) v = values[selected];
+        if (ui.Combo(Property(n), n, ref selected, names) && selected >= 0) v = values[selected];
     }
 }

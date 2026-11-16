@@ -59,8 +59,14 @@ void Changed(object sender, FileSystemEventArgs e)
 {
     string path = Path.GetRelativePath(root, e.FullPath).Replace('\\', '/');
     if (path.StartsWith("Assets/", StringComparison.Ordinal) && !path.EndsWith(".saving", StringComparison.Ordinal)) Interlocked.Exchange(ref assetChanged, Stopwatch.GetTimestamp());
-    if (path.Split('/').Any(p => p is "bin" or "obj" or "Library")) return;
+    if (HasSegment(path, "bin") || HasSegment(path, "obj") || HasSegment(path, "Library")) return;
     if (path.EndsWith(".cs", StringComparison.Ordinal) || path.EndsWith(".csproj", StringComparison.Ordinal)) Interlocked.Exchange(ref codeChanged, Stopwatch.GetTimestamp());
+}
+static bool HasSegment(string path, string segment)
+{
+    foreach (var range in path.AsSpan().Split('/'))
+        if (path.AsSpan()[range].SequenceEqual(segment)) return true;
+    return false;
 }
 watcher.Changed += Changed; watcher.Created += Changed; watcher.Deleted += Changed; watcher.Renamed += (s, e) => Changed(s, e);
 watcher.EnableRaisingEvents = true;

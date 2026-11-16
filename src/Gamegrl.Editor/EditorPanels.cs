@@ -8,139 +8,224 @@ namespace Gamegrl.Editor;
 
 internal sealed partial class EditorHost
 {
+    private static readonly string[] CreateKinds = ["Empty", "Cube", "Camera", "Sprite"];
     private int _newKind, _componentChoice;
+    private readonly List<Entity> _roots = new();
+    // Add-component choices for the selected archetype, rebuilt only when it, the registry or game code changes.
+    private readonly List<int> _componentIds = new();
+    private readonly List<string> _componentNames = new();
+    private (int Archetype, int Registered, int Code) _componentKey = (-1, -1, -1);
+    private int _codeGeneration;
+    private readonly List<(string Text, LogLevel Level)> _consoleLines = new();
+    private long _consoleVersion = -1;
+
     private void Hierarchy(Rect area)
     {
         _ui.BeginArea(area);
         _ui.Row(-1, -1);
         if (_ui.Button("Create")) Document.Edit(CreateEntity);
-        if (_ui.Button("Delete") && _app.World.IsAlive(Document.Selected))
-            Document.Edit(() => { _app.World.Destroy(Document.Selected); Document.Selected = default; });
-        _ui.Combo(_ui.Next(), "create-kind", ref _newKind, ["Empty", "Cube", "Camera", "Sprite"]);
-        var rest = _ui.Remaining;
-        _ui.BeginScroll(rest, "hierarchy-scroll");
-        var roots = new List<Entity>();
+        if (_ui.Button("Delete") && _app.World.IsAlive(Document.Selected)) Document.Edit(DeleteSelected);
+        _ui.Combo(_ui.Next(), "create-kind", ref _newKind, CreateKinds);
+        _ui.BeginScroll(_ui.Remaining, "hierarchy-scroll");
+        _roots.Clear();
         foreach (var archetype in _app.World.Archetypes)
             foreach (var e in archetype.Entities)
-                if (!_app.World.HasParent(e)) roots.Add(e);
-        foreach (var e in roots) EntityRow(e, 0);
+                if (!_app.World.HasParent(e)) _roots.Add(e);
+        foreach (var e in _roots) EntityRow(e, 0);
         _ui.EndScroll();
         _ui.EndArea();
     }
+
     private void CreateEntity()
     {
         var world = _app.World;
-        var e = world.Spawn(SceneId.New(), new Name { Value = new FixedString64(new[] { "Entity", "Cube", "Camera", "Sprite" }[_newKind]) }, LocalTransform.Identity, new LocalToWorld());
+        var e = world.Spawn(SceneId.New(), new Name(CreateKinds[_newKind] is "Empty" ? "Entity" : CreateKinds[_newKind]), LocalTransform.Default, new LocalToWorld());
         if (_newKind == 1) world.Add(e, MeshRenderer.Default);
         if (_newKind == 2) world.Add(e, Camera.Default);
         if (_newKind == 3) world.Add(e, Sprite.Default);
         Document.Selected = e;
     }
+
+    private void DeleteSelected()
+    {
+        _app.World.Destroy(Document.Selected);
+        Document.Selected = default;
+    }
+
     private void EntityRow(Entity e, int depth)
     {
         var world = _app.World;
         ulong id = world.Has<SceneId>(e) ? world.Get<SceneId>(e).Value : e.Index;
         bool open = _expanded.GetValueOrDefault(id, true), children = false;
-        foreach (var unused in world.Children(e)) { children = true; break; }
-        string label = world.Has<Name>(e) ? world.Get<Name>(e).Value.ToString() : "Entity " + e.Index;
-        if (_ui.TreeNode(_ui.Next(), id.ToString("x"), label, children, Document.Selected == e, ref open, depth)) Document.Selected = e;
+        foreach (var unused in world.Children(e))
+        {
+            children = true;
+            break;
+        }
+        Span<char> label = stackalloc char[FixedString64.MaxBytes + 16];
+        int length = EntityLabel(world, e, label);
+        if (_ui.TreeNode(_ui.Next(), id, label[..length], children, Document.Selected == e, ref open, depth)) Document.Selected = e;
         _expanded[id] = open;
-        if (open) foreach (var child in world.Children(e)) EntityRow(child, depth + 1);
+        if (open)
+            foreach (var child in world.Children(e)) EntityRow(child, depth + 1);
     }
+
+    private static int EntityLabel(World world, Entity e, Span<char> destination)
+    {
+        if (world.Has<Name>(e)) return System.Text.Encoding.UTF8.GetChars(world.Get<Name>(e).Value.Utf8, destination);
+        "Entity ".CopyTo(destination);
+        e.Index.TryFormat(destination[7..], out int digits, default, System.Globalization.CultureInfo.InvariantCulture);
+        return 7 + digits;
+    }
+
     private unsafe void Inspector(Rect area)
     {
         _ui.BeginScroll(area, "inspector-scroll");
         var world = _app.World;
         var e = Document.Selected;
-        if (!world.IsAlive(e)) { _ui.Label("Select an entity"); _ui.EndScroll(); return; }
-        if (Document.Playing)
+        if (!world.IsAlive(e) || Document.Playing)
         {
-            _ui.Label("Stop play mode to edit", true);
-            _ui.EndScroll(); return;
+            _ui.Label(Document.Playing ? "Stop play mode to edit" : "Select an entity", Document.Playing);
+            _ui.EndScroll();
+            return;
         }
         // Value edits capture only this entity's component bytes; structural buttons below use Document.Edit.
-        if (_ui.IsHovered(area) && (_ui.Input.WasPressed(MouseButton.Left) || _ui.Input.WasReleased(MouseButton.Left))) Document.BeginEntityEdit(e);
+        bool click = _ui.Input.WasPressed(MouseButton.Left) || _ui.Input.WasReleased(MouseButton.Left);
+        if (click && _ui.IsHovered(area)) Document.BeginEntityEdit(e);
         _ui.PushId(world.Has<SceneId>(e) ? world.Get<SceneId>(e).Value : e.Index);
-        if (_ui.Button("Make root")) Document.Edit(() => world.SetParent(e, default));
-        if (_ui.Button("Parent to next root")) Document.Edit(() => ParentToNextRoot(world, e));
+        if (_ui.Button("Make root")) MakeRoot(e);
+        if (_ui.Button("Parent to next root")) ParentToNextRoot(e);
         var (archetype, row) = world.Locate(e);
         int remove = -1;
         foreach (int type in archetype.Types)
         {
-            var info = ComponentRegistry.Get(type);
             if (type == Component<SceneId>.Id || type == Component<PrefabInstance>.Id || type == Component<LocalToWorld>.Id) continue;
+            var info = ComponentRegistry.Get(type);
             _ui.PushId(type);
             _ui.Row(-1, 2);
-            _ui.Header(info.Name[(info.Name.LastIndexOf('.') + 1)..]);
+            _ui.Header(info.Name.AsSpan(info.Name.LastIndexOf('.') + 1));
             if (_ui.Button("×")) remove = type;
-            var pointer = archetype.Ptr(archetype.ColumnOf(type), row);
-            var checkpoint = _ui.Save();
-            try { if (!Registry.DrawComponent(info.StableId, (nint)pointer, _context)) info.Serializer?.Visit(pointer, _inspector); }
-            catch (Exception ex)
-            {
-                _ui.Rewind(checkpoint);
-                Report("Inspector " + info.Name, ex);
-                _ui.TextIn(_ui.Next(), "Drawer failed: " + ex.Message, _ui.Theme.Error);
-            }
+            DrawComponent(info, archetype.Ptr(archetype.ColumnOf(type), row));
             _ui.PopId();
             _ui.Separator();
         }
-        if (remove >= 0) Document.Edit(() => world.RemoveRaw(e, remove));
-        var available = Enumerable.Range(0, ComponentRegistry.Count).Select(ComponentRegistry.Get)
-            .Where(c => !c.Released && c.Serializer is not null && !archetype.Set.Contains(c.Id)
-                && c.Id != Component<SceneId>.Id && c.Id != Component<PrefabInstance>.Id).ToArray();
-        if (available.Length > 0)
+        if (remove >= 0) RemoveComponent(e, remove);
+        RefreshComponentChoices(archetype);
+        if (_componentIds.Count > 0)
         {
-            _componentChoice = Math.Clamp(_componentChoice, 0, available.Length - 1);
-            _ui.Combo(_ui.Next(), "component-choice", ref _componentChoice, available.Select(c => c.Name).ToArray());
-            if (_ui.Button("Add component")) Document.Edit(() =>
-            {
-                var info = available[_componentChoice];
-                Span<byte> data = stackalloc byte[info.Size];
-                fixed (byte* p = data) { info.Serializer!.Reset(p); world.AddRaw(e, info.Id, p); }
-            });
+            _componentChoice = Math.Clamp(_componentChoice, 0, _componentIds.Count - 1);
+            _ui.Combo(_ui.Next(), "component-choice", ref _componentChoice, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_componentNames));
+            if (_ui.Button("Add component")) AddComponent(e, _componentIds[_componentChoice]);
         }
         _ui.PopId();
-        if (_ui.Active == 0 && !_ui.WantsKeyboard || _ui.Input.WasReleased(MouseButton.Left) && !_ui.WantsKeyboard) Document.CommitEdit();
+        if (!_ui.WantsKeyboard && (_ui.Active == 0 || _ui.Input.WasReleased(MouseButton.Left))) Document.CommitEdit();
         _ui.EndScroll();
     }
-    private static void ParentToNextRoot(World world, Entity e)
+
+    private unsafe void DrawComponent(ComponentInfo info, byte* pointer)
     {
-        foreach (var a in world.Archetypes)
-            foreach (var parent in a.Entities)
-                if (parent != e && !world.HasParent(parent)) { world.SetParent(e, parent); return; }
+        var checkpoint = _ui.Save();
+        try
+        {
+            if (!Registry.DrawComponent(info.StableId, (nint)pointer, _context)) info.Serializer?.Visit(pointer, _inspector);
+        }
+        catch (Exception e)
+        {
+            _ui.Rewind(checkpoint);
+            Report("Inspector " + info.Name, e);
+            _ui.TextIn(_ui.Next(), "Drawer failed: " + e.Message, _ui.Theme.Error);
+        }
     }
+
+    private void RefreshComponentChoices(Archetype archetype)
+    {
+        var key = (archetype.Id, ComponentRegistry.Count, _codeGeneration);
+        if (key == _componentKey) return;
+        _componentKey = key;
+        _componentIds.Clear();
+        _componentNames.Clear();
+        for (int id = 0; id < ComponentRegistry.Count; id++)
+        {
+            var info = ComponentRegistry.Get(id);
+            if (info.Released || info.Serializer is null || archetype.Set.Contains(id)) continue;
+            if (id == Component<SceneId>.Id || id == Component<PrefabInstance>.Id) continue;
+            _componentIds.Add(id);
+            _componentNames.Add(info.Name);
+        }
+    }
+
+    // Structural edits get their own methods so their closures are allocated only on click, not every frame.
+    private void MakeRoot(Entity e) => Document.Edit(() => _app.World.SetParent(e, default));
+    private void RemoveComponent(Entity e, int type) => Document.Edit(() => _app.World.RemoveRaw(e, type));
+
+    private unsafe void AddComponent(Entity e, int type) => Document.Edit(() =>
+    {
+        var info = ComponentRegistry.Get(type);
+        Span<byte> data = stackalloc byte[info.Size];
+        fixed (byte* p = data)
+        {
+            info.Serializer!.Reset(p);
+            _app.World.AddRaw(e, type, p);
+        }
+    });
+
+    private void ParentToNextRoot(Entity e) => Document.Edit(() =>
+    {
+        foreach (var a in _app.World.Archetypes)
+            foreach (var parent in a.Entities)
+                if (parent != e && !_app.World.HasParent(parent))
+                {
+                    _app.World.SetParent(e, parent);
+                    return;
+                }
+    });
+
     private void Project(Rect area)
     {
         _ui.BeginScroll(area.Shrink(1), "project-scroll");
         foreach (string path in _assets.Files)
         {
             if (!_ui.Selectable(_ui.Next(), path, path == Files.CurrentPath)) continue;
-            if (path.EndsWith(".scene", StringComparison.Ordinal))
-            {
-                Files.RequestOpen(path);
-            }
-            else if (path.EndsWith(".prefab", StringComparison.Ordinal))
-                Document.Edit(() =>
-                {
-                    var entities = Scene.LoadText(_app.World, $"gamegrl scene 1\nentity {SceneId.New().Value:x16}\n  prefab asset:{_assets.FindByPath(path):N}\n", _assets.PrefabText, Log.Warn);
-                    if (entities.Length > 0) Document.Selected = entities[0];
-                });
+            if (path.EndsWith(".scene", StringComparison.Ordinal)) Files.RequestOpen(path);
+            else if (path.EndsWith(".prefab", StringComparison.Ordinal)) InstantiatePrefab(path);
         }
         _ui.EndScroll();
     }
+
+    private void InstantiatePrefab(string path) => Document.Edit(() =>
+    {
+        string text = $"{Scene.TextHeader}\nentity {SceneId.New().Value:x16}\n  prefab asset:{_assets.FindByPath(path):N}\n";
+        var entities = Scene.LoadText(_app.World, text, _assets.PrefabText, Log.Warn);
+        if (entities.Length > 0) Document.Selected = entities[0];
+    });
+
     private void ConsolePanel(Rect area)
     {
         _ui.BeginArea(area.Shrink(1));
         if (_ui.Button("Clear")) Log.Clear();
-        _ui.BeginScroll(_ui.Remaining, "console-scroll");
-        foreach (var entry in Log.Snapshot())
+        if (_consoleVersion != Log.Version)
         {
-            var color = entry.Level == LogLevel.Error ? _ui.Theme.Error : entry.Level == LogLevel.Warning ? _ui.Theme.Warning : _ui.Theme.Text;
-            foreach (string line in entry.Message.Split('\n')) _ui.TextIn(_ui.Next(), line.TrimEnd('\r'), color);
+            // Split log entries into lines only when the log changes.
+            _consoleVersion = Log.Version;
+            _consoleLines.Clear();
+            foreach (var entry in Log.Snapshot())
+                foreach (var line in entry.Message.Split('\n')) _consoleLines.Add((line.TrimEnd('\r'), entry.Level));
         }
-        _ui.EndScroll(); _ui.EndArea();
+        _ui.BeginScroll(_ui.Remaining, "console-scroll");
+        foreach (var (text, level) in _consoleLines)
+        {
+            if (!_ui.RowVisible())
+            {
+                _ui.Next();
+                continue;
+            }
+            var color = level == LogLevel.Error ? _ui.Theme.Error : level == LogLevel.Warning ? _ui.Theme.Warning : _ui.Theme.Text;
+            _ui.TextIn(_ui.Next(), text, color);
+        }
+        _ui.EndScroll();
+        _ui.EndArea();
     }
+
     private void Tasks(Rect area)
     {
         _ui.BeginArea(area.Shrink(1));
@@ -149,6 +234,7 @@ internal sealed partial class EditorHost
         if (!Jobs.Busy) _ui.Label("No running tasks", true);
         _ui.EndArea();
     }
+
     private int _dragAxis = -1;
     private Vector2 _axisScreen;
     private float _axisScale;

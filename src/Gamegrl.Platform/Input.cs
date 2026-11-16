@@ -56,6 +56,7 @@ public sealed class Input
 
     /// <summary>Text typed this frame (layout- and IME-aware, from the OS), for text fields.</summary>
     public string TypedText => _text.ToString();
+    public bool HasTypedText => _text.Length > 0;
 
     public bool IsDown(MouseButton b) => (_mouseDown & (1 << (int)b)) != 0;
     public bool WasPressed(MouseButton b) => (_mousePressed & (1 << (int)b)) != 0;

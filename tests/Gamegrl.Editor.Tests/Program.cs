@@ -136,6 +136,40 @@ Test("Entity value edits record component bytes, keep entity references across r
     doc.CommitEdit();
     Check(!doc.CanUndo && doc.Dirty, "untracked structure resets history and stays dirty");
 });
+Test("A warmed-up editor frame of controls and Inspector fields allocates nothing", () =>
+{
+    var ui = new CellUi(); var input = new Input();
+    var choices = new AssetChoices(["None", "Cube"], [Guid.Empty, Gamegrl.Rendering.BuiltinAssets.Cube.Guid]);
+    var inspector = new InspectorVisitor(ui, () => choices);
+    // Arrays keep the components at stable addresses for the visitor without capturing addresses of locals.
+    var sprite = new[] { Gamegrl.Rendering.Sprite.Default }; var camera = new[] { Gamegrl.Rendering.Camera.Default };
+    var transform = new[] { LocalTransform.Default }; var name = new[] { new Name("Inspected") }; var follow = new[] { new Gamegrl.Tests.Follow { Speed = 2 } };
+    string[] kinds = ["A", "B"]; int kind = 0; bool open = true; string text = "field"; int count = 3;
+    unsafe void Frame()
+    {
+        ui.Begin(input, null, new Vector2(80, 40), 1);
+        ui.BeginArea(new Rect(0, 0, 40, 40));
+        ui.Row(6, -1, 2);
+        ui.Button("Save"); ui.Combo(ui.Next(), "kind", ref kind, kinds); ui.Button("×");
+        ui.BeginScroll(ui.Remaining, "list");
+        for (ulong i = 0; i < 20; i++) ui.TreeNode(ui.Next(), i, "Entity", i % 3 == 0, i == 4, ref open, (float)(i % 4));
+        ui.EndScroll(); ui.EndArea();
+        ui.BeginArea(new Rect(40, 0, 40, 40));
+        ui.TextField(ui.Next(), "text", ref text); ui.NumberField(ui.Next(), "count", ref count); ui.Separator();
+        fixed (void* a = sprite) Visit(Component<Gamegrl.Rendering.Sprite>.Id, a);
+        fixed (void* a = camera) Visit(Component<Gamegrl.Rendering.Camera>.Id, a);
+        fixed (void* a = transform) Visit(Component<LocalTransform>.Id, a);
+        fixed (void* a = name) Visit(Component<Name>.Id, a);
+        fixed (void* a = follow) Visit(Component<Gamegrl.Tests.Follow>.Id, a);
+        ui.EndArea(); ui.End();
+    }
+    unsafe void Visit(int type, void* pointer) { ui.PushId(type); ComponentRegistry.Get(type).Serializer!.Visit(pointer, inspector); ui.PopId(); }
+    for (int i = 0; i < 3; i++) Frame();
+    long before = GC.GetAllocatedBytesForCurrentThread();
+    for (int i = 0; i < 10; i++) Frame();
+    long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+    Check(allocated == 0, $"steady-state frames allocated {allocated} bytes");
+});
 Test("Invalid scene does not destroy the edit world", () =>
 {
     using var world = new World();
@@ -243,7 +277,7 @@ Test("Inspector metadata: edits clamp ranges, idle drawing preserves data and he
 {
     var ui = new CellUi();
     var input = new Input();
-    var inspector = new InspectorVisitor(ui, () => []);
+    var inspector = new InspectorVisitor(ui, () => AssetChoices.Empty);
     float value = 5;
     void Draw(FieldMetadata metadata)
     {

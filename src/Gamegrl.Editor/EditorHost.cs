@@ -46,7 +46,9 @@ internal sealed partial class EditorHost : IDisposable
     private readonly InspectorVisitor _inspector;
     private GpuTexture? _sceneColor, _sceneDepth, _gameColor, _gameDepth;
     private Rect _sceneArea, _gameArea;
-    private int _menuSelection;
+    private int _menuSelection, _menuVersion = -1, _docksVersion = -1;
+    private readonly List<EditorMenuItem> _menuItems = new();
+    private string[] _menuLabels = ["Menu"];
     private float _left = 26, _right = 38, _bottom = 12;
     private double _clock;
     private bool _importPending, _buildPending, _importAgain, _buildAgain;
@@ -73,8 +75,7 @@ internal sealed partial class EditorHost : IDisposable
         _terminal = terminal;
         if (terminal is null) _renderer = new CellRenderer(_render.Device, _render.Swapchain.Format, fontPath ?? throw new ArgumentNullException(nameof(fontPath)));
         else { _sceneTerminal = new TerminalViewport(_render.Device); _gameTerminal = new TerminalViewport(_render.Device); }
-        _inspector = new InspectorVisitor(_ui, () => new[] { ("None", Guid.Empty), ("Cube", BuiltinAssets.Cube.Guid), ("White", BuiltinAssets.White.Guid) }
-            .Concat(_assets.Files.Select(path => (path, _assets.FindByPath(path)))).ToArray());
+        _inspector = new InspectorVisitor(_ui, AssetChoices);
         Document = new SceneDocument(app.World, assets.PrefabText);
         Document.Open(Document.Text);
         Files = new SceneFiles(root, Document, Jobs, Import);
@@ -84,7 +85,23 @@ internal sealed partial class EditorHost : IDisposable
         app.Schedule.Add(new HostSystem("Editor.Draw", Phase.Render, 100, _ => Render()));
         BuildGame();
     }
-    private sealed class HostSystem(string name, Phase phase, int order, Action<World> run) : ISystem
+    private AssetChoices _assetChoices = Editor.AssetChoices.Empty;
+    private string[]? _assetChoiceFiles;
+    /// <summary>Picker entries, rebuilt when an import replaces the catalog's file list.</summary>
+    private AssetChoices AssetChoices()
+    {
+        var files = _assets.Files;
+        if (ReferenceEquals(files, _assetChoiceFiles)) return _assetChoices;
+        _assetChoiceFiles = files;
+        var labels = new string[files.Length + 3];
+        var ids = new Guid[files.Length + 3];
+        (labels[0], ids[0]) = ("None", Guid.Empty);
+        (labels[1], ids[1]) = ("Cube", BuiltinAssets.Cube.Guid);
+        (labels[2], ids[2]) = ("White", BuiltinAssets.White.Guid);
+        for (int i = 0; i < files.Length; i++) (labels[i + 3], ids[i + 3]) = (files[i], _assets.FindByPath(files[i]));
+        return _assetChoices = new AssetChoices(labels, ids);
+    }
+        private sealed class HostSystem(string name, Phase phase, int order, Action<World> run) : ISystem
     {
         public string Name => name;
         public Phase Phase => phase;
@@ -137,6 +154,7 @@ internal sealed partial class EditorHost : IDisposable
         try { _game.Stop(_app); } catch (Exception e) { Report("Stop before reload", e); }
         _app.World.Clear(); _game.Unload(_app);
         _reported.Clear();
+        _codeGeneration++;
         void RestoreState(bool schemaMayChange)
         {
             Document.Restore(state); Document.SelectSceneId(selectedId);
@@ -223,7 +241,8 @@ internal sealed partial class EditorHost : IDisposable
         _clock += _app.World.Resource<Time>().Delta;
         _cellInput.RouteFrom(input, true, default);
         _cellInput.ScaleMouse(new Vector2(1f / CellWidth, 1f / CellHeight));
-        w = Math.Max(1, w / CellWidth); h = Math.Max(1, h / CellHeight);
+        w = Math.Max(1, w / CellWidth);
+        h = Math.Max(1, h / CellHeight);
         input = _cellInput;
         _ui.KeyboardNavigation = !_gameFocused;
         _ui.Begin(input, platform.Platform, new Vector2(w, h), _clock);
@@ -231,10 +250,40 @@ internal sealed partial class EditorHost : IDisposable
         if (Files.Dialog != SceneFileDialog.None)
         {
             _sceneArea = _gameArea = default;
-            GameInput.RouteFrom(input, false, default); _gameFocused = false;
-            FileDialog(); _ui.End(); _terminal?.Publish(_ui.Draw.Surface); return;
+            GameInput.RouteFrom(input, false, default);
+            _gameFocused = false;
+            FileDialog();
+            _ui.End();
+            _terminal?.Publish(_ui.Draw.Surface);
+            return;
         }
         Toolbar(w);
+        Splitters(w, h);
+        if (_docksVersion != Registry.Version)
+        {
+            _docksVersion = Registry.Version;
+            Docks.Sync(Registry.Panels);
+        }
+        _sceneArea = _gameArea = default;
+        _dockAreas.Clear();
+        _layout.Arrange(w, h, (int)_left, (int)_right, (int)_bottom);
+        foreach (var region in DockLayout.Regions) DrawDock(CellDraw.From(_layout.Region(region)), region);
+        FinishDockDrag();
+        StatusBar(new Rect(0, h - 1, w, 1));
+        RouteGameInput(input);
+        Shortcuts(input);
+        if (_closeRequested)
+        {
+            _closeRequested = false;
+            Document.CommitEdit();
+            Files.RequestClose();
+        }
+        _ui.End();
+        _terminal?.Publish(_ui.Draw.Surface);
+    }
+
+    private void Splitters(float w, float h)
+    {
         float availableH = Math.Max(4, h - 3);
         _left = Math.Clamp(_left, 10, Math.Max(10, w * 0.3f));
         _right = Math.Clamp(_right, 12, Math.Max(12, w * 0.35f));
@@ -244,37 +293,61 @@ internal sealed partial class EditorHost : IDisposable
         _right = w - _ui.Splitter(new Rect(w - _right - 1, 2, 1, availableH), "right", w - _right, true, w * 0.65f, Math.Max(w * 0.65f, w - 12));
         float split = _ui.Splitter(new Rect(_left + 1, 2 + topH, middleW, 1), "bottom", 2 + topH, false, 4, Math.Max(4, h - 5));
         _bottom = h - 2 - split;
-        Docks.Sync(Registry.Panels);
-        _sceneArea = _gameArea = default;
-        _dockAreas.Clear();
-        _layout.Arrange(w, h, (int)_left, (int)_right, (int)_bottom);
-        foreach (var region in Enum.GetValues<DockRegion>()) DrawDock(CellDraw.From(_layout.Region(region)), region);
-        FinishDockDrag();
-        _ui.TextIn(new Rect(0, h - 1, w, 1), ScenePath + (Document.Dirty ? " *" : "") + "    " + (Document.Playing ? _game.Paused ? "Paused" : "Playing" : "Editing") + (Document.Held is not null ? "    Scene held until the game builds" : "") + (Jobs.Busy ? "    Working…" : ""), _ui.Theme.TextDim);
+    }
+
+    private void StatusBar(Rect rect)
+    {
+        var color = _ui.Theme.TextDim;
+        _ui.Draw.PushClip(rect);
+        var at = rect.Min;
+        at.X = _ui.Draw.Text(at, ScenePath, color);
+        if (Document.Dirty) at.X = _ui.Draw.Text(at, " *", color);
+        at.X = _ui.Draw.Text(at with { X = at.X + 4 }, Document.Playing ? _game.Paused ? "Paused" : "Playing" : "Editing", color);
+        if (Document.Held is not null) at.X = _ui.Draw.Text(at with { X = at.X + 4 }, "Scene held until the game builds", _ui.Theme.Warning);
+        if (Jobs.Busy) _ui.Draw.Text(at with { X = at.X + 4 }, "Working…", color);
+        _ui.Draw.PopClip();
+    }
+
+    private void RouteGameInput(Input input)
+    {
         bool click = input.WasPressed(MouseButton.Left) || input.WasPressed(MouseButton.Right) || input.WasPressed(MouseButton.Middle);
         if (click) _gameFocused = _gameArea.W > 0 && _ui.IsHovered(_gameArea);
         if (_gameArea.W <= 0 || !Document.Playing || _ui.WantsKeyboard) _gameFocused = false;
         GameInput.RouteFrom(_app.World.Resource<Input>(), _gameFocused, PixelRect(_gameArea).Min, [Key.F5]);
         GameInput.ScaleMouse(new Vector2(GamePreviewScale));
-        if (!_ui.WantsKeyboard && !_gameFocused)
-        {
-            if (input.Ctrl && input.WasPressed(Key.S)) { if (input.Shift) Files.SaveAs(); else Files.Save(); }
-            if (input.Ctrl && input.WasPressed(Key.N)) Files.RequestNew();
-            if (input.Ctrl && input.WasPressed(Key.Z)) { if (input.Shift) Document.Redo(); else Document.Undo(); }
-            if (input.Ctrl && input.WasPressed(Key.Y)) Document.Redo();
-
-        }
-        if (!_ui.WantsKeyboard && input.WasPressed(Key.F5)) TogglePlay();
-        if (_closeRequested)
-        {
-            _closeRequested = false;
-            Document.CommitEdit();
-            Files.RequestClose();
-        }
-        _ui.End(); _terminal?.Publish(_ui.Draw.Surface);
     }
+
+    private void Shortcuts(Input input)
+    {
+        if (_ui.WantsKeyboard) return;
+        if (input.WasPressed(Key.F5)) TogglePlay();
+        if (_gameFocused || !input.Ctrl) return;
+        if (input.WasPressed(Key.S))
+        {
+            if (input.Shift) Files.SaveAs();
+            else Files.Save();
+        }
+        if (input.WasPressed(Key.N)) Files.RequestNew();
+        if (input.WasPressed(Key.Z))
+        {
+            if (input.Shift) Document.Redo();
+            else Document.Undo();
+        }
+        if (input.WasPressed(Key.Y)) Document.Redo();
+    }
+
     private void Toolbar(float width)
     {
+        if (_menuVersion != Registry.Version)
+        {
+            // Menu labels change only with registrations; rebuild then, not every frame.
+            _menuVersion = Registry.Version;
+            _menuItems.Clear();
+            _menuItems.AddRange(Registry.Menus);
+            _menuLabels = new string[_menuItems.Count + 1];
+            _menuLabels[0] = "Menu";
+            for (int i = 0; i < _menuItems.Count; i++) _menuLabels[i + 1] = _menuItems[i].Label;
+        }
         _ui.BeginArea(new Rect(0, 0, width, 1));
         _ui.Row(6, 6, 6, 6, 8, 7, 9, 5, 8, -1);
         if (_ui.Button("Save")) Files.Save();
@@ -286,15 +359,16 @@ internal sealed partial class EditorHost : IDisposable
         if (_ui.Button("Reimport")) Import();
         if (_ui.Button("New")) Files.RequestNew();
         if (_ui.Button("Save As")) Files.SaveAs();
-        var menus = Registry.Menus.ToArray();
-        if (_ui.Combo(_ui.Next(), "editor-menu", ref _menuSelection, new[] { "Menu" }.Concat(menus.Select(m => m.Label)).ToArray()) && _menuSelection > 0)
+        if (_ui.Combo(_ui.Next(), "editor-menu", ref _menuSelection, _menuLabels) && _menuSelection > 0)
         {
-            var menu = menus[_menuSelection - 1]; _menuSelection = 0;
+            var menu = _menuItems[_menuSelection - 1];
+            _menuSelection = 0;
             try { menu.Execute(_context); }
             catch (Exception e) { Report("Menu " + menu.Label, e); }
         }
         _ui.EndArea();
     }
+
     private void EnsureTarget(ref GpuTexture? color, ref GpuTexture? depth, Rect area)
     {
         int w = Math.Max(1, (int)area.W * CellWidth), h = Math.Max(1, (int)area.H * CellHeight);
@@ -309,11 +383,28 @@ internal sealed partial class EditorHost : IDisposable
         if (!_render.HasFrame) return;
         var frame = _render.Frame;
         if (_sceneArea.W > 0 && _sceneColor is not null)
-            _render.Scene.DrawView(frame.Commands, new ViewDesc { Color = _sceneColor, Depth = _sceneDepth!, ViewProjection = _camera.Matrix(_sceneColor.Width / (float)_sceneColor.Height), ClearColor = new Vector4(0.08f, 0.09f, 0.12f, 1), DebugLines = true });
+        {
+            _render.Scene.DrawView(frame.Commands, new ViewDesc
+            {
+                Color = _sceneColor,
+                Depth = _sceneDepth!,
+                ViewProjection = _camera.Matrix(_sceneColor.Width / (float)_sceneColor.Height),
+                ClearColor = new Vector4(0.08f, 0.09f, 0.12f, 1),
+                DebugLines = true,
+            });
+        }
         if (_gameArea.W > 0 && _gameColor is not null)
         {
             MainCameraSystem.TryMainCamera(_cameras, _gameColor.Width / (float)_gameColor.Height, out var matrix, out var clear);
-            _render.Scene.DrawView(frame.Commands, new ViewDesc { Color = _gameColor, Depth = _gameDepth!, ViewProjection = matrix, ClearColor = clear, Sprites = true, SpriteSize = new Vector2(_gameColor.Width, _gameColor.Height) * GamePreviewScale });
+            _render.Scene.DrawView(frame.Commands, new ViewDesc
+            {
+                Color = _gameColor,
+                Depth = _gameDepth!,
+                ViewProjection = matrix,
+                ClearColor = clear,
+                Sprites = true,
+                SpriteSize = new Vector2(_gameColor.Width, _gameColor.Height) * GamePreviewScale,
+            });
         }
         if (_terminal is not null)
         {
@@ -321,7 +412,8 @@ internal sealed partial class EditorHost : IDisposable
             if (_gameArea.W > 0 && _gameColor is not null) _gameTerminal!.Capture(frame.Commands, _gameColor);
             return;
         }
-        frame.Commands.BeginRenderPass(new RenderPassDesc { Color = new ColorAttachment { Texture = frame.Backbuffer, Load = LoadOp.Clear, Store = StoreOp.Store, ClearColor = new Vector4(0.1f, 0.1f, 0.1f, 1) } });
+        var backbuffer = new ColorAttachment { Texture = frame.Backbuffer, Load = LoadOp.Clear, Store = StoreOp.Store, ClearColor = new Vector4(0.1f, 0.1f, 0.1f, 1) };
+        frame.Commands.BeginRenderPass(new RenderPassDesc { Color = backbuffer });
         _renderer!.Render(frame.Commands, frame.FrameIndex, _ui.Draw, frame.Backbuffer.Width, frame.Backbuffer.Height);
         frame.Commands.EndRenderPass();
     }

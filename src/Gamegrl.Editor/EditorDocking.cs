@@ -16,16 +16,8 @@ internal sealed partial class EditorHost
     {
         _context = new EditorContext(_app, _ui, Document, Jobs);
         Registry.AddPanel("hierarchy", "Hierarchy", DockRegion.Left, (_, r) => Hierarchy(r.Shrink(1)));
-        Registry.AddPanel("scene", "Scene", DockRegion.Center, (_, r) =>
-        {
-            _sceneArea = r; EnsureTarget(ref _sceneColor, ref _sceneDepth, r); _ui.Image(r, _sceneColor!); _sceneTerminal?.Paint(_ui.Draw, r, _sceneColor!);
-            SceneInteraction(_ui.Input);
-        });
-        Registry.AddPanel("game", "Game", DockRegion.Center, (_, r) =>
-        {
-            _gameArea = r; EnsureTarget(ref _gameColor, ref _gameDepth, r); _ui.Image(r, _gameColor!); _gameTerminal?.Paint(_ui.Draw, r, _gameColor!);
-            _app.World.Resource<Gamegrl.Rendering.ScreenSize>() = new() { Width = (int)(_gameColor!.Width * GamePreviewScale), Height = (int)(_gameColor.Height * GamePreviewScale) };
-        });
+        Registry.AddPanel("scene", "Scene", DockRegion.Center, (_, r) => ScenePanel(r));
+        Registry.AddPanel("game", "Game", DockRegion.Center, (_, r) => GamePanel(r));
         Registry.AddPanel("inspector", "Inspector", DockRegion.Right, (_, r) => Inspector(r.Shrink(1)));
         Registry.AddPanel("project", "Project", DockRegion.Bottom, (_, r) => Project(r));
         Registry.AddPanel("console", "Console", DockRegion.Bottom, (_, r) => ConsolePanel(r));
@@ -50,38 +42,69 @@ internal sealed partial class EditorHost
         });
         Docks.Sync(Registry.Panels);
     }
+    private float TabWidth(string id) => _ui.Font.Measure(Registry.FindPanel(id)!.Title) + _ui.Theme.Padding * 4;
+
+    private void ScenePanel(Rect area)
+    {
+        _sceneArea = area;
+        EnsureTarget(ref _sceneColor, ref _sceneDepth, area);
+        _ui.Image(area, _sceneColor!);
+        _sceneTerminal?.Paint(_ui.Draw, area, _sceneColor!);
+        SceneInteraction(_ui.Input);
+    }
+
+    private void GamePanel(Rect area)
+    {
+        _gameArea = area;
+        EnsureTarget(ref _gameColor, ref _gameDepth, area);
+        _ui.Image(area, _gameColor!);
+        _gameTerminal?.Paint(_ui.Draw, area, _gameColor!);
+        var size = new Vector2(_gameColor!.Width, _gameColor.Height) * GamePreviewScale;
+        _app.World.Resource<Gamegrl.Rendering.ScreenSize>() = new() { Width = (int)size.X, Height = (int)size.Y };
+    }
+
     private void DrawDock(Rect area, DockRegion region)
     {
         _dockAreas[region] = area;
         _ui.Draw.Rect(area, _ui.Theme.Panel);
         var strip = area with { H = _ui.Theme.TabHeight };
         _ui.Draw.Rect(strip, _ui.Theme.PanelHeader);
-        float total = Docks.Tabs(region).Sum(id => _ui.Font.Measure(Registry.FindPanel(id)!.Title) + _ui.Theme.Padding * 4 + 1);
-        uint scrollId = _ui.Id("dock-scroll#" + region);
+        var tabs = Docks.Tabs(region);
+        float total = 0;
+        foreach (string id in tabs) total += TabWidth(id) + 1;
+        _ui.PushId((int)region);
+        uint scrollId = _ui.Id("dock-scroll");
         float scroll = _ui.GetFloat(scrollId);
         if (_ui.IsHovered(strip)) scroll -= _ui.Input.Wheel.Y * 4;
         scroll = Math.Clamp(scroll, 0, Math.Max(0, total - strip.W));
         _ui.SetFloat(scrollId, scroll);
         float x = strip.X - scroll;
         _ui.Draw.PushClip(strip);
-        foreach (string id in Docks.Tabs(region))
+        foreach (string id in tabs)
         {
             var panel = Registry.FindPanel(id)!;
-            float width = _ui.Font.Measure(panel.Title) + _ui.Theme.Padding * 4;
+            float width = TabWidth(id);
             var tab = new Rect(x, strip.Y, width, strip.H);
-            bool clicked = _ui.Behavior(tab, _ui.Id("dock#" + id), out bool hover, out _);
-            if (hover && _ui.Input.WasPressed(MouseButton.Left)) { _dragTab = id; _tabPress = _ui.Mouse; }
+            bool selected = Docks.Selected(region) == id;
+            bool clicked = _ui.Behavior(tab, _ui.Id(id), out bool hover, out _);
+            if (hover && _ui.Input.WasPressed(MouseButton.Left))
+            {
+                _dragTab = id;
+                _tabPress = _ui.Mouse;
+            }
             if (clicked && Vector2.Distance(_tabPress, _ui.Mouse) < 1) Docks.Select(region, id);
-            _ui.Draw.Rect(tab, Docks.Selected(region) == id ? _ui.Theme.Panel : hover ? _ui.Theme.WidgetHover : _ui.Theme.PanelHeader);
-            if (Docks.Selected(region) == id) _ui.Draw.Rect(tab with { H = 1 }, _ui.Theme.Accent);
+            _ui.Draw.Rect(tab, selected ? _ui.Theme.Panel : hover ? _ui.Theme.WidgetHover : _ui.Theme.PanelHeader);
+            if (selected) _ui.Draw.Rect(tab with { H = 1 }, _ui.Theme.Accent);
             _ui.TextIn(tab, panel.Title, _ui.Theme.Text);
             x += width + 1;
         }
         _ui.Draw.PopClip();
+        _ui.PopId();
         var content = new Rect(area.X, strip.Bottom, area.W, Math.Max(1, area.H - strip.H));
-        if (Docks.Selected(region) is { } selected) DrawPanel(Registry.FindPanel(selected)!, content);
+        if (Docks.Selected(region) is { } current) DrawPanel(Registry.FindPanel(current)!, content);
         else _ui.TextIn(content with { H = 1 }, "Drop a tab here", _ui.Theme.TextDim);
     }
+
     private void DrawPanel(EditorPanel panel, Rect content)
     {
         var checkpoint = _ui.Save();
@@ -93,30 +116,40 @@ internal sealed partial class EditorHost
             _ui.TextIn(content with { H = 1 }, panel.Title + " failed: " + e.Message, _ui.Theme.Error);
         }
     }
+
     private void FinishDockDrag()
     {
         if (_dragTab is not { } id) return;
         bool dragged = Vector2.Distance(_tabPress, _ui.Mouse) >= 1;
-        if (dragged) _ui.Tooltip("Dock " + Registry.FindPanel(id)?.Title);
+        if (dragged) _ui.Tooltip(Registry.FindPanel(id)?.Title ?? id);
         if (!_ui.Input.WasReleased(MouseButton.Left)) return;
-        if (dragged)
-            foreach (var (region, area) in _dockAreas)
-                if (area.Contains(_ui.Mouse))
-                {
-                    int index = Docks.Tabs(region).Count;
-                    if (_ui.Mouse.Y < area.Y + _ui.Theme.TabHeight)
-                    {
-                        float x = area.X - _ui.GetFloat(_ui.Id("dock-scroll#" + region)); index = 0;
-                        foreach (string tab in Docks.Tabs(region))
-                        {
-                            if (_ui.Mouse.X < x + (_ui.Font.Measure(Registry.FindPanel(tab)!.Title) + _ui.Theme.Padding * 4) * 0.5f) break;
-                            x += _ui.Font.Measure(Registry.FindPanel(tab)!.Title) + _ui.Theme.Padding * 4 + 1; index++;
-                        }
-                    }
-                    int original = Docks.Tabs(region).ToList().IndexOf(id);
-                    if (original >= 0 && original < index) index--;
-                    Docks.Move(id, region, index); break;
-                }
         _dragTab = null;
+        if (!dragged) return;
+        foreach (var (region, area) in _dockAreas)
+        {
+            if (!area.Contains(_ui.Mouse)) continue;
+            var tabs = Docks.Tabs(region);
+            int index = tabs.Count;
+            if (_ui.Mouse.Y < area.Y + _ui.Theme.TabHeight)
+            {
+                // Dropped on the tab strip: insert before the first tab whose midpoint is right of the pointer.
+                _ui.PushId((int)region);
+                float x = area.X - _ui.GetFloat(_ui.Id("dock-scroll"));
+                _ui.PopId();
+                index = 0;
+                foreach (string tab in tabs)
+                {
+                    float width = TabWidth(tab);
+                    if (_ui.Mouse.X < x + width * 0.5f) break;
+                    x += width + 1;
+                    index++;
+                }
+            }
+            int original = -1;
+            for (int i = 0; i < tabs.Count; i++) if (tabs[i] == id) original = i;
+            if (original >= 0 && original < index) index--;
+            Docks.Move(id, region, index);
+            break;
+        }
     }
 }

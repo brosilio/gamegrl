@@ -14,7 +14,12 @@ public sealed class CellDraw
     public Surface Surface { get; } = new(1, 1);
     public List<(Rect Area, GpuTexture Texture)> Images { get; } = new();
     public Rect Clip => From(Surface.Clip);
-    public static AnsiDotNet.Rect To(Rect r) => new((int)MathF.Floor(r.X), (int)MathF.Floor(r.Y), Math.Max(0, (int)MathF.Ceiling(r.Right) - (int)MathF.Floor(r.X)), Math.Max(0, (int)MathF.Ceiling(r.Bottom) - (int)MathF.Floor(r.Y)));
+    /// <summary>The cells a rectangle touches: floor its near edges, ceil its far edges.</summary>
+    public static AnsiDotNet.Rect To(Rect r)
+    {
+        int x = (int)MathF.Floor(r.X), y = (int)MathF.Floor(r.Y);
+        return new(x, y, Math.Max(0, (int)MathF.Ceiling(r.Right) - x), Math.Max(0, (int)MathF.Ceiling(r.Bottom) - y));
+    }
     public static Rect From(AnsiDotNet.Rect r) => new(r.X, r.Y, r.Width, r.Height);
     public static Color Color(Color32 c) => AnsiDotNet.Color.Rgb(c.R, c.G, c.B);
     public void Reset(int width, int height)
@@ -44,17 +49,39 @@ public sealed class CellDraw
         for (int y = area.Y; y < area.Bottom; y++) for (int x = area.X; x < area.Right; x++) _transparent[y * Surface.Width + x] = false;
     }
     public void RectOutline(Rect rect, Color32 color) => Surface.DrawBox(To(rect), Color(color), Ascii ? BoxStyle.Ascii : BoxStyle.Rounded);
-    public void Text(Vector2 pos, string text, Color32 color)
+    /// <summary>Write one line of text; returns the column after it.</summary>
+    public float Text(Vector2 pos, ReadOnlySpan<char> text, Color32 color)
     {
         int y = (int)pos.Y, x = (int)pos.X;
+        var foreground = Color(color);
         foreach (var rune in text.EnumerateRunes())
         {
             if (rune.Value is '\n' or '\r') break;
-            var display = Ascii && rune.Value > 127 ? new System.Text.Rune(rune.Value switch { 0x2713 => 'x', 0x25be or 0x25bc => 'v', 0x25b8 or 0x25b6 => '>', >= 0x2500 and <= 0x257f => '-', _ => '.' }) : rune;
-            if (Surface.Clip.Contains(x, y)) Surface.SetCell(x, y, display, Surface[x, y].Style.WithForeground(Color(color)));
+            var display = Ascii && rune.Value > 127 ? AsciiFallback(rune) : rune;
+            if (Surface.Clip.Contains(x, y)) Surface.SetCell(x, y, display, Surface[x, y].Style.WithForeground(foreground));
             x += CellWidth.Of(rune);
         }
+        return x;
     }
+
+    /// <summary>Fill a rectangle's first row with one character, keeping each cell's background.</summary>
+    public void Repeat(Rect rect, char c, Color32 color)
+    {
+        var area = Surface.Clip.Intersect(To(rect));
+        if (area.Height <= 0) return;
+        var rune = Ascii && c > 127 ? AsciiFallback(new System.Text.Rune(c)) : new System.Text.Rune(c);
+        var foreground = Color(color);
+        for (int x = area.X; x < area.Right; x++) Surface.SetCell(x, area.Y, rune, Surface[x, area.Y].Style.WithForeground(foreground));
+    }
+
+    private static System.Text.Rune AsciiFallback(System.Text.Rune rune) => new(rune.Value switch
+    {
+        0x2713 => 'x',
+        0x25be or 0x25bc => 'v',
+        0x25b8 or 0x25b6 => '>',
+        >= 0x2500 and <= 0x257f => '-',
+        _ => '.',
+    });
     public void Line(Vector2 a, Vector2 b, Color32 color, float thickness = 1)
     {
         int steps = Math.Max(1, (int)MathF.Ceiling(Vector2.Distance(a, b) * 2));
@@ -71,7 +98,7 @@ public sealed class CellDraw
 public sealed class CellFont
 {
     public float LineHeight => 1;
-    public float Measure(string text) => AnsiText.VisibleWidth(text);
+    public float Measure(ReadOnlySpan<char> text) => AnsiText.VisibleWidth(text);
     public int HitTest(string text, float column)
     {
         int width = 0, offset = 0;

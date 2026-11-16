@@ -36,7 +36,7 @@ internal sealed class TerminalPlatform : IPlatform
             case InputEventKind.Mouse:
                 var point = new Vector2(ev.X + 0.5f, (ev.Y + 0.5f) * 2);
                 input.OnMouseMove(point, point - input.MousePosition);
-                if (ev.Action == MouseAction.Wheel) input.OnWheel(new Vector2(ev.Button == AnsiDotNet.MouseButton.WheelRight ? 1 : ev.Button == AnsiDotNet.MouseButton.WheelLeft ? -1 : 0, ev.Button == AnsiDotNet.MouseButton.WheelUp ? 1 : ev.Button == AnsiDotNet.MouseButton.WheelDown ? -1 : 0));
+                if (ev.Action == MouseAction.Wheel) input.OnWheel(Wheel(ev.Button));
                 else if (ev.Action is MouseAction.Press or MouseAction.Release)
                 {
                     if (ev.Button == AnsiDotNet.MouseButton.None)
@@ -71,6 +71,14 @@ internal sealed class TerminalPlatform : IPlatform
                 break;
         }
     }
+    private static Vector2 Wheel(AnsiDotNet.MouseButton button) => button switch
+    {
+        AnsiDotNet.MouseButton.WheelRight => new(1, 0),
+        AnsiDotNet.MouseButton.WheelLeft => new(-1, 0),
+        AnsiDotNet.MouseButton.WheelUp => new(0, 1),
+        AnsiDotNet.MouseButton.WheelDown => new(0, -1),
+        _ => Vector2.Zero,
+    };
     private void Modifier(Key key, bool down, Input input)
     { input.OnKey((int)key, down, false); if (down) _pulses.Add((int)key); }
     public string GetClipboardText() => _clipboard;
