@@ -89,6 +89,21 @@ internal static class CellUiTests
             Draw(); Draw();
             Check(names[0] == "alpha!" && names[1] == "beta", "nothing stale is applied later");
         });
+        test("Cell UI: slow sub-cell splitter drags accumulate", () =>
+        {
+            var input = new Input(); var ui = new CellUi(); float position = 10;
+            void Frame(float x, bool? button = null)
+            {
+                input.BeginFrame(); input.OnMouseMove(new Vector2(x, 5), Vector2.Zero);
+                if (button is { } down) input.OnMouseButton(0, down);
+                ui.Begin(input, null, new Vector2(40, 10), 1);
+                position = ui.Splitter(new Rect(position, 0, 1, 10), "split", position, true, 2, 30); ui.End();
+            }
+            Frame(10.5f, true);
+            for (int i = 1; i <= 10; i++) Frame(10.5f + i * 0.3f);
+            Check(position == 13, "ten 0.3-cell steps move the splitter three cells");
+            Frame(40, false); Check(position == 13);
+        });
         test("Terminal viewport: half-block colors, BGRA order, clipping and low color output", () =>
         {
             var surface = new Surface(5, 3);

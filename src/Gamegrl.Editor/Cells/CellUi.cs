@@ -199,9 +199,13 @@ public sealed class CellUi
     public void Image(Rect rect, GpuTexture texture) => Draw.Image(rect, texture);
     public float Splitter(Rect rect, string id, float position, bool vertical, float min, float max)
     {
-        Behavior(rect, Id(id), out bool hover, out bool held);
+        uint key = Id(id);
+        Behavior(rect, key, out bool hover, out bool held);
         Draw.Rect(rect, hover || held ? Theme.Accent : Theme.Border);
-        if (held) position = Math.Clamp(position + (vertical ? MouseDelta.X : MouseDelta.Y), min, max);
+        // Track the drag from its anchor: sub-cell mouse motion accumulates instead of rounding away each frame.
+        float mouse = vertical ? Mouse.X : Mouse.Y;
+        if (held && Input.WasPressed(MouseButton.Left)) SetFloat(key ^ 0x9e3779b9, position - mouse);
+        if (held) position = Math.Clamp(mouse + GetFloat(key ^ 0x9e3779b9), min, max);
         return MathF.Round(position);
     }
     public void BeginScroll(Rect rect, string id)
