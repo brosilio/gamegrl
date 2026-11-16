@@ -64,6 +64,31 @@ internal static class CellUiTests
             ui.Label("after"); ui.End();
             Check(ui.Draw.Surface[0, 0].Rune.Value == 'a');
         });
+        test("Cell UI: clicking another item while editing commits the edit before the click changes context", () =>
+        {
+            var input = new Input(); var ui = new CellUi();
+            string[] names = ["alpha", "beta"]; int selected = 0;
+            void Draw()
+            {
+                ui.Begin(input, null, new Vector2(40, 10), 1);
+                // The list draws first, like the Hierarchy: its click changes what the field below edits.
+                for (int i = 0; i < names.Length; i++) { ui.PushId(i); if (ui.Selectable(ui.Next(), names[i], i == selected)) selected = i; ui.PopId(); }
+                ui.PushId(selected); ui.TextField(new Rect(0, 5, 20, 1), "name", ref names[selected]); ui.PopId();
+                ui.End();
+            }
+            void Click(float x, float y, bool down)
+            { input.BeginFrame(); input.OnMouseMove(new Vector2(x, y), Vector2.Zero); input.OnMouseButton(0, down); Draw(); }
+            Draw(); Click(2, 5.5f, true); Click(2, 5.5f, false);
+            Check(ui.WantsKeyboard);
+            input.BeginFrame(); input.OnKey((int)Key.End, true, false); Draw();
+            input.BeginFrame(); input.OnKey((int)Key.End, false, false); input.OnText("!"); Draw();
+            Click(2, 1.5f, true);
+            Check(names[0] == "alpha!" && selected == 0, "the edit commits on the frame the outside click arrives");
+            Click(2, 1.5f, false);
+            Check(selected == 1 && !ui.WantsKeyboard, "the held click reaches the list on the next frame");
+            Draw(); Draw();
+            Check(names[0] == "alpha!" && names[1] == "beta", "nothing stale is applied later");
+        });
         test("Terminal viewport: half-block colors, BGRA order, clipping and low color output", () =>
         {
             var surface = new Surface(5, 3);
@@ -121,7 +146,7 @@ internal static class CellUiTests
             platform.Feed(InputEvent.ForResize(90, 30), input); Check(platform.CreateWindow(default).PixelSize == (90, 60));
         });
     }
-    private static void Check(bool condition) { if (!condition) throw new Exception("Cell interface assertion failed"); }
+    private static void Check(bool condition, string message = "Cell interface assertion failed") { if (!condition) throw new Exception(message); }
     private sealed class SlowBackend : ITerminalBackend
     {
         private readonly Lock _gate = new(); private readonly MemoryStream _bytes = new();

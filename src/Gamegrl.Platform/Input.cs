@@ -101,6 +101,16 @@ public sealed class Input
         _text.Append(source._text);
     }
 
+    public bool AnyMousePressed => _mousePressed != 0;
+    /// <summary>Remove this frame's mouse press/release edges so a host can deliver them on a later frame.</summary>
+    public (byte Pressed, byte Released) TakeMouseEdges()
+    {
+        var edges = (_mousePressed, _mouseReleased);
+        _mousePressed = _mouseReleased = 0;
+        return edges;
+    }
+    public void AddMouseEdges(byte pressed, byte released) { _mousePressed |= pressed; _mouseReleased |= released; }
+
     /// <summary>Convert pointer positions and deltas into a host's logical coordinate system.</summary>
     public void ScaleMouse(Vector2 scale) { MousePosition *= scale; MouseDelta *= scale; }
 

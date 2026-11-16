@@ -23,7 +23,7 @@ public sealed class CellUi
     private bool _inPopup, _claimed, _commit;
     private uint _editId, _keyboardFocus;
     private string _buffer = "";
-    private readonly Dictionary<uint, string> _pendingText = new();
+    private byte _heldPressed, _heldReleased;
     private int _caret, _anchor;
     private IPlatform? _platform;
     private double _lastClick = -100, _time;
@@ -52,25 +52,42 @@ public sealed class CellUi
     {
         Input = input; _platform = platform; _time = time;
         Screen = new Rect(0, 0, Math.Max(1, (int)size.X), Math.Max(1, (int)size.Y));
-        _main.Reset((int)Screen.W, (int)Screen.H); _overlay.Reset((int)Screen.W, (int)Screen.H); _overlays.Clear(); _controls.Clear();
+        _main.Reset((int)Screen.W, (int)Screen.H); _overlay.Reset((int)Screen.W, (int)Screen.H);
+        _overlays.Clear(); _controls.Clear();
         _previousPopup = _popup; _popup = null; _inPopup = false; _claimed = false;
         _previousFocusable.Clear(); _previousFocusable.AddRange(_focusable); _focusable.Clear();
         _areas.Clear(); _areas.Push(new Area(Screen)); _ids.Clear(); _ids.Push(2166136261);
+        if (Focus == 0) _editId = 0;
+        // A click outside the active text field first commits the field, then reaches its target one frame later,
+        // so whatever the click changes (selection, tabs, play, save) always sees the committed value.
+        if (_heldPressed != 0 || _heldReleased != 0)
+        {
+            input.AddMouseEdges(_heldPressed, _heldReleased);
+            _heldPressed = _heldReleased = 0;
+        }
+        else if (_editId != 0 && input.AnyMousePressed && !FocusableArea(_editId).Contains(input.MousePosition))
+        {
+            (_heldPressed, _heldReleased) = input.TakeMouseEdges();
+            _commit = true;
+        }
         DoubleClicked = input.WasPressed(MouseButton.Left) && time - _lastClick < 0.3 && Vector2.Distance(_lastClickPosition, Mouse) < 1;
         if (input.WasPressed(MouseButton.Left)) { _lastClick = time; _lastClickPosition = Mouse; }
-        if (Focus == 0) _editId = 0;
-        if (_editId != 0 && input.WasPressed(MouseButton.Left))
+        bool step = input.WasPressed(Key.Tab) || Focus == 0 && (input.WasPressed(Key.Up) || input.WasPressed(Key.Down));
+        if (KeyboardNavigation && step && _previousFocusable.Count > 0)
         {
-            var previous = _previousFocusable.FirstOrDefault(f => f.Id == _editId);
-            if (!previous.Area.Contains(input.MousePosition)) { _pendingText[_editId] = _buffer; _editId = 0; Focus = 0; }
-        }
-        if (KeyboardNavigation && (input.WasPressed(Key.Tab) || Focus == 0 && (input.WasPressed(Key.Up) || input.WasPressed(Key.Down))) && _previousFocusable.Count > 0)
-        {
-            int index = _previousFocusable.FindIndex(f => f.Id == _keyboardFocus);
-            index = (index + (input.Shift || input.WasPressed(Key.Up) ? -1 : 1) + _previousFocusable.Count) % _previousFocusable.Count;
+            int count = _previousFocusable.Count;
+            int index = IndexOfFocusable(_keyboardFocus);
+            index = (index + (input.Shift || input.WasPressed(Key.Up) ? -1 : 1) + count) % count;
             _keyboardFocus = _previousFocusable[index].Id;
         }
     }
+    private int IndexOfFocusable(uint id)
+    {
+        for (int i = 0; i < _previousFocusable.Count; i++) if (_previousFocusable[i].Id == id) return i;
+        return -1;
+    }
+    /// <summary>Last frame's rectangle for a focusable control; empty if it was not drawn.</summary>
+    private Rect FocusableArea(uint id) => IndexOfFocusable(id) is int i and >= 0 ? _previousFocusable[i].Area : default;
     public void End()
     {
         foreach (var rectangle in _overlays) _main.Composite(_overlay, rectangle);
@@ -244,7 +261,6 @@ public sealed class CellUi
         _controls[label] = rect;
         uint id = Id(label + "#text");
         bool changed = false, started = false;
-        if (_pendingText.Remove(id, out var pending) && pending != value) { value = pending; changed = true; }
         bool click = Activate(rect, id, out bool hover, out bool held);
         if (_editId != id && (click || hover && Input.WasPressed(MouseButton.Left)))
         {
