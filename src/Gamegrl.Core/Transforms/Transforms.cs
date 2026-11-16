@@ -10,6 +10,7 @@ public struct LocalTransform : IComponent
     public Vector3 Scale;
 
     public static LocalTransform Identity => new() { Rotation = Quaternion.Identity, Scale = Vector3.One };
+    public static LocalTransform Default => Identity;
 
     public static LocalTransform At(Vector3 position, float uniformScale = 1) =>
         new() { Position = position, Rotation = Quaternion.Identity, Scale = new Vector3(uniformScale) };

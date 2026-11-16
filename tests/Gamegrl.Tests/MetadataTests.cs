@@ -16,6 +16,18 @@ public struct InspectorHints : IComponent
     }
 }
 
+public struct Defaulted : IComponent
+{
+    public float Gain;
+    public static Defaulted Default => new() { Gain = 0.5f };
+}
+
+public struct Initialized : IComponent
+{
+    public int Count = 3;
+    public Initialized() { }
+}
+
 internal static class MetadataTests
 {
     public static unsafe void Register()
@@ -32,6 +44,18 @@ internal static class MetadataTests
             Assert.Equal(new FieldMetadata(Minimum: -5, Maximum: 5), visitor.Fields["Count"]);
             Assert.Equal(default, visitor.Fields["Enabled"]);
             Assert.True(!visitor.Fields.ContainsKey("Runtime"));
+        });
+        Test("defaults: Reset writes a static Default, else new T() with field initializers, under AOT", () =>
+        {
+            var defaulted = new Defaulted { Gain = 9 };
+            ComponentRegistry.Get(Component<Defaulted>.Id).Serializer!.Reset(&defaulted);
+            Assert.Equal(0.5f, defaulted.Gain);
+            var initialized = default(Initialized);
+            ComponentRegistry.Get(Component<Initialized>.Id).Serializer!.Reset(&initialized);
+            Assert.Equal(3, initialized.Count);
+            var transform = default(LocalTransform);
+            ComponentRegistry.Get(Component<LocalTransform>.Id).Serializer!.Reset(&transform);
+            Assert.Equal(LocalTransform.Identity, transform);
         });
         Test("metadata: presentation hints leave text and binary serialization values unchanged", () =>
         {

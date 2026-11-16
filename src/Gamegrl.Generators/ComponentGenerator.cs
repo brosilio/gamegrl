@@ -70,7 +70,12 @@ public sealed class ComponentGenerator : IIncrementalGenerator
         var ops = new List<FieldOp>();
         if (diagnostics.Count == 0) Walk(type, "c", ops, diagnostics, 0);
 
-        return new ComponentModel(type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat), ops.ToEquatableArray(), diagnostics.ToEquatableArray());
+        // A public static Default (field or property of the component's own type) is the authoring default;
+        // otherwise new T() runs any parameterless constructor and field initializers.
+        bool hasDefault = type.GetMembers("Default").Any(m => m.IsStatic && m.DeclaredAccessibility == Accessibility.Public
+            && (m is IFieldSymbol df && SymbolEqualityComparer.Default.Equals(df.Type, type)
+                || m is IPropertySymbol { GetMethod: not null } dp && SymbolEqualityComparer.Default.Equals(dp.Type, type)));
+        return new ComponentModel(type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat), hasDefault, ops.ToEquatableArray(), diagnostics.ToEquatableArray());
     }
 
     private static readonly HashSet<string> Direct = new()
@@ -235,6 +240,8 @@ public sealed class ComponentGenerator : IIncrementalGenerator
             sb.Append("    private sealed class S").Append(i).AppendLine(" : global::Gamegrl.IComponentSerializer");
             sb.AppendLine("    {");
             var enumTables = new StringBuilder();
+            sb.Append("        public void Reset(void* p) => global::System.Runtime.CompilerServices.Unsafe.AsRef<").Append(m.TypeName)
+              .Append(">(p) = ").Append(m.HasDefault ? m.TypeName + ".Default" : "new " + m.TypeName + "()").AppendLine(";");
             sb.AppendLine("        public void Visit(void* p, global::Gamegrl.IFieldVisitor v)");
             sb.AppendLine("        {");
             sb.Append("            ref var c = ref global::System.Runtime.CompilerServices.Unsafe.AsRef<").Append(m.TypeName).AppendLine(">(p);");
@@ -282,4 +289,4 @@ internal enum OpKind { Metadata, Field, Asset, Enum, Begin, End }
 
 internal sealed record FieldOp(OpKind Kind, string Name, string Path, string EnumType, EquatableArray<string> EnumNames, EquatableArray<long> EnumValues);
 
-internal sealed record ComponentModel(string TypeName, EquatableArray<FieldOp> Ops, EquatableArray<DiagnosticInfo> Diagnostics);
+internal sealed record ComponentModel(string TypeName, bool HasDefault, EquatableArray<FieldOp> Ops, EquatableArray<DiagnosticInfo> Diagnostics);

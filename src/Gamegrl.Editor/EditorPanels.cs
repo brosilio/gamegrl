@@ -31,9 +31,9 @@ internal sealed partial class EditorHost
     {
         var world = _app.World;
         var e = world.Spawn(SceneId.New(), new Name { Value = new FixedString64(new[] { "Entity", "Cube", "Camera", "Sprite" }[_newKind]) }, LocalTransform.Identity, new LocalToWorld());
-        if (_newKind == 1) world.Add(e, new MeshRenderer { Mesh = BuiltinAssets.Cube, Color = Vector4.One });
-        if (_newKind == 2) world.Add(e, Camera.Perspective());
-        if (_newKind == 3) world.Add(e, Sprite.Of(BuiltinAssets.White, new Vector2(64)));
+        if (_newKind == 1) world.Add(e, MeshRenderer.Default);
+        if (_newKind == 2) world.Add(e, Camera.Default);
+        if (_newKind == 3) world.Add(e, Sprite.Default);
         Document.Selected = e;
     }
     private void EntityRow(Entity e, int depth)
@@ -96,12 +96,8 @@ internal sealed partial class EditorHost
             if (_ui.Button("Add component")) Document.Edit(() =>
             {
                 var info = available[_componentChoice];
-                var data = new byte[info.Size];
-                fixed (byte* p = data) world.AddRaw(e, info.Id, p);
-                if (info.Id == Component<LocalTransform>.Id) world.Get<LocalTransform>(e) = LocalTransform.Identity;
-                if (info.Id == Component<Camera>.Id) world.Get<Camera>(e) = Camera.Perspective();
-                if (info.Id == Component<MeshRenderer>.Id) world.Get<MeshRenderer>(e) = new MeshRenderer { Mesh = BuiltinAssets.Cube, Color = Vector4.One };
-                if (info.Id == Component<Sprite>.Id) world.Get<Sprite>(e) = Sprite.Of(BuiltinAssets.White, new Vector2(64));
+                Span<byte> data = stackalloc byte[info.Size];
+                fixed (byte* p = data) { info.Serializer!.Reset(p); world.AddRaw(e, info.Id, p); }
             });
         }
         _ui.PopId();

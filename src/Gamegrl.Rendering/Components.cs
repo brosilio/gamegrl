@@ -14,6 +14,8 @@ public struct Camera : IComponent
     public float Near;
     public Vector4 ClearColor;
 
+    public static Camera Default => Perspective();
+
     public static Camera Perspective(float fovYDegrees = 60, float near = 0.1f) =>
         new() { FovYRadians = float.DegreesToRadians(fovYDegrees), Near = near, ClearColor = new Vector4(0.05f, 0.06f, 0.09f, 1) };
 
@@ -37,6 +39,8 @@ public struct MeshRenderer : IComponent
 {
     public AssetRef<MeshAsset> Mesh;
     public Vector4 Color;
+
+    public static MeshRenderer Default => new() { Mesh = BuiltinAssets.Cube, Color = Vector4.One };
 }
 
 /// <summary>
@@ -53,6 +57,8 @@ public struct Sprite : IComponent
     public Vector2 Pivot;
     /// <summary>u0, v0, u1, v1; (0, 0, 1, 1) is the whole texture.</summary>
     public Vector4 UvRect;
+
+    public static Sprite Default => Of(BuiltinAssets.White, new Vector2(64));
 
     public static Sprite Of(AssetRef<TextureAsset> texture, Vector2 size) =>
         new() { Texture = texture, Size = size, Color = Vector4.One, Pivot = new Vector2(0.5f), UvRect = new Vector4(0, 0, 1, 1) };

@@ -64,6 +64,8 @@ public sealed class HeaderAttribute(string text) : Attribute
 /// <summary>Generated per component type; registered with <see cref="ComponentRegistry"/> by a module initializer.</summary>
 public unsafe interface IComponentSerializer
 {
+    /// <summary>Write the authoring default: the component's public static <c>Default</c> if it declares one, else <c>new T()</c>.</summary>
+    void Reset(void* component);
     void Visit(void* component, IFieldVisitor visitor);
 }
 
