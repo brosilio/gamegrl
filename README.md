@@ -47,7 +47,7 @@ dotnet run --project tests/Gamegrl.Editor.Tests -- --graphics # optional desktop
 | `src/Gamegrl.Generators` | Roslyn source generators: `[System]` loops and registration, component serializers |
 | `src/Gamegrl.Platform`, `.Sdl3` | Windows and input behind `IPlatform`; the SDL3 backend |
 | `src/Gamegrl.Rhi`, `.Vulkan` | The render hardware interface; the Vulkan 1.3 backend |
-| `src/Gamegrl.UI` | TrueType text, immediate-mode widgets and UI rendering |
+| `src/Gamegrl.UI` | The pixel UI games ship (`UiModule`): TrueType text, windows and widgets, rendering; also the editor's in-view overlays |
 | `src/Gamegrl.Editor` | Shared AnsiDotNet cell interface, desktop/TTY hosts, headless viewports, scene editing, jobs and collectible game code |
 | `src/Gamegrl.Rendering` | 3D mesh and 2D sprite renderers |
 | `src/Gamegrl.Assets` | Runtime asset formats, the `.ggpak` archive, `IAssetSource` |
@@ -93,8 +93,27 @@ are pulses; desktop mode retains precise held-key gameplay. Unsaved scenes on te
 `Library/recovery` and can be reopened with the "File: Recover disconnected scene" command. Terminal clipboard
 copy/paste uses an internal session buffer plus bracketed paste; it does not read the operator's OS clipboard.
 
-`EditorContext.Ui` is now `CellUi`; extension rectangles and widget sizes are character cells. Fonts and ANSI
-transports stay outside extension code. `Gamegrl.UI` remains an optional runtime/debug UI library.
+`EditorContext.Ui` is `CellUi`; extension rectangles and widget sizes are character cells. Fonts and ANSI
+transports stay outside extension code.
+
+Games draw HUDs, menus and debug windows with `Gamegrl.UI`. Add `UiModule` from the game's module (after
+rendering) and call the `Ui` resource from any system; it draws over the window in the player and over the Game
+view in the editor:
+
+```csharp
+builder.AddModule(new UiModule(new UiOptions { Font = "Assets/fonts/ui.ttf" }));
+
+[System(Phase.Update)]
+static void DebugWindow([Res] in Ui ui, [Res] in Time time, [Res] ref SpinTuning tuning)
+{
+    if (ui.BeginWindow("Spinners", new Rect(12, 12, 230, 120)))
+    {
+        ui.Label($"{1 / time.Delta:0} fps");   // formatted into frame scratch, no allocation
+        ui.Slider(ui.Property("Speed"), "speed", ref tuning.Speed, 0, 4);
+    }
+    ui.EndWindow();
+}
+```
 
 ```sh
 dotnet run --project tests/Gamegrl.Editor.Tests -- --terminal-smoke # headless Vulkan + stream terminal end to end

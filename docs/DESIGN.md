@@ -64,6 +64,9 @@ Started 2026-11-16.
 | 2026-11-16 | Editor commands | A Ctrl+P command palette over `EditorRegistry.AddCommand` entries (with optional shortcut text) replaces menus | Built-ins and extensions register the same way; selection actions live here instead of in panels |
 | 2026-11-16 | Cell theme | `CellTheme` semantic tokens: one background, raised, selection, border, dim, text, a single `#ff5fa2` accent, warning, error and axis colors | Tokens are chosen to stay distinct at 256 and 16 colors; selected text also takes the accent so selection survives without background color |
 | 2026-11-16 | Editor UI allocation | Steady-state editor frames allocate nothing | Enforced by a test; caches rebuild on registry, catalog, log or code-generation changes |
+| 2026-11-17 | UI frameworks | Two, both public. The cell UI (`CellUi`) is the editor's chrome and what extensions draw panels with. The pixel UI (`Gamegrl.UI`, added with `UiModule`) is what games ship for HUDs, menus and debug windows, and what the editor draws inside its Scene and Game views | Grid-aligned cells suit panels and terminals but not overlays on a 3D view. The editor dogfoods the pixel UI every frame through its Scene view overlay and by hosting the game's UI in the Game view |
+| 2026-11-17 | One palette | `Gamegrl.UI.Palette` feeds both `CellTheme` and the pixel `Theme` | In-view overlays, game debug windows and editor panels read as one tool |
+| 2026-11-17 | Fonts are assets | `.ttf` files import as `AssetKind.Font` and ship in the archive; the UI bakes them at the size it needs | A system-font fallback is for development only |
 
 ## Object model
 
@@ -218,7 +221,7 @@ VR is an optional module, `Gamegrl.XR`, built on OpenXR. A game that doesn't add
 | Pose latency | The render-extract phase reads the head pose predicted for display time, as late as possible, and the pose is re-read just before submission. Simulation already runs separately from rendering with interpolation |
 | Input | Action-based; tracked controllers and hands are ordinary devices |
 | Frame budget | 72 to 120 Hz with no hitches. Shader pre-warm, streaming budgets and the never-blocking design already serve this |
-| UI | The immediate-mode UI can draw into world-space quads, and into OpenXR quad layers for crisp text |
+| UI | The pixel UI can draw into world-space quads, and into OpenXR quad layers for crisp text |
 | Audio | HRTF follows the head pose at audio rate, with no extra work |
 | Multiplayer | Avatar poses are high-rate state replicated over datagrams, like any other |
 
@@ -335,6 +338,17 @@ The asset workflow follows Unity: an `Assets/` folder, `.meta` sidecars with GUI
     - Reads run on I/O threads and decoding on workers. GPU uploads go through a staging ring with a per-frame byte budget, so loading never stalls a frame.
     - Gameplay can prefetch by region or trigger. Anything not yet resident shows a fallback (lowest mip, proxy mesh) instead of causing a hitch.
 
+## UI
+
+There are two immediate-mode UI libraries, for two different jobs:
+
+- **Pixel UI (`Gamegrl.UI`)**, for games. `UiModule` adds a `Ui` resource that systems call during the frame (`[Res] in Ui ui`) and draws it over the game's view after the main camera. It has movable, foldable windows, buttons, sliders, checkboxes, drags, vectors, colors, text fields, combos, tabs, scroll areas, progress bars and free text placed over the view (`TextAt`). Frames allocate nothing: ids hash spans, and interpolated labels (`ui.Label($"{fps:0} fps")`, `ui.Format(...)`) write into per-frame scratch. A scale (pixels per UI unit) covers HiDPI windows and reduced previews. Fonts come from font assets. The module also runs headless, without drawing.
+- **Cell UI (`CellUi`, editor only)**, for the editor's chrome and extension panels. It lays out on a character grid so the same frame works in a desktop window and over a terminal.
+
+A game adds `UiModule` from its own module, so the editor gets it too. There the UI follows play mode, receives the Game view's input in game coordinates, and the editor draws it into the Game view. The editor's own in-view interface (the move gizmo, the selection's name tag, orientation axes, view buttons) is drawn with the pixel UI into the Scene texture, which keeps the editor using the library games depend on. The terminal host lacks the resolution for pixel overlays: game UI there is drawn at the preview's scale and the Scene gizmo falls back to cell lines.
+
+TODO: SDF text for world-space and scaled UI, font hot reload, keyboard and gamepad navigation, and a layout pass for menus (anchoring, stacks).
+
 ## Editor
 
 The editor is the engine plus editor services and a shared AnsiDotNet cell interface. The desktop host draws glyph cells on the engine renderer and composites full-resolution Scene/Game textures into grid-aligned rectangles. The terminal host uses ANSI/VT output with headless Vulkan viewports converted to colored cells.
@@ -417,7 +431,7 @@ Multiplayer, web and XR ship in milestones 5 to 7, but their constraints apply f
 
 **Milestone 3 (Editor shell): complete, including the shared cell interface and the post-review fixes.**
 
-The editor (`src/Gamegrl.Editor`) is a JIT host that takes a project root and a game `.csproj`. Its UI is a shared AnsiDotNet cell interface (`CellUi`) painted into a `Surface`; `Gamegrl.UI` stays available for runtime UI and supplies glyph and quad rendering to the desktop compositor.
+The editor (`src/Gamegrl.Editor`) is a JIT host that takes a project root and a game `.csproj`. Its chrome is a shared AnsiDotNet cell interface (`CellUi`) painted into a `Surface`. Inside the Scene and Game views it draws with the engine's pixel UI (`Gamegrl.UI`), which also renders the desktop host's glyphs (see UI).
 
 | Area | What exists |
 | --- | --- |
@@ -433,14 +447,15 @@ The editor (`src/Gamegrl.Editor`) is a JIT host that takes a project root and a 
 | Hot reload | Collectible game assemblies share the host's engine assemblies. Reload preserves serialized entity state and selection and resets undo across schema changes. A failed build or load rolls back to the previous assembly with history intact; if that also fails, the scene is held as text until code loads |
 | Play | Startup runs only on entering play. Pause/Resume; a throwing system pauses play and logs its stack trace. Resources: unmanaged values checkpoint automatically; mutable ones need a clone delegate or fresh-play factory. Game-view input activates on click; `ActionMap` provides rebindable keyboard/mouse bindings |
 | Extensions | `IEditorExtension` registers panels, palette commands and typed component drawers through `EditorRegistry`, the same path as built-ins. Extensions load with game code (`--extension path.dll`) and unregister in reverse order on reload. Failures render inline instead of closing the editor |
+| In-view UI | Scene view (desktop): pixel move gizmo with arrowheads and axis labels, a name tag over the selection, clickable orientation axes, Grid and Frame buttons, an entity count. Game view: the game's own `UiModule` UI during play, with input in game coordinates |
 | Recovery | On terminal EOF or hangup, dirty scenes are copied to `Library/recovery`; the "File: Recover disconnected scene" command reopens the newest copy |
 | Efficiency | Steady-state frames allocate nothing (tested). Clicks and drags never serialize the scene |
 
-**Validation:** 35 engine tests under JIT and NativeAOT; 35 JIT editor tests covering undo/redo (text and per-entity), dirty tracking, held scenes, play restore, malformed scenes, jobs, picking, collectible reload, UI input and layout, commit-before-click, splitter drags and highlights, border scrollbars, panel rewind, zero-allocation frames, file workflows and terminal output. The opt-in SDL/Vulkan smoke test (`--graphics`, `--terminal-smoke`) and `scripts/terminal-cli-smoke.py` drive the full workflow; they were updated for the new layout and palette but have not been re-run since the incident under Open questions.
+**Validation:** 40 engine tests under JIT and NativeAOT, including the pixel UI (widgets, windows, sliders, formatting, zero-allocation frames, the headless module); 34 JIT editor tests covering undo/redo (text and per-entity), dirty tracking, held scenes, play restore, malformed scenes, jobs, picking, collectible reload, UI input and layout, commit-before-click, splitter drags and highlights, border scrollbars, panel rewind, zero-allocation frames, file workflows and terminal output. The opt-in SDL/Vulkan smoke test (`--graphics`, `--terminal-smoke`) and `scripts/terminal-cli-smoke.py` drive the full workflow; they were updated for the new layout, palette, Scene overlay and game UI but have not been re-run since the incident under Open questions.
 
 **Follow-ups:** persistent layouts, floating windows, automatic extension compilation, gamepad/touch/XR bindings, and migration policies for mutable resources across schema changes, a theme file with hot reload, an option to use the terminal's own background, and draggable sidebar section heights.
 
-**Commits:** `2fc2768` shell, `227460b` file workflow, `7a8eb07` metadata, `9237df9` input, `6566f93` resource sessions, `1d2a919` docking and extensions, `961f6c5` build workspaces, `96e99d2` shared cell interface, `be108f6` terminal recovery. Review fixes: `389a892` fault isolation, `4b63143` commit before click, `a55a69e` splitter drags, `fd12f18` held scenes, `274f486` inverse cells, `623d04b` per-entity undo, `3490c21` component defaults, `bcd5772` allocation-free frames. Layout: `0b71a9d` line-drawn layout, command palette and theme.
+**Commits:** `2fc2768` shell, `227460b` file workflow, `7a8eb07` metadata, `9237df9` input, `6566f93` resource sessions, `1d2a919` docking and extensions, `961f6c5` build workspaces, `96e99d2` shared cell interface, `be108f6` terminal recovery. Review fixes: `389a892` fault isolation, `4b63143` commit before click, `a55a69e` splitter drags, `fd12f18` held scenes, `274f486` inverse cells, `623d04b` per-entity undo, `3490c21` component defaults, `bcd5772` allocation-free frames. Layout: `0b71a9d` line-drawn layout, command palette and theme. UI: `cf62f92` pixel UI as the game UI and the editor's in-view interface.
 
 **Milestone 2 (Data): done, 2026-11-16.** The NativeAOT player loads `Assets/main.scene` from a memory-mapped `spinners.ggpak`. The scene holds three instances of `tower.prefab` (which nests `speck.prefab`) with per-instance overrides, a glTF mesh and a PNG texture, all decoded by our own importers. `Spinners.Build run` runs the same game from the live asset database with file watching.
 
@@ -487,13 +502,13 @@ The editor (`src/Gamegrl.Editor`) is a JIT host that takes a project root and a 
 
 | Question | Notes |
 | --- | --- |
-| How should in-scene and in-view debug interfaces be drawn? | The editor's chrome moved from `Gamegrl.UI` to cells, so the editor no longer dogfoods the runtime UI library. Grid-aligned cell drawing is the wrong tool inside Scene and Game views; those overlays should use pixel UI (or a successor). Not urgent |
 | What logged the user out at about 05:46 on 2026-11-16? | It happened after the desktop and headless smoke tests passed. Coredumps show KDE portal and Plasma crashes, with an X11 I/O failure in Plasma's stack. Kernel GPU and OOM logs aren't readable from this account, so the cause is unconfirmed. Graphics smoke tests are paused until it's understood; checking `journalctl -k` and `dmesg` as root is the next step |
 
 ## Resolved questions
 
 | Question | Answer (2026-11-16) |
 | --- | --- |
+| How should in-scene and in-view debug interfaces be drawn? (2026-11-17) | With the pixel UI (`Gamegrl.UI`), the same library games ship; the cell UI is only for editor chrome. See UI |
 | Engine name | gamegrl, with `Gamegrl.*` assemblies and namespaces |
 | Component storage | Archetypes, plus opt-in sparse sets |
 | Scene text format | Our own line-oriented format |
