@@ -55,6 +55,24 @@ public sealed class MeshImporter : IAssetImporter
     public byte[] Import(ImportContext ctx) => Gltf.Import(ctx.Bytes, ctx.LoadSibling).ToArtifact();
 }
 
+/// <summary>TrueType fonts, stored unchanged. CFF-flavored OpenType ("OTTO") is rejected: the rasterizer reads glyf outlines.</summary>
+public sealed class FontImporter : IAssetImporter
+{
+    public string Id => "font";
+    public int Version => 1;
+    public AssetKind Kind => AssetKind.Font;
+    public IReadOnlyList<string> Extensions { get; } = [".ttf", ".otf"];
+    public IReadOnlyDictionary<string, string> DefaultSettings { get; } = new Dictionary<string, string>();
+    public byte[] Import(ImportContext ctx)
+    {
+        var b = ctx.Bytes;
+        uint tag = b.Length >= 12 ? (uint)(b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3]) : 0;
+        if (tag == 0x4F54544F) throw new FormatException(ctx.Path + ": CFF outlines (OTTO) are not supported; use a TrueType-outline font.");
+        if (tag is not (0x00010000 or 0x74727565)) throw new FormatException(ctx.Path + ": not a TrueType font.");
+        return b;
+    }
+}
+
 /// <summary>
 /// Text scenes (and prefabs) to the binary player format, with prefab instances flattened. Needs the game's
 /// components loaded in this process.
@@ -106,7 +124,7 @@ public sealed class AssetDatabase : IAssetSource, IDisposable
     }
 
     private readonly string _root;
-    private readonly List<IAssetImporter> _importers = [new TextureImporter(), new MeshImporter(), new SceneImporter(), new PrefabImporter()];
+    private readonly List<IAssetImporter> _importers = [new TextureImporter(), new MeshImporter(), new FontImporter(), new SceneImporter(), new PrefabImporter()];
     private readonly Dictionary<Guid, AssetRecord> _byGuid = new();
     private readonly Dictionary<string, AssetRecord> _byPath = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _pendingChanges = new();

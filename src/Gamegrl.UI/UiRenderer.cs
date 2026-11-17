@@ -18,6 +18,7 @@ public sealed class UiRenderer : IDisposable
     private readonly BindGroup _screenGroup;
     private readonly GpuSampler _linear;
     private readonly Dictionary<GpuTexture, BindGroup> _groups = new(ReferenceEqualityComparer.Instance);
+    private ulong _frame = ulong.MaxValue;
 
     public UiRenderer(GpuDevice device, TextureFormat colorFormat, FontAtlas font)
     {
@@ -62,12 +63,21 @@ public sealed class UiRenderer : IDisposable
         if (_groups.Remove(texture, out var g)) g.Dispose();
     }
 
-    /// <summary>Record the draw list into the current render pass (whose target is <paramref name="width"/> × <paramref name="height"/>).</summary>
-    public void Render(CommandList cmd, int frameIndex, DrawList list, int width, int height)
+    /// <summary>
+    /// Record <paramref name="list"/> into the current render pass, whose target is <paramref name="width"/> ×
+    /// <paramref name="height"/> pixels. <paramref name="scale"/> is pixels per UI unit: 2 on a HiDPI window, 1/8 when
+    /// a host shows the game at a reduced preview size. Several lists may be drawn in one frame.
+    /// </summary>
+    public void Render(Frame frame, DrawList list, int width, int height, float scale = 1)
     {
-        _ring.BeginFrame(frameIndex);
-        if (list.Commands.Count == 0) return;
-        uint screenOffset = (uint)_ring.Push(new Vector4(width, height, 1f / width, 1f / height), _device.Limits.MinUniformBufferOffsetAlignment);
+        if (_frame != frame.Number)
+        {
+            _frame = frame.Number;
+            _ring.BeginFrame(frame.FrameIndex);
+        }
+        if (list.IsEmpty || width <= 0 || height <= 0) return;
+        var cmd = frame.Commands;
+        uint screenOffset = (uint)_ring.Push(new Vector4(width / scale, height / scale, scale / width, scale / height), _device.Limits.MinUniformBufferOffsetAlignment);
         long vertexOffset = _ring.Push(list.Vertices);
         long indexOffset = _ring.Push(list.Indices);
 
@@ -76,9 +86,10 @@ public sealed class UiRenderer : IDisposable
         cmd.SetVertexBuffer(0, _ring.Buffer, vertexOffset);
         cmd.SetIndexBuffer(_ring.Buffer, IndexFormat.UInt32, indexOffset);
         GpuTexture? bound = null;
+        var screen = new Rect(0, 0, width, height);
         foreach (var c in list.Commands)
         {
-            var clip = c.Clip.Intersect(new Rect(0, 0, width, height));
+            var clip = new Rect(c.Clip.X * scale, c.Clip.Y * scale, c.Clip.W * scale, c.Clip.H * scale).Intersect(screen);
             if (clip.W <= 0 || clip.H <= 0) continue;
             var texture = c.Texture ?? FontTexture;
             if (!ReferenceEquals(texture, bound))
@@ -86,10 +97,20 @@ public sealed class UiRenderer : IDisposable
                 cmd.SetBindGroup(1, GroupFor(texture));
                 bound = texture;
             }
-            cmd.SetScissor((int)clip.X, (int)clip.Y, (int)MathF.Ceiling(clip.W), (int)MathF.Ceiling(clip.H));
+            int x = (int)clip.X, y = (int)clip.Y;
+            cmd.SetScissor(x, y, (int)MathF.Ceiling(clip.Right) - x, (int)MathF.Ceiling(clip.Bottom) - y);
             cmd.DrawIndexed(c.IndexCount, 1, c.IndexStart, 0, 0);
         }
         cmd.SetScissor(0, 0, width, height);
+    }
+
+    /// <summary>Draw <paramref name="list"/> over what <paramref name="target"/> already holds, in a render pass of its own.</summary>
+    public void RenderOnto(Frame frame, GpuTexture target, DrawList list, float scale = 1)
+    {
+        if (list.IsEmpty) return;
+        frame.Commands.BeginRenderPass(new RenderPassDesc { Color = new ColorAttachment { Texture = target, Load = LoadOp.Load, Store = StoreOp.Store } });
+        Render(frame, list, target.Width, target.Height, scale);
+        frame.Commands.EndRenderPass();
     }
 
     private BindGroup GroupFor(GpuTexture texture)

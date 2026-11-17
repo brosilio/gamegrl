@@ -79,6 +79,8 @@ internal static class GraphicsSmoke
         Check(SceneCamera.Project(position + Vector3.UnitX * length, matrix, area, out var handle), "Gizmo behind camera");
         Frame(() => Point(handle, true)); Frame(() => Point(handle + new Vector2(3, 0))); Frame(() => Point(handle + new Vector2(3, 0), false)); Frame();
         Check(app.World.Get<LocalTransform>(selected).Position.X > position.X, "Move gizmo failed");
+        Check((editor.SceneOverlayUi is null) == terminalMode, "Scene overlay should exist on the desktop only");
+        Check(editor.SceneOverlayUi is null || editor.SceneOverlayUi.Draw.Vertices.Length > 0, "Scene overlay drew nothing");
         Command("edit.undo"); Check(app.World.Get<LocalTransform>(editor.Document.Selected).Position == position, "Gizmo undo failed");
         editor.Document.Selected = default;
         SceneCamera.Project(new Vector3(0, 5, 0), matrix, area, out var meshPoint); Click(meshPoint);
@@ -86,6 +88,8 @@ internal static class GraphicsSmoke
         string before = editor.Document.Text;
         Click(Tab("game", DockRegion.Center).Center); Button("Play");
         Check(editor.Document.Playing && app.World.EntityCount > count + 1, "Game startup failed");
+        Frame();
+        Check(app.World.HasResource<Gamegrl.UI.Ui>() && !app.World.Resource<Gamegrl.UI.Ui>().Draw.IsEmpty, "The game's debug window did not draw");
         Check(!editor.GameInput.IsDown(Gamegrl.Platform.MouseButton.Left), "Toolbar input leaked");
         Click(editor.GameArea.Center); Frame(() => input.OnKey((int)Key.Space, true, false));
         Check(editor.GameInput.IsDown(Key.Space), "Game focus failed");

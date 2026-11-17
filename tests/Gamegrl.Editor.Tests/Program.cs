@@ -235,44 +235,6 @@ Test("Collectible game reload preserves serialized fields and releases its load 
     for (int i = 0; i < 10 && weak.IsAlive; i++) { GC.Collect(); GC.WaitForPendingFinalizers(); }
     Check(!weak.IsAlive, "Old game context remained rooted");
 });
-string fontPath = Environment.GetEnvironmentVariable("GAMEGRL_FONT") ?? "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
-Test("TrueType glyph coverage, UI clipping, button clicks and text input", () =>
-{
-    var font = FontAtlas.Bake(new TrueTypeFont(File.ReadAllBytes(fontPath)), 14);
-    Check(font.Measure("Hello") > font.Measure("Hi"));
-    Check(font.Rgba.Where((_, i) => i % 4 == 3).Any(a => a > 0 && a < 255));
-    var input = new Input();
-    var ui = new Ui(font);
-    var rect = new Rect(5, 5, 100, 22);
-    void Begin() => ui.Begin(input, null, new Vector2(400, 300), 1, null);
-    input.OnMouseMove(new Vector2(10, 10), Vector2.Zero);
-    input.OnMouseButton(0, true);
-    Begin(); Check(!ui.Button(rect, "Click")); ui.End();
-    input.BeginFrame(); input.OnMouseButton(0, false);
-    Begin(); Check(ui.Button(rect, "Click")); ui.End();
-    Check(ui.Draw.Indices.Length > 0);
-    Begin();
-    ui.BeginArea(new Rect(0, 0, 200, 100));
-    ui.Row(50, -1);
-    var first = ui.Next(); var second = ui.Next();
-    Check(first.W == 50 && first.H == ui.Theme.RowHeight && second.X == 50 + ui.Theme.Spacing);
-    ui.EndArea(); ui.End();
-    foreach (var command in ui.Draw.Commands) Check(command.Clip.Intersect(ui.Screen) == command.Clip);
-    input.BeginFrame(); input.OnMouseButton(0, true);
-    string text = "";
-    Begin(); ui.TextField(rect, "text", ref text); ui.End();
-    input.BeginFrame(); input.OnMouseButton(0, false); input.OnText("Hello");
-    Begin(); ui.TextField(rect, "text", ref text); ui.End();
-    input.BeginFrame(); input.OnKey((int)Key.Enter, true, false);
-    Begin(); ui.TextField(rect, "text", ref text); ui.End();
-    Check(text == "Hello");
-    input.BeginFrame(); input.OnKey((int)Key.Enter, false, false); input.OnMouseButton(0, true);
-    Begin(); ui.TextField(rect, "text", ref text); ui.End();
-    input.BeginFrame(); input.OnMouseButton(0, false); input.OnText("!");
-    ui.CommitTextEdit();
-    Begin(); ui.TextField(rect, "text", ref text); ui.End();
-    Check(text.Contains('!') && !ui.WantsKeyboard);
-});
 Test("Inspector metadata: edits clamp ranges, idle drawing preserves data and headers add layout", () =>
 {
     var ui = new CellUi();

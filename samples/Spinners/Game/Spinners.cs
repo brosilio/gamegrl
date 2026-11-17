@@ -5,6 +5,7 @@ using Gamegrl.Platform;
 using Gamegrl.Platform.Sdl3;
 using Gamegrl.Rendering;
 using Gamegrl.Rhi.Vulkan;
+using Gamegrl.UI;
 
 namespace Spinners;
 
@@ -27,6 +28,13 @@ public struct Orbit : IComponent
     public float Radius, Height, Speed;
 }
 
+/// <summary>Live tuning, edited from the debug window.</summary>
+public struct SpinTuning
+{
+    public float Speed;
+    public bool Frozen;
+}
+
 public struct QuitAfter
 {
     public double Seconds;
@@ -35,8 +43,25 @@ public struct QuitAfter
 public static partial class Gameplay
 {
     [System(Phase.Update, Parallel = true)]
-    private static void Spin(ref LocalTransform t, in Spinner s, [Res] in Time time) =>
-        t.Rotation = Quaternion.Normalize(t.Rotation * Quaternion.CreateFromAxisAngle(s.Axis, float.DegreesToRadians(s.DegreesPerSecond) * time.Delta));
+    private static void Spin(ref LocalTransform t, in Spinner s, [Res] in Time time, [Res] in SpinTuning tuning)
+    {
+        if (tuning.Frozen) return;
+        float angle = float.DegreesToRadians(s.DegreesPerSecond * tuning.Speed) * time.Delta;
+        t.Rotation = Quaternion.Normalize(t.Rotation * Quaternion.CreateFromAxisAngle(s.Axis, angle));
+    }
+
+    /// <summary>A debug window drawn with the engine's pixel UI; it shows in the player and in the editor's Game view.</summary>
+    [System(Phase.Update)]
+    private static void DebugWindow([Res] in Ui ui, [Res] in Time time, [Res] ref SpinTuning tuning)
+    {
+        if (ui.BeginWindow("Spinners", new Rect(12, 12, 230, 120)))
+        {
+            ui.Label($"{1 / MathF.Max(time.Delta, 1e-6f):0} fps · {time.Delta * 1000:0.0} ms", dim: true);
+            ui.Slider(ui.Property("Speed"), "speed", ref tuning.Speed, 0, 4);
+            ui.Checkbox("Frozen", ref tuning.Frozen);
+        }
+        ui.EndWindow();
+    }
 
     [System(Phase.FixedUpdate)]
     private static void Bounce(ref LocalTransform t, ref Bouncer b, in Sprite sprite, [Res] in Time time, [Res] in ScreenSize screen)
@@ -76,7 +101,9 @@ public sealed class SpinnersModule : IModule
 
     public void Build(EngineBuilder builder)
     {
+        builder.AddModule(new UiModule());
         Gamegrl.Generated.SpinnersGameSystems.AddTo(builder.Schedule);
+        builder.SetResource(new SpinTuning { Speed = 1 });
         builder.SetResource(new QuitAfter { Seconds = _runFor ?? 0 });
         builder.OnStart(Start);
     }

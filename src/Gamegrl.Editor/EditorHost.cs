@@ -72,7 +72,11 @@ internal sealed partial class EditorHost : IDisposable
         _render.DrawMainCamera = false;
         _ui = new CellUi(ascii);
         _terminal = terminal;
-        if (terminal is null) _renderer = new CellRenderer(_render.Device, _render.Swapchain.Format, fontPath ?? throw new ArgumentNullException(nameof(fontPath)));
+        if (terminal is null)
+        {
+            _renderer = new CellRenderer(_render.Device, _render.Swapchain.Format, fontPath ?? throw new ArgumentNullException(nameof(fontPath)));
+            (_overlay, _overlayRenderer) = CreateOverlay(_render, fontPath);
+        }
         else { _sceneTerminal = new TerminalViewport(_render.Device); _gameTerminal = new TerminalViewport(_render.Device); }
         _inspector = new InspectorVisitor(_ui, AssetChoices);
         Document = new SceneDocument(app.World, assets.PrefabText);
@@ -371,7 +375,10 @@ internal sealed partial class EditorHost : IDisposable
                 Sprites = true,
                 SpriteSize = new Vector2(_gameColor.Width, _gameColor.Height) * GamePreviewScale,
             });
+            // The game's own pixel UI (UiModule), drawn over its view at the preview's scale.
+            if (Document.Playing && _app.World.HasResource<UiLayer>()) _app.World.Resource<UiLayer>().Render(frame, _gameColor, 1 / GamePreviewScale);
         }
+        RenderOverlay(frame);
         if (_terminal is not null)
         {
             if (_sceneArea.W > 0 && _sceneColor is not null) _sceneTerminal!.Capture(frame.Commands, _sceneColor);
@@ -380,7 +387,7 @@ internal sealed partial class EditorHost : IDisposable
         }
         var backbuffer = new ColorAttachment { Texture = frame.Backbuffer, Load = LoadOp.Clear, Store = StoreOp.Store, ClearColor = new Vector4(0.1f, 0.1f, 0.1f, 1) };
         frame.Commands.BeginRenderPass(new RenderPassDesc { Color = backbuffer });
-        _renderer!.Render(frame.Commands, frame.FrameIndex, _ui.Draw, frame.Backbuffer.Width, frame.Backbuffer.Height);
+        _renderer!.Render(frame, _ui.Draw, frame.Backbuffer.Width, frame.Backbuffer.Height);
         frame.Commands.EndRenderPass();
     }
     public void Dispose()
@@ -396,6 +403,7 @@ internal sealed partial class EditorHost : IDisposable
         Registry.Dispose();
         _sceneTerminal?.Dispose(); _gameTerminal?.Dispose();
         _renderer?.Dispose();
+        _overlayRenderer?.Dispose();
         _sceneColor?.Dispose(); _sceneDepth?.Dispose(); _gameColor?.Dispose(); _gameDepth?.Dispose();
     }
 }

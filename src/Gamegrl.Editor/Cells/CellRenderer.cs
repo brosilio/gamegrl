@@ -23,7 +23,7 @@ internal sealed class CellRenderer : IDisposable
         _renderer = new UiRenderer(device, format, _font);
     }
     public void Forget(GpuTexture texture) => _renderer.Forget(texture);
-    public void Render(CommandList commands, int frame, CellDraw cells, int width, int height)
+    public void Render(Frame frame, CellDraw cells, int width, int height)
     {
         _draw.Reset(_font, _renderer.FontTexture, new Rect(0, 0, width, height));
         foreach (var (area, texture) in cells.Images) _draw.Image(Pixels(area), texture, Color32.White, Vector2.Zero, Vector2.One);
@@ -52,7 +52,7 @@ internal sealed class CellRenderer : IDisposable
             if (style.Has(TextAttributes.Overline)) _draw.Rect(new Rect(rect.X, rect.Y, rect.W, 1), fg);
             _draw.PopClip();
         }
-        _renderer.Render(commands, frame, _draw, width, height);
+        _renderer.Render(frame, _draw, width, height);
     }
     private static int CellWidthOf(Rune rune) => Math.Max(1, AnsiDotNet.CellWidth.Of(rune));
     public Rect Pixels(Rect rect) => new(rect.X * CellWidth, rect.Y * CellHeight, rect.W * CellWidth, rect.H * CellHeight);

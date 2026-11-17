@@ -13,11 +13,14 @@ public enum AssetKind : uint
     Scene = 3,
     /// <summary>A prefab, flattened to the binary scene format; instantiate it with <see cref="Scene.LoadBinary"/>.</summary>
     Prefab = 4,
+    /// <summary>A TrueType font file, stored as is; the UI bakes it at the size it needs.</summary>
+    Font = 5,
 }
 
 // Marker types for AssetRef<T>.
 public sealed class TextureAsset;
 public sealed class MeshAsset;
+public sealed class FontAsset;
 public sealed class SceneAsset;
 
 /// <summary>A decoded image: RGBA8, rows top to bottom.</summary>

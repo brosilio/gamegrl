@@ -69,7 +69,8 @@ public sealed class DrawList
 
     public ReadOnlySpan<UiVertex> Vertices => _vertices.AsSpan(0, _vertexCount);
     public ReadOnlySpan<uint> Indices => _indices.AsSpan(0, _indexCount);
-    public IReadOnlyList<DrawCommand> Commands => _commands;
+    public ReadOnlySpan<DrawCommand> Commands => System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_commands);
+    public bool IsEmpty => _commands.Count == 0;
     public Rect Clip => _clips.Count > 0 ? _clips.Peek() : new Rect(0, 0, 1e9f, 1e9f);
 
     public void Reset(FontAtlas font, GpuTexture? fontTexture, Rect screen)
@@ -218,6 +219,6 @@ public sealed class DrawList
         Reserve(other._vertexCount, other._indexCount);
         Array.Copy(other._vertices, 0, _vertices, baseVertex, other._vertexCount);
         for (int i = 0; i < other._indexCount; i++) _indices[_indexCount++] = other._indices[i] + baseVertex;
-        foreach (var c in other._commands) _commands.Add(c with { IndexStart = c.IndexStart + baseIndex });
+        foreach (var c in other.Commands) _commands.Add(c with { IndexStart = c.IndexStart + baseIndex });
     }
 }

@@ -1,8 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- Immediate-mode UI: fonts, layout, widgets, and a renderer on the RHI. Used by the editor and by in-game UI. -->
+  <!-- The pixel UI: fonts, layout, widgets, a renderer on the RHI and the UiModule games add. The editor uses it for
+       in-view overlays and to draw the game's UI in the Game view; its own chrome is the cell UI. -->
   <ItemGroup>
     <ProjectReference Include="../Gamegrl.Rhi/Gamegrl.Rhi.csproj" />
     <ProjectReference Include="../Gamegrl.Platform/Gamegrl.Platform.csproj" />
+    <ProjectReference Include="../Gamegrl.Rendering/Gamegrl.Rendering.csproj" />
     <InternalsVisibleTo Include="Gamegrl.Tests" />
   </ItemGroup>
 
