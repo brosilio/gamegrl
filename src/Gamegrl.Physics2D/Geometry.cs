@@ -1,0 +1,165 @@
+using System.Numerics;
+using System.Runtime.CompilerServices;
+
+namespace Gamegrl.Physics2D;
+
+/// <summary>A 2D rotation as its cosine and sine. Integrates without trigonometry, so it's deterministic in both modes.</summary>
+public struct Rot
+{
+    public float C, S;
+    public static Rot Identity => new() { C = 1, S = 0 };
+
+    public static Rot FromAngle(float radians) { var (s, c) = SimMath.SinCos(radians); return new Rot { C = c, S = s }; }
+    public readonly float Angle => SimMath.Atan2(S, C);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly Vector2 Rotate(Vector2 v) => new(C * v.X - S * v.Y, S * v.X + C * v.Y);
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly Vector2 InvRotate(Vector2 v) => new(C * v.X + S * v.Y, -S * v.X + C * v.Y);
+
+    /// <summary>q·r: rotate by r, then by q.</summary>
+    public static Rot Mul(Rot q, Rot r) => new() { C = q.C * r.C - q.S * r.S, S = q.S * r.C + q.C * r.S };
+    /// <summary>q⁻¹·r: the rotation from q to r.</summary>
+    public static Rot InvMul(Rot q, Rot r) => new() { C = q.C * r.C + q.S * r.S, S = q.C * r.S - q.S * r.C };
+
+    /// <summary>Advance by a small angle: q + Δθ·perp(q), renormalized (Box2D v3's integration; no trig).</summary>
+    public static Rot Integrate(Rot q, float deltaAngle)
+    {
+        float c = q.C - deltaAngle * q.S, s = q.S + deltaAngle * q.C;
+        float l = SimMath.Sqrt(c * c + s * s);
+        return l > 0 ? new Rot { C = c / l, S = s / l } : Identity;
+    }
+
+    /// <summary>The rotation about z held in a quaternion (the 2D part of a <see cref="LocalTransform"/>), without trig.</summary>
+    public static Rot FromQuaternion(Quaternion q)
+    {
+        float c = q.W * q.W - q.Z * q.Z, s = 2 * q.W * q.Z;
+        float l = SimMath.Sqrt(c * c + s * s);
+        return l > 0 ? new Rot { C = c / l, S = s / l } : Identity;
+    }
+
+    /// <summary>The quaternion for this rotation about z, by half-angle identities (no trig).</summary>
+    public readonly Quaternion ToQuaternion()
+    {
+        // cos(θ/2) = √((1+c)/2); sin(θ/2) = s / (2 cos(θ/2)), with the θ ≈ π case handled through the sine.
+        if (C > -0.9f)
+        {
+            float w = SimMath.Sqrt((1 + C) * 0.5f);
+            return new Quaternion(0, 0, S / (2 * w), w);
+        }
+        float z = SimMath.Sqrt((1 - C) * 0.5f);
+        if (S < 0) z = -z;
+        return new Quaternion(0, 0, z, S / (2 * z));
+    }
+}
+
+/// <summary>An axis-aligned box.</summary>
+public struct Aabb
+{
+    public Vector2 Min, Max;
+    public readonly bool Overlaps(in Aabb o) => Min.X <= o.Max.X && o.Min.X <= Max.X && Min.Y <= o.Max.Y && o.Min.Y <= Max.Y;
+}
+
+internal static class V
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Cross(Vector2 a, Vector2 b) => a.X * b.Y - a.Y * b.X;
+    /// <summary>ω × r for a scalar angular velocity.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)] public static Vector2 Cross(float w, Vector2 r) => new(-w * r.Y, w * r.X);
+    [MethodImpl(MethodImplOptions.AggressiveInlining)] public static Vector2 RightPerp(Vector2 v) => new(v.Y, -v.X);
+    [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Dot(Vector2 a, Vector2 b) => SimMath.Dot(a, b);
+}
+
+/// <summary>A convex collision shape in body space: a circle or a convex polygon of up to <see cref="MaxVertices"/> corners, with an optional rounding radius.</summary>
+public unsafe struct Shape
+{
+    public const int MaxVertices = 8;
+    public ShapeKind Kind;
+    public float Radius;
+    public Vector2 Center; // circle center, polygon centroid
+    public int Count;
+    public fixed float Vx[MaxVertices];
+    public fixed float Vy[MaxVertices];
+    public fixed float Nx[MaxVertices];
+    public fixed float Ny[MaxVertices];
+
+    public readonly Vector2 Vertex(int i) => new(Vx[i], Vy[i]);
+    public readonly Vector2 Normal(int i) => new(Nx[i], Ny[i]);
+
+    public static Shape Circle(float radius, Vector2 center) => new() { Kind = ShapeKind.Circle, Radius = radius, Center = center };
+
+    public static Shape Box(Vector2 halfExtents, Vector2 center, Rot rotation)
+    {
+        Span<Vector2> v = [new(-halfExtents.X, -halfExtents.Y), new(halfExtents.X, -halfExtents.Y), new(halfExtents.X, halfExtents.Y), new(-halfExtents.X, halfExtents.Y)];
+        for (int i = 0; i < 4; i++) v[i] = center + rotation.Rotate(v[i]);
+        return Polygon(v);
+    }
+
+    /// <summary>A convex polygon from counter-clockwise points (3 to 8).</summary>
+    public static Shape Polygon(ReadOnlySpan<Vector2> points)
+    {
+        if (points.Length is < 3 or > MaxVertices) throw new ArgumentException($"A polygon needs 3 to {MaxVertices} points.");
+        var s = new Shape { Kind = ShapeKind.Polygon, Count = points.Length };
+        var centroid = Vector2.Zero;
+        float area = 0;
+        for (int i = 0; i < points.Length; i++)
+        {
+            var a = points[i]; var b = points[(i + 1) % points.Length];
+            s.Vx[i] = a.X; s.Vy[i] = a.Y;
+            var n = SimMath.Normalize(V.RightPerp(b - a));
+            s.Nx[i] = n.X; s.Ny[i] = n.Y;
+            float cross = V.Cross(a, b);
+            area += cross;
+            centroid += (a + b) * cross;
+        }
+        if (area <= 0) throw new ArgumentException("Polygon points must be counter-clockwise and not degenerate.");
+        s.Center = centroid / (3 * area);
+        return s;
+    }
+
+    /// <summary>Mass, rotational inertia about the body origin, and center of mass for a density.</summary>
+    public readonly (float Mass, float Inertia, Vector2 Center) MassData(float density)
+    {
+        if (Kind == ShapeKind.Circle)
+        {
+            float m = density * SimMath.Pi * Radius * Radius;
+            return (m, m * (0.5f * Radius * Radius + SimMath.Dot(Center, Center)), Center);
+        }
+        // Triangle fan about the first vertex; inertia about the origin.
+        float area = 0, inertia = 0;
+        var c = Vector2.Zero;
+        var origin = Vertex(0);
+        for (int i = 1; i < Count - 1; i++)
+        {
+            var e1 = Vertex(i) - origin; var e2 = Vertex(i + 1) - origin;
+            float d = V.Cross(e1, e2), a = 0.5f * d;
+            area += a;
+            c += (e1 + e2) * (a / 3);
+            float intx2 = e1.X * e1.X + e2.X * e1.X + e2.X * e2.X, inty2 = e1.Y * e1.Y + e2.Y * e1.Y + e2.Y * e2.Y;
+            inertia += 0.25f / 3 * d * (intx2 + inty2);
+        }
+        float mass = density * area;
+        c = c / area;
+        var center = origin + c;
+        // Inertia about the centroid, then moved to the body origin.
+        float iCentroid = density * inertia - mass * SimMath.Dot(c, c);
+        return (mass, iCentroid + mass * SimMath.Dot(center, center), center);
+    }
+
+    public readonly Aabb Bounds(Vector2 position, Rot rotation)
+    {
+        if (Kind == ShapeKind.Circle)
+        {
+            var p = position + rotation.Rotate(Center);
+            return new Aabb { Min = p - new Vector2(Radius), Max = p + new Vector2(Radius) };
+        }
+        var min = new Vector2(float.MaxValue); var max = new Vector2(float.MinValue);
+        for (int i = 0; i < Count; i++)
+        {
+            var p = position + rotation.Rotate(Vertex(i));
+            min = Vector2.Min(min, p); max = Vector2.Max(max, p);
+        }
+        return new Aabb { Min = min - new Vector2(Radius), Max = max + new Vector2(Radius) };
+    }
+}
+
+public enum ShapeKind : byte { Circle, Polygon }

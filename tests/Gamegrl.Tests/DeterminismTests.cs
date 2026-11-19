@@ -75,6 +75,20 @@ internal sealed class SwarmDriver : ISystem
     }
 }
 
+/// <summary>Moves every interpolated entity one unit along x per fixed step.</summary>
+internal sealed class Stepper : ISystem
+{
+    public string Name => "Test.Stepper";
+    public Phase Phase => Phase.FixedUpdate;
+    public int Order => 0;
+    private Query _q = null!;
+    public void Initialize(World world) => _q = world.Query(new QueryDesc().With<LocalTransform>().With<InterpolatedTransform>());
+    public void Run(World world)
+    {
+        foreach (var a in _q.Archetypes) foreach (ref var t in a.GetSpan<LocalTransform>()) t.Position.X += 1;
+    }
+}
+
 internal static class DeterminismTests
 {
     private const int Frames = 360;
@@ -179,7 +193,7 @@ internal static class DeterminismTests
     }
 
     /// <summary>GAMEGRL_UPDATE_GOLDEN=1 rewrites the file in the source tree (after an intended simulation change).</summary>
-    private static void CheckGolden(string key, string value)
+    internal static void CheckGolden(string key, string value)
     {
         if (Environment.GetEnvironmentVariable("GAMEGRL_UPDATE_GOLDEN") == "1")
         {
@@ -196,7 +210,7 @@ internal static class DeterminismTests
         if (!golden.TryGetValue(key, out var expected)) throw new Exception($"No golden value for {key}; run once with GAMEGRL_UPDATE_GOLDEN=1.");
         if (expected != value)
         {
-            if (key == "ticks")
+            if (key is "ticks" or "physics2d")
             {
                 var e = expected.Split(','); var v = value.Split(',');
                 int first = Enumerable.Range(0, Math.Min(e.Length, v.Length)).FirstOrDefault(i => e[i] != v[i], -1);
@@ -248,6 +262,41 @@ internal static class DeterminismTests
             CheckGolden("random", seq.ToString());
             var b = new SimRandom(3);
             for (int i = 0; i < 10000; i++) { int v = b.Range(-3, 4); Assert.True(v >= -3 && v < 4); float f = b.NextFloat(); Assert.True(f >= 0 && f < 1); }
+        });
+
+        Test("interpolation: frames between fixed steps draw the blend; moves from outside the simulation draw as is", () =>
+        {
+            var b = EngineBuilder.Create().AddModule<CoreModule>();
+            b.WorkerThreads = 0;
+            b.FixedRate = 10;
+            b.AddSystem(new Stepper());
+            var e = b.World.Spawn(LocalTransform.Identity, new LocalToWorld(), new InterpolatedTransform());
+            using var app = b.Build();
+            app.Tick(0.1); app.Tick(0.1);              // two steps: previous x = 1, current x = 2
+            // Interpolation trails the simulation by up to one step: on a boundary (alpha 0) it draws the previous step.
+            Assert.True(MathF.Abs(app.World.Get<LocalToWorld>(e).Position.X - 1) < 1e-5f, "on a step boundary it draws the previous step");
+            app.Tick(0.05);                            // half way to the next step
+            Assert.True(MathF.Abs(app.World.Get<LocalToWorld>(e).Position.X - 1.5f) < 1e-5f, $"half a step draws the midpoint, got {app.World.Get<LocalToWorld>(e).Position.X}");
+            Assert.True(app.World.Get<LocalTransform>(e).Position.X == 2, "the simulation's own transform is untouched");
+            app.World.Get<LocalTransform>(e).Position = new Vector3(50, 0, 0); // a teleport outside the simulation
+            app.Tick(0.01);
+            Assert.True(app.World.Get<LocalToWorld>(e).Position.X == 50, "a move from outside draws immediately");
+        });
+
+        Test("determinism: world hashes skip component padding (its bytes depend on code generation, not the simulation)", () =>
+        {
+            using var w = new World();
+            var e = w.Spawn(Gamegrl.Physics2D.RigidBody2D.Default with { LinearVelocity = new Vector2(1, 2) });
+            ulong before = WorldHash.Compute(w);
+            unsafe
+            {
+                // RigidBody2D: a byte enum, then three bytes of padding before the velocity.
+                var p = (byte*)System.Runtime.CompilerServices.Unsafe.AsPointer(ref w.Get<Gamegrl.Physics2D.RigidBody2D>(e));
+                p[1] = 0x78; p[2] = 0x00; p[3] = 0xF1;
+            }
+            Assert.True(WorldHash.Compute(w) == before, "garbage in padding doesn't change the hash");
+            w.Get<Gamegrl.Physics2D.RigidBody2D>(e).LinearVelocity.X = 3;
+            Assert.True(WorldHash.Compute(w) != before, "a data change does");
         });
 
         Test("determinism: a recorded session replays bit for bit and matches the golden per-tick world hashes", () =>

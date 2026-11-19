@@ -114,9 +114,20 @@ internal static class GraphicsSmoke
         Check(!editor.GameInput.IsDown(Key.Space) && input.IsDown(Key.Space), "Input isolation failed");
         Frame(() => input.OnKey((int)Key.Space, false, false));
         Check(app.World.Resource<ScreenSize>().Width == (int)(editor.GameArea.W * editor.CellWidth * editor.GamePreviewScale), "Logical sprite coordinates changed with preview resolution");
-        int playingCount = app.World.EntityCount; string firstBuild = editor.GameAssemblyPath!;
+        // The game spawns entities while playing (Spinners' box rain), so compare scene entities: each one present
+        // before a reload must be present exactly once after it.
+        List<ulong> SceneIds()
+        {
+            var ids = new List<ulong>();
+            foreach (var a in app.World.Archetypes)
+                if (a.Has<SceneId>()) foreach (var id in a.GetSpan<SceneId>()) ids.Add(id.Value);
+            ids.Sort();
+            return ids;
+        }
+        bool SameScene(List<ulong> before) { var now = SceneIds(); return before.All(id => now.BinarySearch(id) >= 0) && now.Distinct().Count() == now.Count; }
+        var playingIds = SceneIds(); string firstBuild = editor.GameAssemblyPath!;
         editor.BuildGame(); Wait(() => !editor.Jobs.Busy); Frame();
-        Check(editor.Document.Playing && app.World.EntityCount == playingCount, "Reload duplicated or lost entities");
+        Check(editor.Document.Playing && SameScene(playingIds), "Reload duplicated or lost entities");
         GC.Collect(); GC.WaitForPendingFinalizers(); editor.DrainBuildCleanupAsync().GetAwaiter().GetResult();
         Check(!File.Exists(firstBuild) && File.Exists(editor.GameAssemblyPath), "Old build not retired");
         string current = editor.GameAssemblyPath!;
@@ -124,7 +135,7 @@ internal static class GraphicsSmoke
         {
             var invalid = invalidBuilds.Create("invalid"); File.WriteAllText(invalid.AssemblyPath, "invalid"); invalid.Complete();
             editor.AcceptBuild(invalid); Frame();
-            Check(editor.GameAssemblyPath == current && File.Exists(current) && editor.Document.Playing && app.World.EntityCount == playingCount, "Rollback failed");
+            Check(editor.GameAssemblyPath == current && File.Exists(current) && editor.Document.Playing && SameScene(playingIds), "Rollback failed");
         }
         Button("Stop"); Check(!editor.Document.Playing && editor.Document.Text == before, "Stop restore failed");
         Click(Tab("scene", DockRegion.Center).Center); Command("file.save"); Wait(() => !editor.Jobs.Busy);

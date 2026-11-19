@@ -1,6 +1,7 @@
 using System.Numerics;
 using Gamegrl;
 using Gamegrl.Assets;
+using Gamegrl.Physics2D;
 using Gamegrl.Platform;
 using Gamegrl.Platform.Sdl3;
 using Gamegrl.Rendering;
@@ -38,6 +39,19 @@ public struct SpinTuning
 public struct QuitAfter
 {
     public double Seconds;
+}
+
+/// <summary>How long a raining box has existed, in fixed ticks; boxes go after four seconds, so the pile stays a steady size.</summary>
+public struct BoxAge : IComponent
+{
+    public int Ticks;
+}
+
+/// <summary>The box rain: a seeded generator (simulation state, so it snapshots and replays) and a tick counter.</summary>
+public struct BoxRain
+{
+    public SimRandom Random;
+    public int Ticks;
 }
 
 public static partial class Gameplay
@@ -84,6 +98,34 @@ public static partial class Gameplay
         t.Rotation = Quaternion.CreateFromRotationMatrix(world);
     }
 
+    /// <summary>Drops a box onto the shelf every quarter second (a fixed-tick system: seeded random, no clocks).</summary>
+    [System(Phase.FixedUpdate)]
+    private static void RainBoxes([Res] ref BoxRain rain, CommandBuffer commands)
+    {
+        if (rain.Ticks++ % 15 != 0) return;
+        float size = rain.Random.Range(0.35f, 0.8f);
+        var e = commands.Spawn();
+        commands.Add(e, new LocalTransform
+        {
+            Position = new Vector3(rain.Random.Range(-3.5f, 3.5f), 14, -2),
+            Rotation = Rot.FromAngle(rain.Random.Range(-SimMath.Pi, SimMath.Pi)).ToQuaternion(),
+            Scale = new Vector3(size),
+        });
+        commands.Add(e, new LocalToWorld());
+        commands.Add(e, new InterpolatedTransform());
+        commands.Add(e, new MeshRenderer { Mesh = BuiltinAssets.Cube, Color = new Vector4(1, rain.Random.Range(0.35f, 0.75f), rain.Random.Range(0.4f, 0.8f), 1) });
+        commands.Add(e, RigidBody2D.Default with { AngularVelocity = rain.Random.Range(-3f, 3f) });
+        commands.Add(e, Collider2D.Box(new Vector2(size)) with { Restitution = 0.1f });
+        commands.Add(e, new BoxAge());
+    }
+
+    /// <summary>Boxes go after four seconds, or once they've fallen below the field.</summary>
+    [System(Phase.FixedUpdate)]
+    private static void FallOut(Entity e, in LocalTransform t, ref BoxAge age, CommandBuffer commands)
+    {
+        if (++age.Ticks > 240 || t.Position.Y < -8) commands.Destroy(e);
+    }
+
     [System(Phase.First)]
     private static void QuitKeys([Res] in Input input, [Res] in Time time, [Res] in QuitAfter quit, [Res] ref AppControl app)
     {
@@ -102,6 +144,8 @@ public sealed class SpinnersModule : IModule
     public void Build(EngineBuilder builder)
     {
         builder.AddModule(new UiModule());
+        builder.AddModule(new Physics2DModule());
+        builder.SetResource(new BoxRain { Random = new SimRandom(7) });
         Gamegrl.Generated.SpinnersGameSystems.AddTo(builder.Schedule);
         builder.SetResource(new SpinTuning { Speed = 1 });
         builder.SetResource(new QuitAfter { Seconds = _runFor ?? 0 });
@@ -126,6 +170,13 @@ public sealed class SpinnersModule : IModule
                 new MeshRenderer { Mesh = BuiltinAssets.Cube, Color = color },
                 new Spinner { Axis = axis, DegreesPerSecond = 30 + rng.NextSingle() * 150 });
         }
+        // The shelf the box rain lands on (2D physics in the x–y plane, in front of the field).
+        world.Spawn(
+            new LocalTransform { Position = new Vector3(0, 4, -2), Rotation = Quaternion.Identity, Scale = new Vector3(8, 0.4f, 1.5f) },
+            new LocalToWorld(),
+            new MeshRenderer { Mesh = BuiltinAssets.Cube, Color = new Vector4(0.3f, 0.3f, 0.36f, 1) },
+            RigidBody2D.Static,
+            Collider2D.Box(new Vector2(8, 0.4f)));
     }
 }
 

@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Hand-rolled 2D physics: rigid bodies, colliders, a soft-step contact solver, queries. Deterministic per GamegrlDeterminism. -->
+  <ItemGroup>
+    <ProjectReference Include="../Gamegrl.Core/Gamegrl.Core.csproj" />
+  </ItemGroup>
+</Project>

@@ -75,7 +75,66 @@ public sealed class ComponentGenerator : IIncrementalGenerator
         bool hasDefault = type.GetMembers("Default").Any(m => m.IsStatic && m.DeclaredAccessibility == Accessibility.Public
             && (m is IFieldSymbol df && SymbolEqualityComparer.Default.Equals(df.Type, type)
                 || m is IPropertySymbol { GetMethod: not null } dp && SymbolEqualityComparer.Default.Equals(dp.Type, type)));
-        return new ComponentModel(type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat), hasDefault, ops.ToEquatableArray(), diagnostics.ToEquatableArray());
+        // The bytes that hold data (offset, length pairs), so hashing and snapshot comparison skip padding, whose
+        // contents depend on how the compiler happened to write the struct. -1: layout not computable here.
+        var ranges = new List<int>();
+        int layoutSize = Layout(type, 0, ranges, out int size, out _, 0) ? size : -1;
+        return new ComponentModel(type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat), hasDefault, ops.ToEquatableArray(), diagnostics.ToEquatableArray(),
+            layoutSize, Merge(ranges).ToEquatableArray());
+    }
+
+    /// <summary>Sequential layout of an unmanaged type: its size and alignment, and the data ranges at <paramref name="at"/>.</summary>
+    private static bool Layout(ITypeSymbol type, int at, List<int> ranges, out int size, out int align, int depth)
+    {
+        size = 0; align = 1;
+        if (depth > 16) return false;
+        if (type is INamedTypeSymbol { TypeKind: TypeKind.Enum, EnumUnderlyingType: { } underlying }) type = underlying;
+        int primitive = type.SpecialType switch
+        {
+            SpecialType.System_Boolean or SpecialType.System_Byte or SpecialType.System_SByte => 1,
+            SpecialType.System_Char or SpecialType.System_Int16 or SpecialType.System_UInt16 => 2,
+            SpecialType.System_Int32 or SpecialType.System_UInt32 or SpecialType.System_Single => 4,
+            SpecialType.System_Int64 or SpecialType.System_UInt64 or SpecialType.System_Double => 8,
+            _ => 0,
+        };
+        if (primitive > 0) { size = align = primitive; ranges.Add(at); ranges.Add(size); return true; }
+        // Reference assemblies replace Guid's private fields with placeholders; it's 16 data bytes, aligned to 4.
+        if (type.ToDisplayString() == "System.Guid") { size = 16; align = 4; ranges.Add(at); ranges.Add(16); return true; }
+        if (type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } named) return false; // pointers, nint: platform-sized
+        if (named.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == "System.Runtime.InteropServices.StructLayoutAttribute")) return false;
+        int offset = 0, maxAlign = 1;
+        foreach (var member in named.GetMembers())
+        {
+            if (member is not IFieldSymbol { IsStatic: false, IsConst: false } field) continue;
+            int fieldSize, fieldAlign;
+            var fieldRanges = new List<int>();
+            if (field.IsFixedSizeBuffer && field.Type is IPointerTypeSymbol pointer)
+            {
+                if (!Layout(pointer.PointedAtType, 0, fieldRanges, out int element, out fieldAlign, depth + 1)) return false;
+                fieldSize = element * field.FixedSize;
+                fieldRanges.Clear(); fieldRanges.Add(0); fieldRanges.Add(fieldSize);
+            }
+            else if (!Layout(field.Type, 0, fieldRanges, out fieldSize, out fieldAlign, depth + 1)) return false;
+            offset = (offset + fieldAlign - 1) / fieldAlign * fieldAlign;
+            for (int i = 0; i < fieldRanges.Count; i += 2) { ranges.Add(at + offset + fieldRanges[i]); ranges.Add(fieldRanges[i + 1]); }
+            offset += fieldSize;
+            maxAlign = System.Math.Max(maxAlign, fieldAlign);
+        }
+        size = offset == 0 ? 1 : (offset + maxAlign - 1) / maxAlign * maxAlign;
+        align = maxAlign;
+        return true;
+    }
+
+    private static List<int> Merge(List<int> ranges)
+    {
+        var merged = new List<int>();
+        for (int i = 0; i < ranges.Count; i += 2)
+        {
+            int start = ranges[i], length = ranges[i + 1];
+            if (merged.Count > 0 && merged[merged.Count - 2] + merged[merged.Count - 1] == start) merged[merged.Count - 1] += length;
+            else { merged.Add(start); merged.Add(length); }
+        }
+        return merged;
     }
 
     private static readonly HashSet<string> Direct = new()
@@ -228,8 +287,18 @@ public sealed class ComponentGenerator : IIncrementalGenerator
         sb.AppendLine("    {");
         foreach (var r in referenced) sb.Append("        ").Append(r).AppendLine(".EnsureRegistered();");
         for (int i = 0; i < components.Length; i++)
-            sb.Append("        global::Gamegrl.ComponentRegistry.SetSerializer(global::Gamegrl.Component<").Append(components[i].TypeName)
+        {
+            var c = components[i];
+            sb.Append("        global::Gamegrl.ComponentRegistry.SetSerializer(global::Gamegrl.Component<").Append(c.TypeName)
               .Append(">.Id, new S").Append(i).AppendLine("());");
+            // Only when the computed layout matches the runtime's size, and only if there's padding to skip.
+            bool full = c.DataRanges.Count == 2 && c.DataRanges[0] == 0 && c.DataRanges[1] == c.LayoutSize;
+            if (c.LayoutSize > 0 && !full)
+            {
+                sb.Append("        if (sizeof(").Append(c.TypeName).Append(") == ").Append(c.LayoutSize).Append(") global::Gamegrl.ComponentRegistry.SetDataRanges(global::Gamegrl.Component<")
+                  .Append(c.TypeName).Append(">.Id, new int[] { ").Append(string.Join(", ", c.DataRanges)).AppendLine(" });");
+            }
+        }
         sb.AppendLine("    }");
 
         int enumCount = 0;
@@ -289,4 +358,5 @@ internal enum OpKind { Metadata, Field, Asset, Enum, Begin, End }
 
 internal sealed record FieldOp(OpKind Kind, string Name, string Path, string EnumType, EquatableArray<string> EnumNames, EquatableArray<long> EnumValues);
 
-internal sealed record ComponentModel(string TypeName, bool HasDefault, EquatableArray<FieldOp> Ops, EquatableArray<DiagnosticInfo> Diagnostics);
+internal sealed record ComponentModel(string TypeName, bool HasDefault, EquatableArray<FieldOp> Ops, EquatableArray<DiagnosticInfo> Diagnostics,
+    int LayoutSize, EquatableArray<int> DataRanges);

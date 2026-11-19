@@ -12,6 +12,20 @@ namespace Gamegrl;
 /// </summary>
 public static unsafe class WorldHash
 {
+    private static readonly HashSet<ulong> Ignored = new();
+    private static readonly Lock Gate = new();
+
+    static WorldHash() => Ignore<LocalToWorld>();
+
+    /// <summary>
+    /// Leave a component out of the hash: derived, presentation-only data (like <see cref="LocalToWorld"/>, which blends
+    /// with the frame's interpolation factor and uses platform matrix math) that the simulation never reads.
+    /// </summary>
+    public static void Ignore<T>() where T : unmanaged, IComponent
+    {
+        lock (Gate) Ignored.Add(ComponentRegistry.Get(Component<T>.Id).StableId);
+    }
+
     public static ulong Compute(World world)
     {
         var h = new Hasher(0x6767726c);
@@ -36,8 +50,18 @@ public static unsafe class WorldHash
             for (int i = 0; i < columns; i++)
             {
                 int c = order[i];
-                h.Add(ComponentRegistry.Get(archetype.Types[c]).StableId);
-                h.Add(new ReadOnlySpan<byte>(archetype.Columns[c], count * archetype.Sizes[c]));
+                ulong stable = ComponentRegistry.Get(archetype.Types[c]).StableId;
+                if (Ignored.Contains(stable)) continue;
+                h.Add(stable);
+                byte* column = archetype.Columns[c];
+                int size = archetype.Sizes[c];
+                if (ComponentRegistry.Get(archetype.Types[c]).DataRanges is { } ranges)
+                {
+                    // Skip padding: its bytes depend on how the compiler wrote the struct, not on the simulation.
+                    for (int row = 0; row < count; row++)
+                        for (int k = 0; k < ranges.Length; k += 2) h.Add(new ReadOnlySpan<byte>(column + row * size + ranges[k], ranges[k + 1]));
+                }
+                else h.Add(new ReadOnlySpan<byte>(column, count * size));
             }
         }
         return h.Finish();

@@ -69,6 +69,7 @@ dotnet run --project tests/Gamegrl.Editor.Tests -c Release -- --bench --tree # e
 | `src/Gamegrl.Generators` | Roslyn source generators: `[System]` loops and registration, component serializers |
 | `src/Gamegrl.Platform`, `.Sdl3` | Windows and input behind `IPlatform`; the SDL3 backend |
 | `src/Gamegrl.Rhi`, `.Vulkan` | The render hardware interface; the Vulkan 1.3 backend |
+| `src/Gamegrl.Physics2D` | 2D rigid bodies (`Physics2DModule`, `RigidBody2D`, `Collider2D`): soft-step solver, speculative contacts, queries; deterministic per `<GamegrlDeterminism>` |
 | `src/Gamegrl.UI` | The pixel UI games ship (`UiModule`): TrueType text, windows and widgets, rendering; also the editor's in-view overlays |
 | `src/Gamegrl.Editor` | Shared AnsiDotNet cell interface, desktop/TTY hosts, headless viewports, scene editing, jobs and collectible game code |
 | `src/Gamegrl.Rendering` | 3D mesh and 2D sprite renderers |

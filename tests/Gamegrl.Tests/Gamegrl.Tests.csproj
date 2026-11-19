@@ -10,6 +10,7 @@
     <ProjectReference Include="../../src/Gamegrl.Rhi.Vulkan/Gamegrl.Rhi.Vulkan.csproj" />
     <ProjectReference Include="../../src/Gamegrl.AssetPipeline/Gamegrl.AssetPipeline.csproj" />
     <ProjectReference Include="../../src/Gamegrl.UI/Gamegrl.UI.csproj" />
+    <ProjectReference Include="../../src/Gamegrl.Physics2D/Gamegrl.Physics2D.csproj" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Data/**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

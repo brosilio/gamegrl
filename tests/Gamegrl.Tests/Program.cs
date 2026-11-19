@@ -11,4 +11,5 @@ PrefabTests.Register();
 UiTests.Register();
 ProfilerTests.Register();
 DeterminismTests.Register();
+Physics2DTests.Register();
 return Harness.Run(args.Length > 0 ? args[0] : null);

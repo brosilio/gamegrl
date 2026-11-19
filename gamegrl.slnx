@@ -10,6 +10,7 @@
     <Project Path="src/Gamegrl.Assets/Gamegrl.Assets.csproj" />
     <Project Path="src/Gamegrl.AssetPipeline/Gamegrl.AssetPipeline.csproj" />
     <Project Path="src/Gamegrl.UI/Gamegrl.UI.csproj" />
+    <Project Path="src/Gamegrl.Physics2D/Gamegrl.Physics2D.csproj" />
     <Project Path="src/Gamegrl.Editor/Gamegrl.Editor.csproj" />
   </Folder>
   <Folder Name="/tests/">

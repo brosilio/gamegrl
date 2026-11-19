@@ -14,6 +14,8 @@ Console.WriteLine($"gamegrl bench · {BenchSuite.Machine} · {BenchSuite.Mode} �
     ("ecs.hierarchy", Scenarios.Hierarchy, false),
     ("ecs.structural", Scenarios.Structural, false),
     ("ui.frame", Scenarios.Interface, false),
+    ("physics2d.pyramid", Scenarios.Pyramid, false),
+    ("physics2d.rain", Scenarios.Rain, false),
     ("render.cubes", Scenarios.Render, true),
 ];
 foreach (var (name, build, needsGpu) in scenarios)
