@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Must NOT build: every fixed-tick system below breaks determinism, and ci.sh checks that the analyzer reports each
+    one (GG0201 platform math, GG0202 nondeterministic sources). Not part of gamegrl.slnx.
+  -->
+  <PropertyGroup>
+    <GamegrlDeterminism>CrossPlatform</GamegrlDeterminism>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Gamegrl.Core/Gamegrl.Core.csproj" />
+  </ItemGroup>
+</Project>

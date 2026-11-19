@@ -18,6 +18,10 @@
     <RuntimeHostConfigurationOption Include="Gamegrl.Determinism.CrossPlatform"
                                     Value="$([System.String]::Equals('$(GamegrlDeterminism)', 'CrossPlatform'))" Trim="true" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- The determinism analyzer reads the mode (GG0201 is an error only under CrossPlatform). -->
+    <CompilerVisibleProperty Include="GamegrlDeterminism" />
+  </ItemGroup>
   <ItemGroup Condition="!$(MSBuildProjectName.StartsWith('Gamegrl.'))">
     <AssemblyAttribute Include="Gamegrl.GamegrlDeterminismAttribute">
       <_Parameter1>$(GamegrlDeterminism)</_Parameter1>

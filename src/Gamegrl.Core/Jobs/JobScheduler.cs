@@ -67,8 +67,12 @@ public sealed unsafe class JobScheduler : IDisposable
         _count = count;
         _batch = batchSize;
         _next = 0;
-        _pending = _workers.Length;
-        _wake.Release(_workers.Length);
+        // Wake only the workers there's work for: the caller takes a batch too, and every woken worker must check out
+        // before this returns, so waking 15 threads for two batches costs more than the batches.
+        int batches = (count + batchSize - 1) / batchSize;
+        int helpers = Math.Min(_workers.Length, batches - 1);
+        _pending = helpers;
+        _wake.Release(helpers);
 
         RunBatches();
 

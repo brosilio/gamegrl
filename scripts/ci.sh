@@ -16,6 +16,13 @@ if [[ "${GAMEGRL_TERMINAL_SMOKE:-0}" == "1" ]]; then
     dotnet run --project tests/Gamegrl.Editor.Tests -c Release --no-build -- --terminal-smoke
 fi
 
+echo "== determinism analyzer (the fixture must fail with exactly its 7 violations)"
+if dotnet build tests/Gamegrl.DeterminismFixture -c Release -nologo -v q > artifacts/analyzer-fixture.log 2>&1; then
+    echo "the determinism fixture built, so the analyzer reported nothing"; exit 1
+fi
+found=$(grep -oE "Violations.cs\([0-9]+,[0-9]+\): error GG020[12]" artifacts/analyzer-fixture.log | sort -u | wc -l)
+[[ "$found" == "7" ]] || { echo "expected 7 determinism diagnostics, found $found"; cat artifacts/analyzer-fixture.log; exit 1; }
+
 echo "== tests (NativeAOT)"
 dotnet publish tests/Gamegrl.Tests -c Release -o artifacts/tests-aot -nologo -v q -m:1
 ./artifacts/tests-aot/Gamegrl.Tests
