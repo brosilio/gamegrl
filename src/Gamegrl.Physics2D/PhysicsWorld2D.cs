@@ -88,6 +88,8 @@ public sealed partial class PhysicsWorld2D
     internal Rot[] WrittenRotation = [];
     internal bool[] MassDirty = [];
     internal bool[] _justSlept = [];
+    internal float[] MaxExtent = []; // farthest any shape reaches from the center of mass
+    internal int[] TransformVersion = []; // bumped by teleports, which invalidate cached manifolds
 
     // ---------------------------------------------------------------- shapes
     private int _shapeCapacity, _shapeHigh;
@@ -100,6 +102,8 @@ public sealed partial class PhysicsWorld2D
     internal Filter2D[] Filters = [];
     internal Entity[] ShapeEntity = [];
     internal Aabb[] Fat = [];
+    // The body pose (centre of mass, rotation) each fat box was fitted at; a NaN rotation means "refit to know".
+    internal FatPose[] FatPoses = [];
     internal ShapeSource[] Sources = [];
     internal float[] Bound = []; // radius of a circle about the shape's center that holds it
 
@@ -145,12 +149,18 @@ public sealed partial class PhysicsWorld2D
     public int TouchingCount { get; private set; }
 
     [Flags]
-    internal enum ContactFlags : byte { Touching = 1, Sensor = 2, Destroy = 4, Began = 8, Ended = 16 }
+    internal enum ContactFlags : byte { Touching = 1, Sensor = 2, Destroy = 4, Began = 8, Ended = 16, Cached = 32, GraphDirty = 64 }
+
+    internal struct FatPose
+    {
+        public Vector2 Center;
+        public Rot Rotation;
+    }
 
     internal struct ContactPoint
     {
         public Vector2 AnchorA, AnchorB; // relative to each body's center of mass
-        public float Separation, NormalImpulse, TangentImpulse;
+        public float Separation, BaseSeparation, NormalImpulse, TangentImpulse;
         public ushort Id;
     }
 
@@ -162,6 +172,11 @@ public sealed partial class PhysicsWorld2D
         public float Friction, Restitution;
         public int Count;
         public ContactPoint P0, P1;
+        // The relative pose the manifold was made at, for recycling.
+        public Rot CachedQA, CachedQB, CachedTurn;
+        public Vector2 CachedPose;
+        public int VersionA, VersionB;
+        public int GraphColor, GraphSlot; // colour + 1 (0: not in the graph) and place in its list
     }
 
     // ---------------------------------------------------------------- bodies
@@ -190,6 +205,7 @@ public sealed partial class PhysicsWorld2D
         while (FirstShape[b] >= 0) DestroyShape(FirstShape[b]);
         RemoveJointsOf(b);
         BodyAlive[b] = false;
+        _recolor = true;
         BodyEntity[b] = default;
         if (_freeBodyCount == _freeBodies.Length) Array.Resize(ref _freeBodies, _freeBodies.Length * 2);
         _freeBodies[_freeBodyCount++] = b;
@@ -211,6 +227,7 @@ public sealed partial class PhysicsWorld2D
     /// <summary>Move a body (a teleport): wakes it, and moves its shapes' boxes.</summary>
     public void SetTransform(int b, Vector2 origin, Rot rotation)
     {
+        TransformVersion[b]++;
         Rotation[b] = rotation;
         Center[b] = origin + rotation.Rotate(LocalCenter[b]);
         for (int s = FirstShape[b]; s >= 0; s = NextShape[s]) RefreshProxy(s, 0, force: true);
@@ -234,6 +251,7 @@ public sealed partial class PhysicsWorld2D
     {
         if (Types[b] == type) return;
         Types[b] = type;
+        _recolor = true;
         if (type == BodyType.Static) { Velocity[b] = default; AngularVelocityOf[b] = 0; }
         // Shapes change trees (static bodies' shapes live in the static tree).
         for (int s = FirstShape[b]; s >= 0; s = NextShape[s]) { DestroyProxy(s); CreateProxy(s); }
@@ -250,6 +268,7 @@ public sealed partial class PhysicsWorld2D
     {
         if (!IsAlive(b) || Types[b] == BodyType.Static) return;
         SleepTime[b] = 0;
+        if (!Awake[b]) _recolor = true;
         Awake[b] = true;
     }
 
@@ -269,10 +288,12 @@ public sealed partial class PhysicsWorld2D
     {
         MassDirty[b] = false;
         var origin = GetPosition(b);
+        var oldCenter = LocalCenter[b];
         if (Types[b] != BodyType.Dynamic)
         {
             InvMass[b] = 0; InvInertia[b] = 0; Mass[b] = 0; LocalCenter[b] = default;
             Center[b] = origin;
+            UpdateExtent(b, oldCenter);
             return;
         }
         float mass = 0, inertia = 0;
@@ -294,6 +315,23 @@ public sealed partial class PhysicsWorld2D
         InvInertia[b] = inertia > 0 && !FixedRotationOf[b] ? 1 / inertia : 0;
         LocalCenter[b] = center;
         Center[b] = origin + Rotation[b].Rotate(center);
+        UpdateExtent(b, oldCenter);
+    }
+
+    private void UpdateExtent(int b, Vector2 oldCenter)
+    {
+        var center = LocalCenter[b];
+        float extent = 0;
+        for (int s = FirstShape[b]; s >= 0; s = NextShape[s])
+        {
+            ref readonly var g = ref Geometry[s];
+            if (g.Kind == ShapeKind.Circle) extent = Math.Max(extent, SimMath.Length(g.Center - center) + g.Radius);
+            else for (int i = 0; i < g.Count; i++) extent = Math.Max(extent, SimMath.Length(g.Vertex(i) - center) + g.Radius);
+        }
+        MaxExtent[b] = extent;
+        TransformVersion[b]++; // shapes or mass changed: cached manifolds are stale
+        // A moved centre of mass changes what Center means: the poses the fat boxes were fitted at no longer compare.
+        if (LocalCenter[b] != oldCenter) for (int s = FirstShape[b]; s >= 0; s = NextShape[s]) FatPoses[s].Rotation.C = float.NaN;
     }
 
     private void GrowBodies(int capacity)
@@ -304,6 +342,7 @@ public sealed partial class PhysicsWorld2D
         Array.Resize(ref AngularVelocityOf, capacity); Array.Resize(ref InvMass, capacity); Array.Resize(ref InvInertia, capacity); Array.Resize(ref Mass, capacity);
         Array.Resize(ref GravityScale, capacity); Array.Resize(ref LinearDamping, capacity); Array.Resize(ref AngularDamping, capacity); Array.Resize(ref FirstShape, capacity);
         Array.Resize(ref Written, capacity); Array.Resize(ref WrittenRotation, capacity); Array.Resize(ref MassDirty, capacity); Array.Resize(ref _justSlept, capacity);
+        Array.Resize(ref MaxExtent, capacity); Array.Resize(ref TransformVersion, capacity);
         GrowSolver(capacity);
         _bodyCapacity = capacity;
     }
@@ -358,6 +397,7 @@ public sealed partial class PhysicsWorld2D
     {
         Geometry[s] = shape; Density[s] = density; Friction[s] = friction; Restitution[s] = restitution; Filters[s] = filter;
         Bound[s] = BoundOf(shape);
+        FatPoses[s].Rotation.C = float.NaN; // new geometry: test its box exactly
         if (Sensor[s] != sensor)
         {
             Sensor[s] = sensor;
@@ -381,7 +421,7 @@ public sealed partial class PhysicsWorld2D
         Array.Resize(ref ShapeBody, capacity); Array.Resize(ref NextShape, capacity); Array.Resize(ref Proxy, capacity); Array.Resize(ref Geometry, capacity);
         Array.Resize(ref Density, capacity); Array.Resize(ref Friction, capacity); Array.Resize(ref Restitution, capacity); Array.Resize(ref Sensor, capacity);
         Array.Resize(ref ShapeAlive, capacity); Array.Resize(ref InStaticTree, capacity); Array.Resize(ref Moved, capacity); Array.Resize(ref Filters, capacity);
-        Array.Resize(ref ShapeEntity, capacity); Array.Resize(ref Fat, capacity); Array.Resize(ref Sources, capacity); Array.Resize(ref Bound, capacity);
+        Array.Resize(ref ShapeEntity, capacity); Array.Resize(ref Fat, capacity); Array.Resize(ref FatPoses, capacity); Array.Resize(ref Sources, capacity); Array.Resize(ref Bound, capacity);
         _shapeCapacity = capacity;
     }
 
@@ -397,6 +437,7 @@ public sealed partial class PhysicsWorld2D
         var box = ShapeBox(s);
         box.Min -= new Vector2(AabbMargin); box.Max += new Vector2(AabbMargin);
         Fat[s] = box;
+        FatPoses[s] = new FatPose { Center = Center[b], Rotation = Rotation[b] };
         InStaticTree[s] = Types[b] == BodyType.Static;
         Proxy[s] = (InStaticTree[s] ? _staticTree : _movingTree).Create(box, s);
         QueueMove(s);
@@ -413,18 +454,30 @@ public sealed partial class PhysicsWorld2D
     }
 
     private bool[] _needsMove = [];
+    private ulong[] _moveBits = new ulong[4]; // bodies with a shape that left its fat box this step
     private Aabb[] _swept = [];
 
     /// <summary>The swept box of a shape, and whether it left its fat box (no tree changes: safe in parallel).</summary>
-    private void Sweep(int s, float dt)
+    private bool Sweep(int s, float dt)
     {
+        // Every point of the shape has moved at most |Δc| + extent·|Δq| since its fat box was fitted (|Δq| being the
+        // chord between the two rotations), and the swept box adds this step's motion: while all that stays well
+        // inside the margin the box is certainly still contained, and the shape's geometry is never touched.
+        // Conservative (L1 norms, a quarter of the margin to spare for rounding), so the outcome is the exact test's.
+        int b = ShapeBody[s];
+        ref readonly var pose = ref FatPoses[s];
+        var dc = Center[b] - pose.Center; var q = Rotation[b]; var v = Velocity[b] * dt;
+        float moved = MathF.Abs(dc.X) + MathF.Abs(dc.Y) + MaxExtent[b] * (MathF.Abs(q.C - pose.Rotation.C) + MathF.Abs(q.S - pose.Rotation.S))
+            + MathF.Abs(v.X) + MathF.Abs(v.Y);
+        if (moved < 0.75f * AabbMargin) { _needsMove[s] = false; return false; }
         var box = ShapeBox(s);
         var reach = Velocity[ShapeBody[s]] * dt;
-        box.Min = Vector2.Min(box.Min, box.Min + reach);
-        box.Max = Vector2.Max(box.Max, box.Max + reach);
+        box.Min = SimMath.Min(box.Min, box.Min + reach);
+        box.Max = SimMath.Max(box.Max, box.Max + reach);
         ref readonly var fat = ref Fat[s];
         _swept[s] = box;
-        _needsMove[s] = !(fat.Min.X <= box.Min.X && fat.Min.Y <= box.Min.Y && fat.Max.X >= box.Max.X && fat.Max.Y >= box.Max.Y);
+        // An invalidated pose (NaN) refits once, so the shortcut above works again.
+        return _needsMove[s] = !(fat.Min.X <= box.Min.X && fat.Min.Y <= box.Min.Y && fat.Max.X >= box.Max.X && fat.Max.Y >= box.Max.Y) || float.IsNaN(pose.Rotation.C);
     }
 
     private struct SweepJob : IJobFor
@@ -434,10 +487,17 @@ public sealed partial class PhysicsWorld2D
         public readonly void Execute(int start, int end)
         {
             var w = World;
+            ulong word = 0;
             for (int b = start; b < end; b++)
             {
-                if (!w.BodyAlive[b] || !w.Awake[b] || w.Types[b] == BodyType.Static) continue;
-                for (int s = w.FirstShape[b]; s >= 0; s = w.NextShape[s]) w.Sweep(s, Dt);
+                if (w.BodyAlive[b] && w.Awake[b] && w.Types[b] != BodyType.Static)
+                {
+                    bool any = false;
+                    for (int s = w.FirstShape[b]; s >= 0; s = w.NextShape[s]) any |= w.Sweep(s, Dt);
+                    if (any) word |= 1UL << b;
+                }
+                // Batches are multiples of 64 bodies, so each owns its words.
+                if ((b & 63) == 63 || b == end - 1) { if (word != 0) w._moveBits[b >> 6] |= word; word = 0; }
             }
         }
     }
@@ -448,13 +508,14 @@ public sealed partial class PhysicsWorld2D
         // The box swept through this step's motion: a fast body's pairs must exist before it gets there.
         var box = ShapeBox(s);
         var reach = Velocity[ShapeBody[s]] * dt;
-        box.Min = Vector2.Min(box.Min, box.Min + reach);
-        box.Max = Vector2.Max(box.Max, box.Max + reach);
+        box.Min = SimMath.Min(box.Min, box.Min + reach);
+        box.Max = SimMath.Max(box.Max, box.Max + reach);
         ref var fat = ref Fat[s];
         if (!force && fat.Min.X <= box.Min.X && fat.Min.Y <= box.Min.Y && fat.Max.X >= box.Max.X && fat.Max.Y >= box.Max.Y) return;
         box.Min -= new Vector2(AabbMargin);
         box.Max += new Vector2(AabbMargin);
         fat = box;
+        FatPoses[s] = new FatPose { Center = Center[ShapeBody[s]], Rotation = Rotation[ShapeBody[s]] };
         (InStaticTree[s] ? _staticTree : _movingTree).Move(Proxy[s], box);
         QueueMove(s);
     }
@@ -516,22 +577,32 @@ public sealed partial class PhysicsWorld2D
         // Boxes in parallel; the few that left their fat boxes move in the trees serially, in shape order.
         if (_needsMove.Length < _shapeCapacity) { _needsMove = new bool[_shapeCapacity]; _swept = new Aabb[_shapeCapacity]; }
         var sweep = new SweepJob { World = this, Dt = dt };
+        int bodyWords = (_bodyHigh + 63) >> 6;
+        if (_moveBits.Length < bodyWords) _moveBits = new ulong[bodyWords * 2];
         if (Jobs is { } jobs) jobs.ParallelFor(_bodyHigh, 256, ref sweep); else sweep.Execute(0, _bodyHigh);
-        for (int b = 0; b < _bodyHigh; b++)
+        // Only bodies the sweep flagged, in body order.
+        for (int bw = 0; bw < bodyWords; bw++)
         {
-            if (!BodyAlive[b] || !Awake[b] || Types[b] == BodyType.Static) continue;
-            for (int s = FirstShape[b]; s >= 0; s = NextShape[s])
+            ulong bits = _moveBits[bw];
+            _moveBits[bw] = 0;
+            while (bits != 0)
             {
-                if (!_needsMove[s]) continue;
-                // Predict a few steps of motion ahead (Box2D v2's multiplier), so a moving body leaves its fat box every
-                // few steps instead of every step: each exit costs a tree move and a query.
-                var box = _swept[s];
-                var ahead = Velocity[b] * (dt * (AabbPrediction - 1));
-                box.Min = Vector2.Min(box.Min, box.Min + ahead) - new Vector2(AabbMargin);
-                box.Max = Vector2.Max(box.Max, box.Max + ahead) + new Vector2(AabbMargin);
-                Fat[s] = box;
-                (InStaticTree[s] ? _staticTree : _movingTree).Move(Proxy[s], box);
-                QueueMove(s);
+                int b = (bw << 6) + BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                for (int s = FirstShape[b]; s >= 0; s = NextShape[s])
+                {
+                    if (!_needsMove[s]) continue;
+                    // Predict a few steps of motion ahead (Box2D v2's multiplier), so a moving body leaves its fat box
+                    // every few steps instead of every step: each exit costs a tree move and a query.
+                    var box = _swept[s];
+                    var ahead = Velocity[b] * (dt * (AabbPrediction - 1));
+                    box.Min = SimMath.Min(box.Min, box.Min + ahead) - new Vector2(AabbMargin);
+                    box.Max = SimMath.Max(box.Max, box.Max + ahead) + new Vector2(AabbMargin);
+                    Fat[s] = box;
+                    FatPoses[s] = new FatPose { Center = Center[b], Rotation = Rotation[b] };
+                    (InStaticTree[s] ? _staticTree : _movingTree).Move(Proxy[s], box);
+                    QueueMove(s);
+                }
             }
         }
         MovedProxies = _moveCount;
@@ -608,38 +679,89 @@ public sealed partial class PhysicsWorld2D
     {
         public PhysicsWorld2D World;
         public float Dt;
-        public readonly void Execute(int start, int end) { for (int c = start; c < end; c++) World.UpdateContact(c, Dt); }
+        public readonly void Execute(int start, int end)
+        {
+            var w = World;
+            var contacts = w.Contacts; var types = w.Types; var awake = w.Awake;
+            ulong word = 0;
+            for (int c = start; c < end; c++)
+            {
+                ref var contact = ref contacts[c];
+                int a = contact.BodyA, b = contact.BodyB;
+                var typeA = types[a]; var typeB = types[b]; bool awakeA = awake[a], awakeB = awake[b];
+                if ((awakeA && typeA != BodyType.Static) || (awakeB && typeB != BodyType.Static)) w.UpdateContact(ref contact, a, b, Dt);
+                // Graph membership changes (see Solvable), from the bodies' state already in hand.
+                bool solvable = (contact.Flags & (ContactFlags.Touching | ContactFlags.Sensor | ContactFlags.Destroy)) == ContactFlags.Touching
+                    && ((typeA == BodyType.Dynamic && awakeA) || (typeB == BodyType.Dynamic && awakeB));
+                if (solvable != (contact.GraphColor != 0)) contact.Flags |= ContactFlags.GraphDirty;
+                if ((contact.Flags & Changes) != 0) word |= 1UL << c;
+                if ((c & 63) == 63 || c == end - 1) { if (word != 0) w._contactBits[c >> 6] |= word; word = 0; }
+            }
+        }
     }
 
     /// <summary>Narrowphase for every contact (in parallel: each writes only itself), then events and removals in contact order.</summary>
     private void Collide(float dt)
     {
+        int words = (ContactCount + 63) >> 6;
+        if (_contactBits.Length < words) _contactBits = new ulong[words * 2];
         var job = new CollideJob { World = this, Dt = dt };
+        // Batches of 64: each batch owns one word of _contactBits, so the flags need no synchronisation.
         if (Jobs is { } jobs) jobs.ParallelFor(ContactCount, 64, ref job);
         else job.Execute(0, ContactCount);
-        for (int c = 0; c < ContactCount; c++)
+        // Only flagged contacts (began, ended, destroyed, or changing colour) need the serial pass; in contact order.
+        _destroyedCount = 0;
+        for (int w = 0; w < words; w++)
         {
-            ref var contact = ref Contacts[c];
-            if ((contact.Flags & ContactFlags.Began) != 0)
+            ulong bits = _contactBits[w];
+            _contactBits[w] = 0;
+            while (bits != 0)
             {
-                contact.Flags &= ~ContactFlags.Began;
-                if ((contact.Flags & ContactFlags.Sensor) != 0) Push(ref _sensorBegins, ref _sensorBeginCount, SensorEvent(contact));
-                else
-                {
-                    Push(ref _begins, ref _beginCount, BeginEvent(contact));
-                    // Something awake touched something asleep: wake it.
-                    if (!Awake[contact.BodyA]) Wake(contact.BodyA);
-                    if (!Awake[contact.BodyB]) Wake(contact.BodyB);
-                }
-            }
-            if ((contact.Flags & ContactFlags.Ended) != 0)
-            {
-                contact.Flags &= ~ContactFlags.Ended;
-                if ((contact.Flags & ContactFlags.Sensor) != 0) Push(ref _sensorEnds, ref _sensorEndCount, SensorEvent(contact));
-                else Push(ref _ends, ref _endCount, new ContactEvent2D { A = ShapeEntity[contact.ShapeA], B = ShapeEntity[contact.ShapeB] });
+                int c = (w << 6) + BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                ContactChanged(c);
             }
         }
-        RemoveDestroyedContacts(emitEvents: false);
+        // Destroyed contacts go highest first, so each swap brings in a contact that stays.
+        for (int k = _destroyedCount - 1; k >= 0; k--) RemoveContact(_destroyed[k]);
+    }
+
+    private const ContactFlags Changes = ContactFlags.Began | ContactFlags.Ended | ContactFlags.Destroy | ContactFlags.GraphDirty;
+    private ulong[] _contactBits = new ulong[4];
+    private int[] _destroyed = new int[16];
+    private int _destroyedCount;
+
+    private void ContactChanged(int c)
+    {
+        ref var contact = ref Contacts[c];
+        if ((contact.Flags & ContactFlags.GraphDirty) != 0)
+        {
+            contact.Flags &= ~ContactFlags.GraphDirty;
+            if (!_recolor) { if (contact.GraphColor != 0) RemoveFromGraph(c); else AddToGraph(c); }
+        }
+        if ((contact.Flags & ContactFlags.Began) != 0)
+        {
+            contact.Flags &= ~ContactFlags.Began;
+            if ((contact.Flags & ContactFlags.Sensor) != 0) Push(ref _sensorBegins, ref _sensorBeginCount, SensorEvent(contact));
+            else
+            {
+                Push(ref _begins, ref _beginCount, BeginEvent(contact));
+                // Something awake touched something asleep: wake it.
+                if (!Awake[contact.BodyA]) Wake(contact.BodyA);
+                if (!Awake[contact.BodyB]) Wake(contact.BodyB);
+            }
+        }
+        if ((contact.Flags & ContactFlags.Ended) != 0)
+        {
+            contact.Flags &= ~ContactFlags.Ended;
+            if ((contact.Flags & ContactFlags.Sensor) != 0) Push(ref _sensorEnds, ref _sensorEndCount, SensorEvent(contact));
+            else Push(ref _ends, ref _endCount, new ContactEvent2D { A = ShapeEntity[contact.ShapeA], B = ShapeEntity[contact.ShapeB] });
+        }
+        if ((contact.Flags & ContactFlags.Destroy) != 0)
+        {
+            if (_destroyedCount == _destroyed.Length) Array.Resize(ref _destroyed, _destroyedCount * 2);
+            _destroyed[_destroyedCount++] = c;
+        }
     }
 
     private ContactEvent2D SensorEvent(in Contact c) => Sensor[c.ShapeA]
@@ -660,20 +782,19 @@ public sealed partial class PhysicsWorld2D
     }
 
     /// <summary>One contact's narrowphase: overlap test for sensors, a manifold (keeping matching impulses) otherwise.</summary>
-    internal void UpdateContact(int c, float dt)
+    /// <summary>Called only when at least one of the bodies can have moved (otherwise the contact stays as it is).</summary>
+    internal void UpdateContact(ref Contact contact, int a, int b, float dt)
     {
-        ref var contact = ref Contacts[c];
-        int a = contact.BodyA, b = contact.BodyB;
-        bool awakeA = Awake[a] && Types[a] != BodyType.Static, awakeB = Awake[b] && Types[b] != BodyType.Static;
-        if (!awakeA && !awakeB) return; // nothing moved; keep as is
         if (!Fat[contact.ShapeA].Overlaps(Fat[contact.ShapeB]) || (_noCollide.Count > 0 && _noCollide.Contains(BodyPairKey(a, b))))
         {
             if ((contact.Flags & ContactFlags.Touching) != 0) contact.Flags |= ContactFlags.Ended;
             contact.Flags = (contact.Flags & ~ContactFlags.Touching) | ContactFlags.Destroy;
             return;
         }
-        var pa = GetPosition(a); var pb = GetPosition(b);
         bool sensor = (contact.Flags & ContactFlags.Sensor) != 0;
+        bool was = (contact.Flags & ContactFlags.Touching) != 0;
+        if (!sensor && TryRecycle(ref contact, a, b, was)) return;
+        var pa = GetPosition(a); var pb = GetPosition(b);
         float margin = sensor ? 0 : Speculative + SimMath.Length(Velocity[a] - Velocity[b]) * dt;
         // Bounding circles first: about a third of contacts are fat boxes overlapping with the shapes apart.
         Manifold m = default;
@@ -697,10 +818,52 @@ public sealed partial class PhysicsWorld2D
             contact.Count = m.Count;
             contact.P0 = Point(m.P0, ca, cb, old0, old1, oldCount);
             contact.P1 = m.Count > 1 ? Point(m.P1, ca, cb, old0, old1, oldCount) : default;
+            contact.P0.BaseSeparation = contact.P0.Separation;
+            contact.P1.BaseSeparation = contact.P1.Separation;
+            // Remember the relative pose this manifold was made at (contact recycling).
+            contact.CachedQA = Rotation[a]; contact.CachedQB = Rotation[b];
+            contact.CachedPose = Rotation[a].InvRotate(Center[b] - Center[a]); // between centres of mass (LocalCenter changes bump the versions)
+            contact.CachedTurn = Rot.InvMul(Rotation[a], Rotation[b]);
+            contact.VersionA = TransformVersion[a]; contact.VersionB = TransformVersion[b];
+            contact.Flags |= ContactFlags.Cached;
         }
-        bool was = (contact.Flags & ContactFlags.Touching) != 0;
         if (touching && !was) contact.Flags |= ContactFlags.Touching | ContactFlags.Began;
         else if (!touching && was) contact.Flags = (contact.Flags & ~ContactFlags.Touching) | ContactFlags.Ended;
+    }
+
+    private const float RecycleDistance = 10 * LinearSlop, RecycleCos = 0.98f;
+
+    /// <summary>
+    /// Contact recycling, from Box2D v3 (Erin Catto, physics_world.c: "Contact recycling optimization. Please cite this
+    /// code if you use this optimization."): when the bodies have barely moved relative to each other since the manifold
+    /// was made — translation plus each body's largest shape extent times the turn, under a tolerance — keep the manifold
+    /// (anchors, normal, features) and only update each point's separation from the motion, as the substep solver does.
+    /// In a resting pile nearly every contact recycles, which skips the polygon clipping.
+    /// </summary>
+    private bool TryRecycle(ref Contact contact, int a, int b, bool wasTouching)
+    {
+        if ((contact.Flags & ContactFlags.Cached) == 0 || contact.VersionA != TransformVersion[a] || contact.VersionB != TransformVersion[b]) return false;
+        var qa = Rotation[a]; var qb = Rotation[b];
+        // Each body's turn since then, as a cosine.
+        float cosA = qa.C * contact.CachedQA.C + qa.S * contact.CachedQA.S;
+        float cosB = qb.C * contact.CachedQB.C + qb.S * contact.CachedQB.S;
+        if (F.Min(cosA, cosB) <= RecycleCos) return false;
+        var dc = Center[b] - Center[a];
+        var pose = qa.InvRotate(dc);
+        var turn = Rot.InvMul(qa, qb);
+        var dTurn = Rot.InvMul(turn, contact.CachedTurn);
+        float extent = F.Max(Types[a] == BodyType.Static ? 0 : MaxExtent[a], Types[b] == BodyType.Static ? 0 : MaxExtent[b]);
+        float tolerance = wasTouching ? RecycleDistance : F.Min(RecycleDistance, Speculative);
+        if (SimMath.Distance(pose, contact.CachedPose) + extent * MathF.Abs(dTurn.S) >= tolerance) return false;
+        var dqA = Rot.InvMul(contact.CachedQA, qa); var dqB = Rot.InvMul(contact.CachedQB, qb);
+        // Anchors are relative to each center: (cB − cA) + rB − rA was zero when the manifold was made.
+        for (int k = 0; k < contact.Count; k++)
+        {
+            ref var p = ref k == 0 ? ref contact.P0 : ref contact.P1;
+            var d = dc + (dqB.Rotate(p.AnchorB) - dqA.Rotate(p.AnchorA));
+            p.Separation = p.BaseSeparation + V.Dot(d, contact.Normal);
+        }
+        return true;
     }
 
     private static ContactPoint Point(in ManifoldPoint mp, Vector2 ca, Vector2 cb, in ContactPoint old0, in ContactPoint old1, int oldCount)
@@ -717,6 +880,7 @@ public sealed partial class PhysicsWorld2D
     /// </summary>
     private void RemoveDestroyedContacts(bool emitEvents)
     {
+        if (emitEvents) _recolor = true; // outside the step: graph contacts may go without passing through the narrowphase
         for (int c = ContactCount - 1; c >= 0; c--)
         {
             ref var contact = ref Contacts[c];
@@ -727,13 +891,21 @@ public sealed partial class PhysicsWorld2D
                 if ((contact.Flags & ContactFlags.Sensor) != 0) Push(ref _sensorEnds, ref _sensorEndCount, e);
                 else Push(ref _ends, ref _endCount, e);
             }
-            _pairs.Remove((ulong)(uint)contact.ShapeA << 32 | (uint)contact.ShapeB);
-            int last = --ContactCount;
-            if (c != last)
-            {
-                Contacts[c] = Contacts[last];
-                _pairs[(ulong)(uint)Contacts[c].ShapeA << 32 | (uint)Contacts[c].ShapeB] = c;
-            }
+            RemoveContact(c);
+        }
+    }
+
+    /// <summary>Drop contact <paramref name="c"/>, moving the last contact into its place.</summary>
+    private void RemoveContact(int c)
+    {
+        ref readonly var contact = ref Contacts[c];
+        _pairs.Remove((ulong)(uint)contact.ShapeA << 32 | (uint)contact.ShapeB);
+        int last = --ContactCount;
+        if (c != last)
+        {
+            Contacts[c] = Contacts[last];
+            MovedInGraph(last, c);
+            _pairs[(ulong)(uint)Contacts[c].ShapeA << 32 | (uint)Contacts[c].ShapeB] = c;
         }
     }
 
@@ -811,14 +983,14 @@ public sealed partial class PhysicsWorld2D
         w.AllowSleep = C(AllowSleep); w.FixedRotationOf = C(FixedRotationOf); w.Implicit = C(Implicit); w.SleepTime = C(SleepTime);
         w.Center = C(Center); w.LocalCenter = C(LocalCenter); w.Velocity = C(Velocity); w.Rotation = C(Rotation); w.AngularVelocityOf = C(AngularVelocityOf);
         w.InvMass = C(InvMass); w.InvInertia = C(InvInertia); w.Mass = C(Mass); w.GravityScale = C(GravityScale); w.LinearDamping = C(LinearDamping);
-        w.AngularDamping = C(AngularDamping); w.FirstShape = C(FirstShape); w.Written = C(Written); w.WrittenRotation = C(WrittenRotation); w.MassDirty = C(MassDirty); w._justSlept = C(_justSlept);
+        w.AngularDamping = C(AngularDamping); w.FirstShape = C(FirstShape); w.Written = C(Written); w.WrittenRotation = C(WrittenRotation); w.MassDirty = C(MassDirty); w._justSlept = C(_justSlept); w.MaxExtent = C(MaxExtent); w.TransformVersion = C(TransformVersion);
         w._freeShapes = C(_freeShapes); w.ShapeBody = C(ShapeBody); w.NextShape = C(NextShape); w.Proxy = C(Proxy); w.Geometry = C(Geometry);
         w.Density = C(Density); w.Friction = C(Friction); w.Restitution = C(Restitution); w.Sensor = C(Sensor); w.ShapeAlive = C(ShapeAlive);
-        w.InStaticTree = C(InStaticTree); w.Moved = C(Moved); w.Filters = C(Filters); w.ShapeEntity = C(ShapeEntity); w.Fat = C(Fat); w.Sources = C(Sources); w.Bound = C(Bound); w._needsMove = new bool[_needsMove.Length]; w._swept = new Aabb[_swept.Length];
+        w.InStaticTree = C(InStaticTree); w.Moved = C(Moved); w.Filters = C(Filters); w.ShapeEntity = C(ShapeEntity); w.Fat = C(Fat); w.FatPoses = C(FatPoses); w.Sources = C(Sources); w.Bound = C(Bound); w._needsMove = new bool[_needsMove.Length]; w._swept = new Aabb[_swept.Length];
         w._staticTree = _staticTree.Clone(); w._movingTree = _movingTree.Clone(); w._moveBuffer = C(_moveBuffer); w._newPairs = C(_newPairs);
         w._threadPairs = new ulong[_threadPairs.Length][]; for (int t = 0; t < _threadPairs.Length; t++) w._threadPairs[t] = new ulong[_threadPairs[t].Length];
         w._threadPairCount = new int[_threadPairCount.Length];
-        w.Contacts = C(Contacts); w._pairs = new Dictionary<ulong, int>(_pairs, PairComparer.Instance); w._noCollide = new HashSet<ulong>(_noCollide, PairComparer.Instance);
+        w.Contacts = C(Contacts); w._contactBits = new ulong[_contactBits.Length]; w._destroyed = new int[_destroyed.Length]; w._moveBits = new ulong[_moveBits.Length]; w._pairs = new Dictionary<ulong, int>(_pairs, PairComparer.Instance); w._noCollide = new HashSet<ulong>(_noCollide, PairComparer.Instance);
         w._begins = C(_begins); w._ends = C(_ends); w._sensorBegins = C(_sensorBegins); w._sensorEnds = C(_sensorEnds); w._boxResults = new Entity[_boxResults.Length];
         CloneSolver(w);
         CloneJoints(w);

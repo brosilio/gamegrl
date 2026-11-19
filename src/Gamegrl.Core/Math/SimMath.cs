@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 
 namespace Gamegrl;
 
@@ -34,6 +35,17 @@ public static class SimMath
     public static float Dot(Vector2 a, Vector2 b) => a.X * b.X + a.Y * b.Y;
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float Dot(Vector3 a, Vector3 b) => (a.X * b.X + a.Y * b.Y) + a.Z * b.Z;
+    // Per-component a < b ? a : b (and a > b ? a : b). Vector2.Min/Max follow IEEE 754-2019 since .NET 9 (NaN in, NaN
+    // out; −0 below +0), which costs fix-up instructions on every call; SSE's minps/maxps are defined exactly as the
+    // select, so these are one instruction on x86 and the same bits everywhere.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector2 Min(Vector2 a, Vector2 b) => System.Runtime.Intrinsics.X86.Sse.IsSupported
+        ? System.Runtime.Intrinsics.X86.Sse.Min(a.AsVector128Unsafe(), b.AsVector128Unsafe()).AsVector2()
+        : new(a.X < b.X ? a.X : b.X, a.Y < b.Y ? a.Y : b.Y);
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static Vector2 Max(Vector2 a, Vector2 b) => System.Runtime.Intrinsics.X86.Sse.IsSupported
+        ? System.Runtime.Intrinsics.X86.Sse.Max(a.AsVector128Unsafe(), b.AsVector128Unsafe()).AsVector2()
+        : new(a.X > b.X ? a.X : b.X, a.Y > b.Y ? a.Y : b.Y);
     /// <summary>The z of the 3D cross product of (a, 0) and (b, 0).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float Cross(Vector2 a, Vector2 b) => a.X * b.Y - a.Y * b.X;

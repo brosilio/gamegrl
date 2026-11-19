@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.Intrinsics;
 using System.Runtime.CompilerServices;
 
 namespace Gamegrl.Physics2D;
@@ -18,11 +19,14 @@ public struct Rot
     public readonly Vector2 InvRotate(Vector2 v) => new(C * v.X + S * v.Y, -S * v.X + C * v.Y);
 
     /// <summary>q·r: rotate by r, then by q.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Rot Mul(Rot q, Rot r) => new() { C = q.C * r.C - q.S * r.S, S = q.S * r.C + q.C * r.S };
     /// <summary>q⁻¹·r: the rotation from q to r.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Rot InvMul(Rot q, Rot r) => new() { C = q.C * r.C + q.S * r.S, S = q.C * r.S - q.S * r.C };
 
     /// <summary>Advance by a small angle: q + Δθ·perp(q), renormalized (Box2D v3's integration; no trig).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static Rot Integrate(Rot q, float deltaAngle)
     {
         float c = q.C - deltaAngle * q.S, s = q.S + deltaAngle * q.C;
@@ -200,14 +204,61 @@ public unsafe struct Shape
             var p = position + rotation.Rotate(Center);
             return new Aabb { Min = p - new Vector2(Radius), Max = p + new Vector2(Radius) };
         }
+        if (Count <= 4) return Bounds4(position, rotation);
         var min = new Vector2(float.MaxValue); var max = new Vector2(float.MinValue);
         for (int i = 0; i < Count; i++)
         {
             var p = position + rotation.Rotate(Vertex(i));
-            min = Vector2.Min(min, p); max = Vector2.Max(max, p);
+            min = SimMath.Min(min, p); max = SimMath.Max(max, p);
         }
         return new Aabb { Min = min - new Vector2(Radius), Max = max + new Vector2(Radius) };
     }
+
+    /// <summary>
+    /// Up to four vertices in one pass: the same rotate-then-translate per vertex as the loop, in lanes (unused lanes
+    /// repeat vertex 0), then a horizontal min and max: the same values as the loop (a zero may differ in sign only).
+    /// </summary>
+    private readonly Aabb Bounds4(Vector2 position, Rot rotation)
+    {
+        fixed (float* vx = Vx, vy = Vy)
+        {
+            var x = Vector128.Load(vx); var y = Vector128.Load(vy);
+            if (Count < 4)
+            {
+                var used = Vector128.LessThan(Vector128.Create(0, 1, 2, 3), Vector128.Create(Count)).AsSingle();
+                x = Vector128.ConditionalSelect(used, x, Vector128.Create(vx[0]));
+                y = Vector128.ConditionalSelect(used, y, Vector128.Create(vy[0]));
+            }
+            var c = Vector128.Create(rotation.C); var sn = Vector128.Create(rotation.S);
+            var px = (c * x - sn * y) + Vector128.Create(position.X);
+            var py = (sn * x + c * y) + Vector128.Create(position.Y);
+            float r = Radius;
+            return new Aabb
+            {
+                Min = new Vector2(HMin(px) - r, HMin(py) - r),
+                Max = new Vector2(HMax(px) + r, HMax(py) + r),
+            };
+        }
+    }
+
+    // Order-independent reductions (min and max of exact values), so the shuffle order cannot change the result.
+    private static float HMin(Vector128<float> v)
+    {
+        var m = Min4(v, Vector128.Shuffle(v, Vector128.Create(2, 3, 0, 1)));
+        return Min4(m, Vector128.Shuffle(m, Vector128.Create(1, 0, 3, 2))).ToScalar();
+    }
+
+    private static float HMax(Vector128<float> v)
+    {
+        var m = Max4(v, Vector128.Shuffle(v, Vector128.Create(2, 3, 0, 1)));
+        return Max4(m, Vector128.Shuffle(m, Vector128.Create(1, 0, 3, 2))).ToScalar();
+    }
+
+    private static Vector128<float> Min4(Vector128<float> a, Vector128<float> b) =>
+        System.Runtime.Intrinsics.X86.Sse.IsSupported ? System.Runtime.Intrinsics.X86.Sse.Min(a, b) : Vector128.ConditionalSelect(Vector128.LessThan(a, b), a, b);
+
+    private static Vector128<float> Max4(Vector128<float> a, Vector128<float> b) =>
+        System.Runtime.Intrinsics.X86.Sse.IsSupported ? System.Runtime.Intrinsics.X86.Sse.Max(a, b) : Vector128.ConditionalSelect(Vector128.GreaterThan(a, b), a, b);
 }
 
 public enum ShapeKind : byte { Circle, Polygon }

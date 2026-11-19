@@ -92,7 +92,7 @@ internal sealed class DynamicTree
     }
 
     private static float Perimeter(in Aabb b) => 2 * ((b.Max.X - b.Min.X) + (b.Max.Y - b.Min.Y));
-    private static Aabb Union(in Aabb a, in Aabb b) => new() { Min = Vector2.Min(a.Min, b.Min), Max = Vector2.Max(a.Max, b.Max) };
+    private static Aabb Union(in Aabb a, in Aabb b) => new() { Min = SimMath.Min(a.Min, b.Min), Max = SimMath.Max(a.Max, b.Max) };
 
     private void Insert(int leaf)
     {
@@ -228,7 +228,7 @@ internal sealed class DynamicTree
     {
         if (_root < 0) return;
         var end = origin + translation * maxFraction;
-        var segment = new Aabb { Min = Vector2.Min(origin, end), Max = Vector2.Max(origin, end) };
+        var segment = new Aabb { Min = SimMath.Min(origin, end), Max = SimMath.Max(origin, end) };
         int top = 0;
         _stack[top++] = _root;
         while (top > 0)
