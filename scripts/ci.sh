@@ -20,6 +20,13 @@ echo "== tests (NativeAOT)"
 dotnet publish tests/Gamegrl.Tests -c Release -o artifacts/tests-aot -nologo -v q -m:1
 ./artifacts/tests-aot/Gamegrl.Tests
 
+# CrossPlatform determinism: the golden hashes must also hold for code compiled for another instruction set (AVX2),
+# which is where fused multiply-add and wider SIMD would show up.
+echo "== determinism (NativeAOT, x86-64-v3)"
+dotnet publish tests/Gamegrl.Tests -c Release -o artifacts/tests-aot-v3 -p:IlcInstructionSet=x86-64-v3 -nologo -v q -m:1
+./artifacts/tests-aot-v3/Gamegrl.Tests determinism
+./artifacts/tests-aot-v3/Gamegrl.Tests math
+
 # Performance: scenarios under the profiler, gated against perf/baselines/<machine>.json (allocations exactly, times
 # within a tolerance). No baseline for this machine only warns. GAMEGRL_BENCH=0 skips this on a loaded machine.
 if [[ "${GAMEGRL_BENCH:-1}" == "1" ]]; then

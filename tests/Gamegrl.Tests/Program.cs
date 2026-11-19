@@ -10,4 +10,5 @@ AssetTests.Register();
 PrefabTests.Register();
 UiTests.Register();
 ProfilerTests.Register();
+DeterminismTests.Register();
 return Harness.Run(args.Length > 0 ? args[0] : null);

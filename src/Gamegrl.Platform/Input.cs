@@ -116,8 +116,12 @@ public sealed class Input
     public void ScaleMouse(Vector2 scale) { MousePosition *= scale; MouseDelta *= scale; }
 
     // Platform backends feed events through these.
+    /// <summary>When set, every event fed through the On* methods (and focus loss) is appended to it.</summary>
+    public InputRecording? Recording { get; set; }
+
     public void OnKey(int hidUsage, bool down, bool repeat)
     {
+        Recording?.Key(hidUsage, down, repeat);
         if ((uint)hidUsage >= KeyCount) return;
         if (repeat)
         {
@@ -129,17 +133,19 @@ public sealed class Input
         _down[hidUsage] = down;
     }
 
-    public void OnText(string text) => _text.Append(text);
+    public void OnText(string text) { Recording?.Text(text); _text.Append(text); }
 
     /// <summary>Forget held keys and buttons (focus lost: the releases will never arrive).</summary>
     public void ReleaseAll()
     {
+        Recording?.ReleaseAll();
         Array.Clear(_down);
         _mouseDown = 0;
     }
 
     public void OnMouseButton(int button, bool down)
     {
+        Recording?.MouseButton(button, down);
         if ((uint)button > 7) return;
         byte bit = (byte)(1 << button);
         if (down && (_mouseDown & bit) == 0) _mousePressed |= bit;
@@ -149,9 +155,10 @@ public sealed class Input
 
     public void OnMouseMove(Vector2 position, Vector2 delta)
     {
+        Recording?.MouseMove(position, delta);
         MousePosition = position;
         MouseDelta += delta;
     }
 
-    public void OnWheel(Vector2 delta) => Wheel += delta;
+    public void OnWheel(Vector2 delta) { Recording?.Wheel(delta); Wheel += delta; }
 }

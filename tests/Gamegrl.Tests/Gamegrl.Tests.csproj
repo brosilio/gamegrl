@@ -2,6 +2,8 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <PublishAot>true</PublishAot>
+    <!-- The determinism tests check CrossPlatform hashes across JIT, NativeAOT and instruction-set levels. -->
+    <GamegrlDeterminism>CrossPlatform</GamegrlDeterminism>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Gamegrl.Core/Gamegrl.Core.csproj" />

@@ -28,7 +28,7 @@ Started 2026-11-16.
 | 2026-11-16 | Graphics | Our own thin RHI, Vulkan backend first | D3D12, Metal and WebGPU later |
 | 2026-11-16 | Shaders | Compiled offline to bytecode (Slang); pipelines compiled and cached on the client | See Platform and graphics |
 | 2026-11-16 | Physics | Hand-rolled, separate 2D and 3D engines | Speed is the top priority |
-| 2026-11-16 | Physics determinism | Bit-identical across platforms and architectures | Needed for lockstep and rollback crossplay (consoles included) |
+| 2026-11-16 | Physics determinism | Bit-identical across platforms and architectures | Needed for lockstep and rollback crossplay (consoles included). Superseded 2026-11-18 by "Simulation determinism is per game" |
 | 2026-11-16 | Editor UI | AnsiDotNet cell surfaces and layout, shared between desktop and terminal hosts | Desktop composites full-resolution viewports aligned to cell boundaries; terminal uses asynchronous colored-cell previews |
 | 2026-11-16 | Editor responsiveness | The editor UI thread never blocks; long work runs as cancellable background jobs | A direct fix for Unity's editor freezes |
 | 2026-11-16 | Asset loading | Streaming: on-demand, ref-counted, chunked, budgeted | See Assets and serialization |
@@ -70,6 +70,7 @@ Started 2026-11-16.
 | 2026-11-18 | Profiler | One process-wide profiler in `Gamegrl.Core`: interned `ProfileMarker`s, per-thread lock-free zone rings drained once per frame, automatic zones per phase, system, job batch and command playback, per-zone allocation bytes, GC figures per frame, GPU timestamps from the RHI, a 1024-frame history | The editor and a shipped player read the same data; zones are cheap enough (two timestamps, two allocation-counter reads, one store) to leave on in the editor |
 | 2026-11-18 | Profile categories | Each zone is Engine, Game, Editor, Wait or Gpu. Generated systems outside `Gamegrl.*` assemblies are Game; editor host systems and panels are Editor; fence, acquire and present waits are Wait | Answers "is it my game, the engine, the editor, or vsync" at a glance |
 | 2026-11-18 | Performance is tested | `tests/Gamegrl.Bench` (NativeAOT engine scenarios) and `Gamegrl.Editor.Tests --bench` (editor scenarios) run under the profiler and gate CI against `perf/baselines/<machine>.json`: allocations and gen0 collections exactly, times within 25% (p95 50%) plus 0.05 ms | Numbers that aren't checked drift. Baselines are per machine and per code generator (aot/jit) because neither transfers |
+| 2026-11-18 | Simulation determinism is per game | A project sets `<GamegrlDeterminism>Local</GamegrlDeterminism>` (default) or `CrossPlatform`. Both are bit-exact on the same build and CPU features (replays, tests, rollback resimulation). `CrossPlatform` is also bit-exact on every platform, by restricting `Gamegrl.Math` to correctly rounded IEEE operations, fixed SIMD lane order and our own transcendentals; `Local` may use FMA, estimates, the widest SIMD and libm. The setting is a .NET feature switch, so NativeAOT keeps one path and the JIT folds the other away. Peers exchange a simulation fingerprint (engine version, game build, mode, CPU feature level) and refuse mismatches | Cross-platform peer-to-peer rollback and lockstep stay possible for games that need them, without taxing games that don't. Only the fixed-tick simulation is in scope; rendering, audio, UI and interpolation always take the fast path |
 | 2026-11-18 | Resource-only systems run once | A `[System]` with no component, `Entity` or filter parameters runs once per tick | It used to loop over an unfiltered query, so once per entity: the profiler found Spinners' debug window drawn 606 times a frame |
 
 ## Object model
@@ -162,17 +163,26 @@ We hand-roll two engines that share a design: Physics2D and Physics3D. A 2D engi
 - **Narrowphase:** SAT and GJK/EPA for convex shapes, specialised pairs (sphere-sphere, capsule-box and so on), and SIMD (`Vector128/256`) wide paths over batches of contact pairs.
 - **Solver:** soft-step or TGS-style substepping, with contact constraint graph colouring so batches solve in parallel without locks. Islands are used for sleeping.
 - **Threading:** every stage runs as job-system tasks. Results don't depend on thread count.
-- **Determinism:** the same inputs give the same result on every platform. Results must be bit-identical on x64 PC and PS5, ARM64 consoles, Apple Silicon, mobile and wasm, so lockstep and rollback crossplay work. That means a restricted float mode:
-    - only the correctly rounded IEEE operations (+, −, ×, ÷, sqrt)
-    - no FMA contraction, and no reciprocal or rsqrt estimate instructions
-    - our own `sin`, `cos` and `atan2`, because the platform libm varies
-    - one denormal policy everywhere
-    - a fixed iteration order, with SIMD paths that do the same operations in the same order as the scalar path
-    - CI replays recorded sessions on every target and compares per-tick state hashes
+- **Determinism:** chosen per game (see Simulation determinism). Physics is written once against `Gamegrl.Math` and never calls `MathF` or `System.Numerics` members that may fuse. With `Local` it's bit-exact on the same build and CPU features; with `CrossPlatform` it's bit-identical on x64, ARM64 (Quest, Apple Silicon, consoles) and wasm, so lockstep and peer-to-peer rollback crossplay work.
 - **Queries:** raycasts, shape casts and overlap tests write into caller-provided `Span<T>` and return a count. They never allocate.
 - **Snapshots:** the full physics state can be saved and restored, for rollback and for editor play mode.
 
 Server-authoritative crossplay works even when clients don't agree bit for bit, because the server corrects them. Determinism is what lockstep and peer-to-peer rollback need.
+
+## Simulation determinism
+
+The deterministic domain is the fixed-tick simulation: `FixedUpdate` systems, physics, and the components and resources they write. Rendering, interpolation, audio, UI, particles and animation read the simulation but never feed it, so they always take the fastest path.
+
+- **Always (both modes), same build and CPU features:** fixed iteration order (archetype and entity order follow the sequence of structural changes; parallel jobs write fixed slots and reduce in batch order, never in completion order), no hash-map iteration where order matters, no wall-clock time, seeded random only. This is what replays, tests and rollback resimulation rely on.
+- **`CrossPlatform` adds,** inside `Gamegrl.Math`:
+    - only correctly rounded IEEE operations (+, −, ×, ÷, sqrt); no fused multiply-add, no reciprocal or rsqrt estimates
+    - SIMD with a fixed lane width and reduction order, so SSE, AVX, NEON and wasm SIMD agree with the scalar path
+    - our own `sin`, `cos`, `atan2`, `exp` and `log`, because platform math libraries differ
+- **`Local` may use** fused multiply-add, estimates, the widest SIMD and the platform library: fastest on its target, and only guaranteed to agree with itself.
+- **The switch:** `<GamegrlDeterminism>` in the game's project becomes the runtime feature switch `Gamegrl.Determinism.CrossPlatform`, read through a `static readonly bool`. NativeAOT substitutes the constant and trims the other path; the JIT folds it in optimized code. Changing it means restarting the editor.
+- **Fingerprint:** networked peers compare engine version, game build hash, mode and CPU feature level before a session, so a mismatch is refused instead of desyncing mid-match. `Local` peers must match exactly.
+- **Verification:** recorded inputs replay with a world hash per tick against committed golden hashes. `CrossPlatform` hashes must match across JIT, NativeAOT at the baseline instruction set and NativeAOT with AVX2 now, and ARM64 and wasm once those targets exist; `Local` hashes must match within each configuration.
+- **Analyzer:** fixed-tick systems that call `MathF`, `System.Numerics` members that may fuse, `DateTime`, or iterate a hash map get a diagnostic: an error under `CrossPlatform`, a warning under `Local`.
 
 ## Audio
 
@@ -445,7 +455,7 @@ We build in seven milestones. Each one ends with a working build. Later mileston
 | 1 | Foundation | SDL3 window and input, Vulkan RHI clearing the screen, entity store, job scheduler. Source generator working end to end on `Spinner`; spinning cubes and a 2D sprite batch | The NativeAOT player renders 3D cubes and 2D sprites from generated systems |
 | 2 | Data | Generated serialization, text scenes, nested prefabs. Asset database with `.meta` GUIDs, PNG and glTF importers, file watching and hot reload | A scene saved as text loads in the AOT player from packed assets |
 | 3 | Editor shell | Immediate-mode UI; Hierarchy, Inspector, Scene view, Project browser, Console. Play mode with snapshot and restore, undo, game-code hot reload, never-blocking job model | A scene can be built, played and edited without touching a text file |
-| 4 | Simulation and audio | Fixed-tick loop with render interpolation; Physics 2D, then Physics 3D; snapshot and restore of physics state; streaming asset loading. Audio core: real-time mixer, sample-accurate scheduling and beat clock, object panning to any speaker layout, HRTF for headphones, distance, Doppler and occlusion | Replaying recorded inputs reproduces the same world state bit for bit, and a rhythm sample stays on the beat with measured latency compensation |
+| 4 | Simulation and audio | `Gamegrl.Math` with both determinism modes; input recording, replay and per-tick world hashes; job scheduler fixes from profiling; fixed-tick loop with render interpolation; Physics 2D, then Physics 3D; snapshot and restore of physics state; streaming asset loading. Audio core: real-time mixer, sample-accurate scheduling and beat clock, object panning to any speaker layout, HRTF for headphones, distance, Doppler and occlusion | Replaying recorded inputs reproduces the same world state bit for bit (in `CrossPlatform` mode across JIT, NativeAOT and instruction-set levels), and a rhythm sample stays on the beat with measured latency compensation |
 | 5 | Multiplayer | QUIC library extracted from httpgrl, `ITransport`, generated replication, client prediction and rollback. Headless server build; host plus clients in editor play mode with simulated lag | A sample game plays smoothly under simulated latency and packet loss |
 | 6 | Reach | Player build pipeline. In order: web player (WebGPU backend, browser platform layer, WebTransport via httpgrl M3), then Windows (D3D12), then macOS (Metal). Advanced acoustics (propagation, real-time reverb from geometry) | One sample project builds for Linux, the browser, Windows and macOS |
 | 7 | XR | `Gamegrl.XR` on OpenXR: PC VR on Linux (Monado, SteamVR) first, then Quest (Android platform layer, NativeAOT `linux-bionic-arm64`, APK packaging, AAudio, ASTC). Foveated rendering, hand tracking, simulated headset in the editor, spectator view | A sample scene runs at the headset's native refresh rate with no dropped frames, on PC VR and on a Quest |
@@ -453,6 +463,16 @@ We build in seven milestones. Each one ends with a working build. Later mileston
 Multiplayer, web and XR ship in milestones 5 to 7, but their constraints apply from milestone 1: a fixed tick, snapshots, a pluggable `Tick()` host, async I/O, N-view cameras, external render targets and action-based input. The web is the second platform, so WebGPU limits bound the RHI from the start. Early milestones are tested in a browser as soon as the WebGPU backend exists, rather than waiting for milestone 6.
 
 ## Status
+
+**Milestone 4 (Simulation and audio): in progress.**
+
+| Step | State |
+| --- | --- |
+| Determinism modes | Done. `<GamegrlDeterminism>` → `Gamegrl.Determinism.CrossPlatform` feature switch and a `GamegrlDeterminism` assembly attribute the editor applies when it loads game code (`Directory.Build.targets`, `Determinism.cs`) |
+| `SimMath`, `SimRandom` | Done. Strict sin/cos/atan/atan2/asin/acos/exp/log/pow evaluated in double without fusing (within 2 ulps, tested over 200k inputs each); vector and quaternion helpers with fixed operation order; xoshiro128** random as a 16-byte value type (`src/Gamegrl.Core/Math`) |
+| Replay and hashes | Done. `InputRecording` captures per-frame deltas and input events and replays them through `Input` (`GAMEGRL_RECORD` / `GAMEGRL_REPLAY` in the desktop host); `WorldHash` hashes entities and component bytes; `TickHashRecorder` keeps one hash per fixed step |
+| Verification | Done. A swarm scenario (serial, parallel and command-buffer systems; varying frame times; scripted input) replays bit for bit, agrees with and without worker threads, and matches `tests/Gamegrl.Tests/Data/determinism.golden` under the JIT, NativeAOT and NativeAOT for x86-64-v3, all in CI. ARM64 and wasm join when those targets exist |
+| Next | Determinism analyzer; job scheduler fixes (minimum batch size, cheaper wake-ups); render interpolation; Physics 2D; Physics 3D; audio core; streaming assets |
 
 **Milestone 3 (Editor shell): complete, including the shared cell interface and the post-review fixes.**
 
@@ -477,7 +497,7 @@ The editor (`src/Gamegrl.Editor`) is a JIT host that takes a project root and a 
 | Efficiency | Steady-state frames allocate nothing (tested). Clicks and drags never serialize the scene |
 | Profiler | A Profiler panel over the engine profiler (graph, game/engine/editor/wait/GPU split, merged call tree or flat list, pause on a frame, Perfetto export); benchmarks gate CI against per-machine baselines (see Profiling) |
 
-**Validation:** 44 engine tests under JIT and NativeAOT, including the pixel UI (widgets, windows, sliders, formatting, zero-allocation frames, the headless module) and the profiler (call trees, worker threads, allocation-free profiled frames and reports, export); 34 JIT editor tests covering undo/redo (text and per-entity), dirty tracking, held scenes, play restore, malformed scenes, jobs, picking, collectible reload, UI input and layout, commit-before-click, splitter drags and highlights, border scrollbars, panel rewind, zero-allocation frames, file workflows and terminal output. The opt-in SDL/Vulkan smoke test (`--graphics`, `--terminal-smoke`) and `scripts/terminal-cli-smoke.py` drive the full workflow; all three passed on 2026-11-18 with the new layout, palette, Scene overlay and game UI, and window-only screenshots of the editor and the Spinners player confirmed the overlay and the debug window render. The smoke test also checks that game, editor and GPU time reach the profiler, the panel opens, and the export parses. The benchmarks (see Profiling) gate CI.
+**Validation:** 48 engine tests under JIT and NativeAOT (plus the determinism tests again for x86-64-v3), including the pixel UI (widgets, windows, sliders, formatting, zero-allocation frames, the headless module) and the profiler (call trees, worker threads, allocation-free profiled frames and reports, export); 34 JIT editor tests covering undo/redo (text and per-entity), dirty tracking, held scenes, play restore, malformed scenes, jobs, picking, collectible reload, UI input and layout, commit-before-click, splitter drags and highlights, border scrollbars, panel rewind, zero-allocation frames, file workflows and terminal output. The opt-in SDL/Vulkan smoke test (`--graphics`, `--terminal-smoke`) and `scripts/terminal-cli-smoke.py` drive the full workflow; all three passed on 2026-11-18 with the new layout, palette, Scene overlay and game UI, and window-only screenshots of the editor and the Spinners player confirmed the overlay and the debug window render. The smoke test also checks that game, editor and GPU time reach the profiler, the panel opens, and the export parses. The benchmarks (see Profiling) gate CI.
 
 **Follow-ups:** persistent layouts, floating windows, automatic extension compilation, gamepad/touch/XR bindings, and migration policies for mutable resources across schema changes, a theme file with hot reload, an option to use the terminal's own background, and draggable sidebar section heights.
 

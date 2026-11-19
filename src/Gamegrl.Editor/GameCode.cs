@@ -70,6 +70,7 @@ internal sealed class GameCode : IDisposable
         ContextReference = new WeakReference(_context);
         var assembly = _context.LoadFromAssemblyPath(path);
         _assemblyName = assembly.GetName().Name!;
+        ApplyDeterminism(assembly);
         RuntimeHelpers.RunModuleConstructor(assembly.ManifestModule.ModuleHandle);
         var moduleType = assembly.GetTypes().Single(t => !t.IsAbstract && typeof(IModule).IsAssignableFrom(t));
         var module = (IModule)Activator.CreateInstance(moduleType)!;
@@ -90,6 +91,18 @@ internal sealed class GameCode : IDisposable
             }
         Log.Info("Loaded " + _assemblyName);
     }
+    /// <summary>
+    /// Use the game's determinism mode. It's read once per process (a feature switch), so it applies if nothing has
+    /// read it yet, which holds until game code first runs; a change after that needs an editor restart.
+    /// </summary>
+    private static void ApplyDeterminism(Assembly assembly)
+    {
+        bool crossPlatform = assembly.GetCustomAttribute<GamegrlDeterminismAttribute>()?.CrossPlatform ?? false;
+        AppContext.SetSwitch(Determinism.Switch, crossPlatform);
+        if (Determinism.CrossPlatform != crossPlatform)
+            Log.Warn($"The game now asks for {(crossPlatform ? "CrossPlatform" : "Local")} determinism; restart the editor to apply it (running {Determinism.Mode}).");
+    }
+
     public void Start(App app)
     {
         if (_started || _registration is null) return;

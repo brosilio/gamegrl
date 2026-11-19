@@ -4,4 +4,23 @@
     <ProjectReference Include="$(MSBuildThisFileDirectory)src/Gamegrl.Generators/Gamegrl.Generators.csproj"
                       OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <!--
+    Simulation determinism (docs/DESIGN.md, "Simulation determinism"): set GamegrlDeterminism to Local (default) or
+    CrossPlatform in a game's projects, ideally once in the game folder's Directory.Build.props so the game library,
+    player and tools agree. It becomes a runtime feature switch (NativeAOT trims the unused math path) and, on game
+    assemblies, an attribute the editor reads when it loads the game.
+  -->
+  <PropertyGroup>
+    <GamegrlDeterminism Condition="'$(GamegrlDeterminism)' == ''">Local</GamegrlDeterminism>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(MSBuildProjectName)' != 'Gamegrl.Generators'">
+    <RuntimeHostConfigurationOption Include="Gamegrl.Determinism.CrossPlatform"
+                                    Value="$([System.String]::Equals('$(GamegrlDeterminism)', 'CrossPlatform'))" Trim="true" />
+  </ItemGroup>
+  <ItemGroup Condition="!$(MSBuildProjectName.StartsWith('Gamegrl.'))">
+    <AssemblyAttribute Include="Gamegrl.GamegrlDeterminismAttribute">
+      <_Parameter1>$(GamegrlDeterminism)</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
 </Project>

@@ -75,17 +75,46 @@ public static class DesktopHost
     {
         var ctx = app.World.Resource<PlatformContext>();
         var input = app.World.Resource<Input>();
-        while (!app.QuitRequested)
+        // GAMEGRL_RECORD=session.ggin records input and time steps; GAMEGRL_REPLAY=session.ggin replays them (the
+        // window's own events are ignored, and the run ends with the recording).
+        string? recordPath = Environment.GetEnvironmentVariable("GAMEGRL_RECORD");
+        string? replayPath = Environment.GetEnvironmentVariable("GAMEGRL_REPLAY");
+        InputRecording? replay = replayPath is { Length: > 0 } ? LoadRecording(replayPath) : null;
+        InputRecording? record = replay is null && recordPath is { Length: > 0 } ? new InputRecording() : null;
+        input.Recording = record;
+        var discard = replay is null ? null : new Input();
+        long last = System.Diagnostics.Stopwatch.GetTimestamp();
+        for (int frame = 0; !app.QuitRequested; frame++)
         {
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            double dt = System.Diagnostics.Stopwatch.GetElapsedTime(last, now).TotalSeconds;
+            last = now;
+            if (replay is not null)
+            {
+                if (frame >= replay.FrameCount) break;
+                dt = replay.Delta(frame);
+            }
+            // A frame starts before its events are pumped, so they're recorded against the frame that sees them.
+            record?.BeginFrame(dt);
             input.BeginFrame();
-            using (PumpMarker.Scope()) ctx.Platform.PumpEvents(input);
-            if (ctx.Platform.QuitRequested || ctx.MainWindow.CloseRequested) break;
-            if (ctx.MainWindow.Minimized)
+            using (PumpMarker.Scope())
+            {
+                if (replay is null) ctx.Platform.PumpEvents(input);
+                else { discard!.BeginFrame(); ctx.Platform.PumpEvents(discard); replay.Apply(frame, input); }
+            }
+            if (ctx.Platform.QuitRequested || ctx.MainWindow.CloseRequested) { record?.DiscardLastFrame(); break; }
+            // Every recorded frame must tick, so recording and replay don't idle while minimized.
+            if (ctx.MainWindow.Minimized && record is null && replay is null)
             {
                 Thread.Sleep(16);
                 continue;
             }
-            app.Tick();
+            app.Tick(dt);
+        }
+        if (record is not null)
+        {
+            using (var file = File.Create(recordPath!)) record.Save(file);
+            Console.WriteLine($"gamegrl: recorded {record.FrameCount} frames of input to {recordPath}");
         }
         // GAMEGRL_PROFILE=1 GAMEGRL_PROFILE_OUT=trace.json profiles a player run (NativeAOT included) for Perfetto.
         if (Profiler.Enabled && Environment.GetEnvironmentVariable("GAMEGRL_PROFILE_OUT") is { Length: > 0 } path)
@@ -94,5 +123,11 @@ public static class DesktopHost
             using (var writer = new StreamWriter(path)) ProfileTree.WriteChromeTrace(writer, oldest, (int)(Profiler.FrameCount - oldest));
             Console.WriteLine($"gamegrl: profile of the last {Profiler.FrameCount - oldest} frames written to {path}");
         }
+    }
+
+    private static InputRecording LoadRecording(string path)
+    {
+        using var file = File.OpenRead(path);
+        return InputRecording.Load(file);
     }
 }
