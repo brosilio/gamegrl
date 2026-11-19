@@ -129,17 +129,9 @@ internal sealed class Physics2DStep : ISystem
 
     private void Sync(World world, PhysicsWorld2D physics)
     {
-        // Bodies whose owner is gone or changed.
-        for (int b = 0; b < physics.BodyCapacity; b++)
-        {
-            if (!physics.IsAlive(b)) continue;
-            var e = physics.EntityOf(b);
-            bool valid = physics.IsImplicit(b)
-                ? world.IsAlive(e) && world.Has<Collider2D>(e) && !world.Has<RigidBody2D>(e) && physics.IsShapeAlive(world.Get<Collider2D>(e).Handle - 1)
-                  && physics.BodyOfShape(world.Get<Collider2D>(e).Handle - 1) == b
-                : world.IsAlive(e) && world.Has<RigidBody2D>(e) && world.Get<RigidBody2D>(e).Handle == b + 1;
-            if (!valid) physics.DestroyBody(b);
-        }
+        // Everything the passes below visit gets this step's stamp; whatever is left unstamped lost its entity or its
+        // component, and goes at the end. No per-object lookups into the world.
+        int stamp = ++_stamp;
 
         // Bodies: create, settings, velocities set by gameplay, teleports.
         foreach (var a in _bodies.Archetypes)
@@ -161,6 +153,7 @@ internal sealed class Physics2DStep : ISystem
                     physics.SetTransform(b, position, rotation);
                     physics.Written[b] = position; physics.WrittenRotation[b] = rotation;
                 }
+                Stamp(ref _bodyStamps, b, stamp);
                 physics.SetType(b, rb.Type);
                 physics.SetDamping(b, rb.LinearDamping, rb.AngularDamping, rb.GravityScale);
                 physics.SetFixedRotation(b, rb.FixedRotation);
@@ -174,6 +167,8 @@ internal sealed class Physics2DStep : ISystem
         {
             var colliders = a.GetSpan<Collider2D>(); var transforms = a.GetSpan<LocalTransform>();
             var entities = a.Entities;
+            // Colliders beside their own body (the common case) read its handle from the same archetype.
+            var ownBodies = a.Has<RigidBody2D>() ? a.GetSpan<RigidBody2D>() : default;
             for (int r = 0; r < colliders.Length; r++)
             {
                 ref var collider = ref colliders[r];
@@ -181,7 +176,7 @@ internal sealed class Physics2DStep : ISystem
                 int s = collider.Handle - 1;
                 int body = -1;
                 var offset = Vector2.Zero; var turn = Rot.Identity;
-                if (world.Has<RigidBody2D>(e)) body = world.Get<RigidBody2D>(e).Handle - 1;
+                if (!ownBodies.IsEmpty) body = ownBodies[r].Handle - 1;
                 else
                 {
                     // Walk up, accumulating the collider's pose relative to the body.
@@ -189,7 +184,12 @@ internal sealed class Physics2DStep : ISystem
                     offset = p; turn = q;
                     for (var parent = world.HasParent(e) ? world.GetParent(e) : default; !parent.IsNull; parent = world.HasParent(parent) ? world.GetParent(parent) : default)
                     {
-                        if (world.Has<RigidBody2D>(parent)) { body = world.Get<RigidBody2D>(parent).Handle - 1; break; }
+                        if (world.Has<RigidBody2D>(parent))
+                        {
+                            body = world.Get<RigidBody2D>(parent).Handle - 1;
+                            if (!physics.IsAlive(body) || physics.EntityOf(body) != parent) body = -2; // appears next step
+                            break;
+                        }
                         if (!world.Has<LocalTransform>(parent)) continue;
                         var (pp, pq) = Pose(world.Get<LocalTransform>(parent));
                         offset = pp + pq.Rotate(offset);
@@ -208,10 +208,11 @@ internal sealed class Physics2DStep : ISystem
                             }
                         }
                         else body = physics.CreateBody(e, BodyType.Static, offset, turn, isImplicit: true);
+                        Stamp(ref _bodyStamps, body, stamp);
                         offset = Vector2.Zero; turn = Rot.Identity;
                     }
                 }
-                if (!physics.IsAlive(body)) continue; // its body appears next step
+                if (body < 0 || !physics.IsAlive(body)) continue; // its body appears next step
                 var source = new ShapeSource { Collider = collider with { Handle = 0 }, Offset = offset, Turn = turn };
                 if (physics.IsShapeAlive(s) && physics.EntityOfShape(s) == e && physics.BodyOfShape(s) == body)
                 {
@@ -220,20 +221,15 @@ internal sealed class Physics2DStep : ISystem
                         physics.UpdateShape(s, Build(source), collider.Density, collider.Friction, collider.Restitution, collider.IsSensor, collider.Filter);
                         physics.Sources[s] = source;
                     }
+                    Stamp(ref _shapeStamps, s, stamp);
                     continue;
                 }
                 if (physics.IsShapeAlive(s) && physics.EntityOfShape(s) == e) physics.DestroyShape(s); // moved to another body
                 s = physics.CreateShape(body, e, Build(source), collider.Density, collider.Friction, collider.Restitution, collider.IsSensor, collider.Filter);
                 physics.Sources[s] = source;
                 collider.Handle = s + 1;
+                Stamp(ref _shapeStamps, s, stamp);
             }
-        }
-        // Shapes whose collider is gone.
-        for (int s = 0; s < physics.ShapeCapacity; s++)
-        {
-            if (!physics.IsShapeAlive(s)) continue;
-            var e = physics.EntityOfShape(s);
-            if (!world.IsAlive(e) || !world.Has<Collider2D>(e) || world.Get<Collider2D>(e).Handle != s + 1) physics.DestroyShape(s);
         }
 
         // Joints.
@@ -250,19 +246,33 @@ internal sealed class Physics2DStep : ISystem
                 if (physics.IsJointAlive(j) && physics.OwnerOfJoint(j) == entities[r])
                 {
                     var (ja, jb) = physics.JointBodies(j);
-                    if (valid && jb == bodyB && (ja == bodyA || joint.Def.Type == JointType2D.Target)) { physics.UpdateJoint(j, joint.Def); continue; }
+                    if (valid && jb == bodyB && (ja == bodyA || joint.Def.Type == JointType2D.Target)) { physics.UpdateJoint(j, joint.Def); Stamp(ref _jointStamps, j, stamp); continue; }
                     physics.DestroyJoint(j);
                 }
                 joint.Handle = valid ? physics.CreateJoint(entities[r], bodyA, bodyB, joint.Def) + 1 : 0;
+                if (valid) Stamp(ref _jointStamps, joint.Handle - 1, stamp);
             }
         }
+
+        // What nothing visited: joints, then shapes, then bodies (a body takes its remaining shapes and joints with it).
         for (int j = 0; j < physics.JointCapacity; j++)
-        {
-            if (!physics.IsJointAlive(j)) continue;
-            var e = physics.OwnerOfJoint(j);
-            if (!world.IsAlive(e) || !world.Has<Joint2D>(e) || world.Get<Joint2D>(e).Handle != j + 1) physics.DestroyJoint(j);
-        }
+            if (physics.IsJointAlive(j) && Stamped(_jointStamps, j) != stamp) physics.DestroyJoint(j);
+        for (int s = 0; s < physics.ShapeCapacity; s++)
+            if (physics.IsShapeAlive(s) && Stamped(_shapeStamps, s) != stamp) physics.DestroyShape(s);
+        for (int b = 0; b < physics.BodyCapacity; b++)
+            if (physics.IsAlive(b) && Stamped(_bodyStamps, b) != stamp) physics.DestroyBody(b);
     }
+
+    private int _stamp;
+    private int[] _bodyStamps = [], _shapeStamps = [], _jointStamps = [];
+
+    private static void Stamp(ref int[] stamps, int index, int stamp)
+    {
+        if (index >= stamps.Length) Array.Resize(ref stamps, Math.Max(64, (index + 1) * 2));
+        stamps[index] = stamp;
+    }
+
+    private static int Stamped(int[] stamps, int index) => index < stamps.Length ? stamps[index] : 0;
 
     private static int BodyOf(World world, PhysicsWorld2D physics, Entity e)
     {

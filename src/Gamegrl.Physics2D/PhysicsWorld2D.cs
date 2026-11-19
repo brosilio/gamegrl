@@ -110,8 +110,8 @@ public sealed partial class PhysicsWorld2D
     // ---------------------------------------------------------------- contacts
     internal Contact[] Contacts = new Contact[64];
     internal int ContactCount;
-    private Dictionary<ulong, int> _pairs = new();
-    private HashSet<ulong> _noCollide = new();
+    private Dictionary<ulong, int> _pairs = new(PairComparer.Instance);
+    private HashSet<ulong> _noCollide = new(PairComparer.Instance);
 
     // ---------------------------------------------------------------- events (valid until the next step)
     private ContactEvent2D[] _begins = new ContactEvent2D[16], _ends = new ContactEvent2D[16], _sensorBegins = new ContactEvent2D[16], _sensorEnds = new ContactEvent2D[16];
@@ -653,33 +653,30 @@ public sealed partial class PhysicsWorld2D
         return p;
     }
 
-    /// <summary>Compact the contact list in place (order kept), dropping destroyed contacts.</summary>
+    /// <summary>
+    /// Drop destroyed contacts by moving the last contact into each hole, walking backwards (so whatever moves in has
+    /// already been looked at). Each removal touches one dictionary entry, not every contact after it.
+    /// </summary>
     private void RemoveDestroyedContacts(bool emitEvents)
     {
-        int write = 0;
-        for (int c = 0; c < ContactCount; c++)
+        for (int c = ContactCount - 1; c >= 0; c--)
         {
             ref var contact = ref Contacts[c];
-            ulong key = (ulong)(uint)contact.ShapeA << 32 | (uint)contact.ShapeB;
-            if ((contact.Flags & ContactFlags.Destroy) != 0)
+            if ((contact.Flags & ContactFlags.Destroy) == 0) continue;
+            if (emitEvents && (contact.Flags & ContactFlags.Touching) != 0)
             {
-                if (emitEvents && (contact.Flags & ContactFlags.Touching) != 0)
-                {
-                    var e = (contact.Flags & ContactFlags.Sensor) != 0 ? SensorEvent(contact) : new ContactEvent2D { A = ShapeEntity[contact.ShapeA], B = ShapeEntity[contact.ShapeB] };
-                    if ((contact.Flags & ContactFlags.Sensor) != 0) Push(ref _sensorEnds, ref _sensorEndCount, e);
-                    else Push(ref _ends, ref _endCount, e);
-                }
-                _pairs.Remove(key);
-                continue;
+                var e = (contact.Flags & ContactFlags.Sensor) != 0 ? SensorEvent(contact) : new ContactEvent2D { A = ShapeEntity[contact.ShapeA], B = ShapeEntity[contact.ShapeB] };
+                if ((contact.Flags & ContactFlags.Sensor) != 0) Push(ref _sensorEnds, ref _sensorEndCount, e);
+                else Push(ref _ends, ref _endCount, e);
             }
-            if (write != c)
+            _pairs.Remove((ulong)(uint)contact.ShapeA << 32 | (uint)contact.ShapeB);
+            int last = --ContactCount;
+            if (c != last)
             {
-                Contacts[write] = contact;
-                _pairs[key] = write;
+                Contacts[c] = Contacts[last];
+                _pairs[(ulong)(uint)Contacts[c].ShapeA << 32 | (uint)Contacts[c].ShapeB] = c;
             }
-            write++;
         }
-        ContactCount = write;
     }
 
     // ---------------------------------------------------------------- queries
@@ -761,10 +758,21 @@ public sealed partial class PhysicsWorld2D
         w.Density = C(Density); w.Friction = C(Friction); w.Restitution = C(Restitution); w.Sensor = C(Sensor); w.ShapeAlive = C(ShapeAlive);
         w.InStaticTree = C(InStaticTree); w.Moved = C(Moved); w.Filters = C(Filters); w.ShapeEntity = C(ShapeEntity); w.Fat = C(Fat); w.Sources = C(Sources); w._needsMove = new bool[_needsMove.Length]; w._swept = new Aabb[_swept.Length];
         w._staticTree = _staticTree.Clone(); w._movingTree = _movingTree.Clone(); w._moveBuffer = C(_moveBuffer); w._newPairs = C(_newPairs);
-        w.Contacts = C(Contacts); w._pairs = new Dictionary<ulong, int>(_pairs); w._noCollide = new HashSet<ulong>(_noCollide);
+        w.Contacts = C(Contacts); w._pairs = new Dictionary<ulong, int>(_pairs, PairComparer.Instance); w._noCollide = new HashSet<ulong>(_noCollide, PairComparer.Instance);
         w._begins = C(_begins); w._ends = C(_ends); w._sensorBegins = C(_sensorBegins); w._sensorEnds = C(_sensorEnds); w._boxResults = new Entity[_boxResults.Length];
         CloneSolver(w);
         CloneJoints(w);
         return w;
     }
+}
+
+/// <summary>
+/// Hashes pair keys (two indices packed in a ulong). ulong's own hash XORs the halves, so neighbouring pairs, which have
+/// near-equal indices, collide; a multiplicative mix spreads them.
+/// </summary>
+internal sealed class PairComparer : IEqualityComparer<ulong>
+{
+    public static readonly PairComparer Instance = new();
+    public bool Equals(ulong a, ulong b) => a == b;
+    public int GetHashCode(ulong key) => (int)((key * 0x9E3779B97F4A7C15UL) >> 32);
 }
