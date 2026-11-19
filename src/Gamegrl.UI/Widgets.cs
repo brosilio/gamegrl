@@ -143,18 +143,21 @@ public sealed partial class Ui
     {
         uint id = Id(label, "#slider");
         Behavior(r, id, out bool hovered, out bool held);
+        // The value gets a fixed column right of the track, so it never covers the knob and the track doesn't jitter.
+        float column = MathF.Ceiling(Font.Measure("-00.00")) + Theme.Spacing;
+        var bar = r with { W = MathF.Max(1, r.W - column) };
         bool changed = false;
         if (held && max > min)
         {
-            float v = Math.Clamp(min + (Mouse.X - r.X) / MathF.Max(1, r.W) * (max - min), min, max);
+            float v = Math.Clamp(min + (Mouse.X - bar.X) / bar.W * (max - min), min, max);
             changed = v != value;
             value = v;
         }
         float t = max > min ? Math.Clamp((value - min) / (max - min), 0, 1) : 0;
-        var track = new Rect(r.X, MathF.Round(r.Center.Y) - 1, r.W, 2);
+        var track = new Rect(bar.X + 3, MathF.Round(r.Center.Y) - 1, bar.W - 6, 2);
         Target.Rect(track, Theme.Border);
-        Target.Rect(track with { W = MathF.Round(r.W * t) }, Theme.Accent);
-        var knob = new Rect(MathF.Round(r.X + r.W * t) - 3, r.Y + 4, 6, r.H - 8);
+        Target.Rect(track with { W = MathF.Round(track.W * t) }, Theme.Accent);
+        var knob = new Rect(MathF.Round(track.X + track.W * t) - 3, r.Y + 4, 6, r.H - 8);
         Target.Rect(knob, held || hovered ? Theme.Accent : Theme.Text);
         Span<char> text = stackalloc char[32];
         int length = FormatNumber(text, value);

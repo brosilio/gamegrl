@@ -11,9 +11,17 @@ using Gamegrl.Rendering;
 using Gamegrl.Rhi.Vulkan;
 using Key = Gamegrl.Platform.Key;
 
-string root = Path.GetFullPath(args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0] : "samples/Spinners");
+// Positional arguments are whatever isn't an option or an option's value.
+string[] valued = ["--columns", "--rows", "--colors", "--seconds", "--title", "--extension"];
+var positional = new List<string>();
+for (int i = 0; i < args.Length; i++)
+{
+    if (!args[i].StartsWith("--", StringComparison.Ordinal)) positional.Add(args[i]);
+    else if (Array.IndexOf(valued, args[i]) >= 0) i++;
+}
+string root = Path.GetFullPath(positional.Count > 0 ? positional[0] : "samples/Spinners");
 string? Option(string name) { int index = Array.IndexOf(args, name); return index >= 0 && index + 1 < args.Length ? args[index + 1] : null; }
-string project = Path.GetFullPath(args.Length > 1 && !args[1].StartsWith("--", StringComparison.Ordinal) ? args[1] : Path.Combine(root, "Game", Path.GetFileName(root) + ".Game.csproj"));
+string project = Path.GetFullPath(positional.Count > 1 ? positional[1] : Path.Combine(root, "Game", Path.GetFileName(root) + ".Game.csproj"));
 int secondsAt = Array.IndexOf(args, "--seconds");
 double seconds = secondsAt >= 0 ? double.Parse(args[secondsAt + 1], CultureInfo.InvariantCulture) : 0;
 bool terminalMode = args.Contains("--terminal") || args.Contains("--stdio");

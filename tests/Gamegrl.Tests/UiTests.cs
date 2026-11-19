@@ -101,8 +101,10 @@ internal static class UiTests
                 ui.Slider(track, "speed", ref speed, 0, 4);
                 ui.End();
             }
-            input.OnMouseMove(new Vector2(50, 10), Vector2.Zero); input.OnMouseButton(0, true); Frame();
-            Assert.Equal(2f, speed);
+            // The value column on the right isn't part of the track, so the track's middle is left of x = 50.
+            float trackMiddle = (100 - (MathF.Ceiling(ui.Font.Measure("-00.00")) + ui.Theme.Spacing)) / 2;
+            input.OnMouseMove(new Vector2(trackMiddle, 10), Vector2.Zero); input.OnMouseButton(0, true); Frame();
+            Assert.True(MathF.Abs(speed - 2) < 0.001f, $"the track's middle is half way, got {speed}");
             input.BeginFrame(); input.OnMouseMove(new Vector2(500, 10), new Vector2(450, 0)); Frame();
             Assert.Equal(4f, speed);
             ui.Begin(input, new Vector2(400, 300), 1);

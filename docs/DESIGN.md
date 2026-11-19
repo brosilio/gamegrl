@@ -451,7 +451,7 @@ The editor (`src/Gamegrl.Editor`) is a JIT host that takes a project root and a 
 | Recovery | On terminal EOF or hangup, dirty scenes are copied to `Library/recovery`; the "File: Recover disconnected scene" command reopens the newest copy |
 | Efficiency | Steady-state frames allocate nothing (tested). Clicks and drags never serialize the scene |
 
-**Validation:** 40 engine tests under JIT and NativeAOT, including the pixel UI (widgets, windows, sliders, formatting, zero-allocation frames, the headless module); 34 JIT editor tests covering undo/redo (text and per-entity), dirty tracking, held scenes, play restore, malformed scenes, jobs, picking, collectible reload, UI input and layout, commit-before-click, splitter drags and highlights, border scrollbars, panel rewind, zero-allocation frames, file workflows and terminal output. The opt-in SDL/Vulkan smoke test (`--graphics`, `--terminal-smoke`) and `scripts/terminal-cli-smoke.py` drive the full workflow; they were updated for the new layout, palette, Scene overlay and game UI but have not been re-run since the incident under Open questions.
+**Validation:** 40 engine tests under JIT and NativeAOT, including the pixel UI (widgets, windows, sliders, formatting, zero-allocation frames, the headless module); 34 JIT editor tests covering undo/redo (text and per-entity), dirty tracking, held scenes, play restore, malformed scenes, jobs, picking, collectible reload, UI input and layout, commit-before-click, splitter drags and highlights, border scrollbars, panel rewind, zero-allocation frames, file workflows and terminal output. The opt-in SDL/Vulkan smoke test (`--graphics`, `--terminal-smoke`) and `scripts/terminal-cli-smoke.py` drive the full workflow; all three passed on 2026-11-18 with the new layout, palette, Scene overlay and game UI, and window-only screenshots of the editor and the Spinners player confirmed the overlay and the debug window render.
 
 **Follow-ups:** persistent layouts, floating windows, automatic extension compilation, gamepad/touch/XR bindings, and migration policies for mutable resources across schema changes, a theme file with hot reload, an option to use the terminal's own background, and draggable sidebar section heights.
 
@@ -502,7 +502,7 @@ The editor (`src/Gamegrl.Editor`) is a JIT host that takes a project root and a 
 
 | Question | Notes |
 | --- | --- |
-| What logged the user out at about 05:46 on 2026-11-16? | It happened after the desktop and headless smoke tests passed. Coredumps show KDE portal and Plasma crashes, with an X11 I/O failure in Plasma's stack. Kernel GPU and OOM logs aren't readable from this account, so the cause is unconfirmed. Graphics smoke tests are paused until it's understood; checking `journalctl -k` and `dmesg` as root is the next step |
+| What logged the user out at about 05:46 on 2026-11-16? | It happened after the desktop and headless smoke tests passed. Coredumps show KDE portal and Plasma crashes, with an X11 I/O failure in Plasma's stack. Kernel GPU and OOM logs aren't readable from this account, so the cause is unconfirmed. On 2026-11-18 all three smoke tests, the editor and the player ran again without a recurrence, so the tests are no longer paused. If it happens again, check `journalctl -k` and `dmesg` as root |
 
 ## Resolved questions
 
