@@ -14,18 +14,26 @@ public struct PhysicsSettings2D
     /// <summary>Contact stiffness, capped at a quarter of the substep rate.</summary>
     public float ContactHertz;
     public float ContactDampingRatio;
+    /// <summary>Joint stiffness for rigid joints, and its damping.</summary>
+    public float JointHertz, JointDampingRatio;
     /// <summary>The fastest overlapping bodies are pushed apart, in m/s.</summary>
     public float MaxPushout;
     /// <summary>Approach speed below which collisions don't bounce, in m/s.</summary>
     public float RestitutionThreshold;
+    /// <summary>Let bodies at rest sleep (cost nothing until something touches them).</summary>
+    public bool EnableSleep;
+    /// <summary>How long an island must stay below the sleep speeds before it sleeps, in seconds.</summary>
+    public float TimeToSleep;
+    public float LinearSleepSpeed, AngularSleepSpeed;
 
     public static PhysicsSettings2D Default => new()
     {
-        Gravity = new Vector2(0, -10), Substeps = 4, ContactHertz = 30, ContactDampingRatio = 10, MaxPushout = 3, RestitutionThreshold = 1,
+        Gravity = new Vector2(0, -10), Substeps = 4, ContactHertz = 30, ContactDampingRatio = 10, JointHertz = 60, JointDampingRatio = 2,
+        MaxPushout = 3, RestitutionThreshold = 1, EnableSleep = true, TimeToSleep = 0.5f, LinearSleepSpeed = 0.05f, AngularSleepSpeed = 2 * SimMath.Pi / 180,
     };
 }
 
-/// <summary>A ray hit: the entity, the point, the surface normal and the fraction of the ray travelled.</summary>
+/// <summary>A ray hit: the collider's entity, the point, the surface normal and the fraction of the ray travelled.</summary>
 public struct RayHit2D
 {
     public Entity Entity;
@@ -33,439 +41,708 @@ public struct RayHit2D
     public float Fraction;
 }
 
-/// <summary>
-/// The 2D physics state: bodies in struct-of-arrays storage keyed by dense indices, a sort-and-sweep broadphase, cached
-/// contacts for warm starting, and a soft-step solver (substeps with soft contacts, relaxation, restitution; after
-/// Box2D v3). Single-threaded and deterministic: the same steps give the same bits, on every platform under
-/// <c>CrossPlatform</c>. Allocation-free once its arrays have grown. Copyable for snapshots (<see cref="Clone"/>).
-/// </summary>
-public sealed class PhysicsWorld2D
+/// <summary>Two colliders started or stopped touching (or overlapping, for a sensor and a visitor).</summary>
+public struct ContactEvent2D
 {
-    // ---------------------------------------------------------------- bodies (struct of arrays)
-    private int _capacity, _count;           // _count = high-water mark of indices
-    private int[] _free = new int[16];
-    private int _freeCount;
-    internal Entity[] Entities = [];
-    internal BodyType[] Types = [];
-    internal bool[] Alive = [];
-    internal Vector2[] Positions = [], Velocities = [], DeltaPositions = [], Written = [];
-    internal Rot[] Rotations = [], StartRotations = [], WrittenRotations = [];
-    internal float[] AngularVelocities = [], InvMass = [], InvInertia = [], GravityScale = [], LinearDamping = [], AngularDamping = [];
-    internal float[] Friction = [], Restitution = [];
-    internal Shape[] Shapes = [];
-    internal Aabb[] Bounds = [];
+    /// <summary>The colliders' entities; for sensor events, A is the sensor.</summary>
+    public Entity A, B;
+    /// <summary>For begin-touch events: a contact point, the normal from A to B, and the approach speed along it.</summary>
+    public Vector2 Point, Normal;
+    public float Speed;
+}
 
-    // ---------------------------------------------------------------- broadphase and contacts
-    private int[] _sorted = [];
-    private int _sortedCount;
-    private Contact[] _contacts = new Contact[64];
-    private int _contactCount;
-    private Dictionary<ulong, int> _cache = new(), _nextCache = new();
-    private CachedImpulse[] _cached = new CachedImpulse[64], _nextCached = new CachedImpulse[64];
-    private int _cachedCount, _nextCachedCount;
+/// <summary>A filter for what collides: two colliders collide when each one's category is in the other's mask.</summary>
+public struct Filter2D
+{
+    public uint Category, Mask;
+    public static Filter2D Default => new() { Category = 1, Mask = uint.MaxValue };
+    public readonly bool Accepts(in Filter2D other) => (Category & other.Mask) != 0 && (other.Category & Mask) != 0;
+}
+
+/// <summary>
+/// The 2D physics state. Bodies and shapes in struct-of-arrays storage keyed by dense indices; a body has any number
+/// of shapes. Shapes live in two dynamic AABB trees (static, and moving) with fat boxes; contacts persist while fat
+/// boxes overlap and keep their impulses between steps (warm starting). Each step: update the broadphase, collide every
+/// awake contact (in parallel), wake and sleep islands, colour the contact graph and solve it with a soft-step solver
+/// (substeps with soft contacts, relaxation, restitution; after Box2D v3), each colour in parallel. Deterministic: the
+/// same steps give the same bits whatever the thread count, and on every platform under <c>CrossPlatform</c>.
+/// Allocation-free once grown. <see cref="Clone"/> copies it for snapshots and rollback.
+/// </summary>
+public sealed partial class PhysicsWorld2D
+{
+    internal const float LinearSlop = 0.005f, Speculative = 4 * LinearSlop, AabbMargin = 0.1f;
+
+    // ---------------------------------------------------------------- bodies (struct of arrays)
+    private int _bodyCapacity, _bodyHigh;
+    private int[] _freeBodies = new int[16];
+    private int _freeBodyCount;
+    internal Entity[] BodyEntity = [];
+    internal BodyType[] Types = [];
+    internal bool[] BodyAlive = [], Awake = [], AllowSleep = [], FixedRotationOf = [], Implicit = [];
+    internal float[] SleepTime = [];
+    internal Vector2[] Center = [], LocalCenter = [], Velocity = [];
+    internal Rot[] Rotation = [];
+    internal float[] AngularVelocityOf = [], InvMass = [], InvInertia = [], Mass = [], GravityScale = [], LinearDamping = [], AngularDamping = [];
+    internal int[] FirstShape = [];
+    internal Vector2[] Written = [];
+    internal Rot[] WrittenRotation = [];
+    internal bool[] MassDirty = [];
+
+    // ---------------------------------------------------------------- shapes
+    private int _shapeCapacity, _shapeHigh;
+    private int[] _freeShapes = new int[16];
+    private int _freeShapeCount;
+    internal int[] ShapeBody = [], NextShape = [], Proxy = [];
+    internal Shape[] Geometry = [];
+    internal float[] Density = [], Friction = [], Restitution = [];
+    internal bool[] Sensor = [], ShapeAlive = [], InStaticTree = [], Moved = [];
+    internal Filter2D[] Filters = [];
+    internal Entity[] ShapeEntity = [];
+    internal Aabb[] Fat = [];
+    internal ShapeSource[] Sources = [];
+
+    private DynamicTree _staticTree = new(), _movingTree = new();
+    private int[] _moveBuffer = new int[64];
+    private int _moveCount;
+    private ulong[] _newPairs = new ulong[64];
+    private int _newPairCount;
+
+    // ---------------------------------------------------------------- contacts
+    internal Contact[] Contacts = new Contact[64];
+    internal int ContactCount;
+    private Dictionary<ulong, int> _pairs = new();
+    private HashSet<ulong> _noCollide = new();
+
+    // ---------------------------------------------------------------- events (valid until the next step)
+    private ContactEvent2D[] _begins = new ContactEvent2D[16], _ends = new ContactEvent2D[16], _sensorBegins = new ContactEvent2D[16], _sensorEnds = new ContactEvent2D[16];
+    private int _beginCount, _endCount, _sensorBeginCount, _sensorEndCount;
+    public ReadOnlySpan<ContactEvent2D> ContactBegins => _begins.AsSpan(0, _beginCount);
+    public ReadOnlySpan<ContactEvent2D> ContactEnds => _ends.AsSpan(0, _endCount);
+    public ReadOnlySpan<ContactEvent2D> SensorBegins => _sensorBegins.AsSpan(0, _sensorBeginCount);
+    public ReadOnlySpan<ContactEvent2D> SensorEnds => _sensorEnds.AsSpan(0, _sensorEndCount);
 
     public PhysicsSettings2D Settings = PhysicsSettings2D.Default;
-    public int BodyCount => _count - _freeCount;
-    public int ContactCount => _contactCount;
+    /// <summary>Worker threads for the narrowphase and solver; null runs single-threaded (same results either way).</summary>
+    public JobScheduler? Jobs;
+    /// <summary>The most threads the solver uses (0: as many as the work warrants, up to every worker).</summary>
+    public int MaxThreads;
+    /// <summary>Colours the last step's contact graph used, and constraints that fit none (solved serially).</summary>
+    public int ColorsUsed { get; private set; }
+    public int OverflowConstraints { get; private set; }
 
-    private struct CachedImpulse { public ushort Id0, Id1; public float Normal0, Tangent0, Normal1, Tangent1; }
+    public int BodyCount => _bodyHigh - _freeBodyCount;
+    public int ShapeCount => _shapeHigh - _freeShapeCount;
+    public int ContactTotal => ContactCount;
+    public int BodyCapacity => _bodyHigh;
+    public int ShapeCapacity => _shapeHigh;
+    /// <summary>Shapes whose fat boxes moved in the last step (each queried the trees for new pairs).</summary>
+    public int MovedProxies { get; private set; }
+    public int PairCandidates { get; private set; }
+    public int AwakeBodyCount { get { int n = 0; for (int i = 0; i < _bodyHigh; i++) if (BodyAlive[i] && Awake[i] && Types[i] != BodyType.Static) n++; return n; } }
+    /// <summary>Contacts that are touching and solved this step.</summary>
+    public int TouchingCount { get; private set; }
 
-    private struct ContactPoint
+    [Flags]
+    internal enum ContactFlags : byte { Touching = 1, Sensor = 2, Destroy = 4, Began = 8, Ended = 16 }
+
+    internal struct ContactPoint
     {
-        public Vector2 AnchorA, AnchorB;
-        public float AdjustedSeparation, NormalImpulse, TangentImpulse, MaxNormalImpulse, NormalMass, TangentMass, RelativeVelocity;
+        public Vector2 AnchorA, AnchorB; // relative to each body's center of mass
+        public float Separation, NormalImpulse, TangentImpulse;
         public ushort Id;
     }
 
-    private struct Contact
+    internal struct Contact
     {
-        public int A, B;
+        public int ShapeA, ShapeB, BodyA, BodyB;
+        public ContactFlags Flags;
         public Vector2 Normal;
         public float Friction, Restitution;
         public int Count;
         public ContactPoint P0, P1;
     }
 
-    // ---------------------------------------------------------------- body management
+    // ---------------------------------------------------------------- bodies
 
-    public int CreateBody(Entity entity, BodyType type, in Shape shape, float density, float friction, float restitution, Vector2 position, Rot rotation)
+    public int CreateBody(Entity entity, BodyType type, Vector2 position, Rot rotation, bool isImplicit = false)
     {
-        int i;
-        if (_freeCount > 0) i = _free[--_freeCount];
+        int b;
+        if (_freeBodyCount > 0) b = _freeBodies[--_freeBodyCount];
         else
         {
-            if (_count == _capacity) Grow(Math.Max(64, _capacity * 2));
-            i = _count++;
+            if (_bodyHigh == _bodyCapacity) GrowBodies(Math.Max(64, _bodyCapacity * 2));
+            b = _bodyHigh++;
         }
-        Entities[i] = entity; Types[i] = type; Alive[i] = true;
-        Positions[i] = position; Rotations[i] = rotation; Velocities[i] = default; AngularVelocities[i] = 0;
-        Written[i] = position; WrittenRotations[i] = rotation;
-        Shapes[i] = shape; Friction[i] = friction; Restitution[i] = restitution;
-        GravityScale[i] = 1; LinearDamping[i] = 0; AngularDamping[i] = 0;
-        SetMass(i, density);
-        _sorted[_sortedCount++] = i;
-        return i;
+        BodyEntity[b] = entity; Types[b] = type; BodyAlive[b] = true; Awake[b] = true; AllowSleep[b] = true; FixedRotationOf[b] = false; Implicit[b] = isImplicit;
+        SleepTime[b] = 0; Center[b] = position; LocalCenter[b] = default; Rotation[b] = rotation; Velocity[b] = default; AngularVelocityOf[b] = 0;
+        GravityScale[b] = 1; LinearDamping[b] = 0; AngularDamping[b] = 0; FirstShape[b] = -1; MassDirty[b] = true;
+        Written[b] = position; WrittenRotation[b] = rotation;
+        UpdateMass(b);
+        return b;
     }
 
-    public void DestroyBody(int body)
+    public void DestroyBody(int b)
     {
-        if (!Alive[body]) return;
-        Alive[body] = false;
-        Entities[body] = default;
-        if (_freeCount == _free.Length) Array.Resize(ref _free, _free.Length * 2);
-        _free[_freeCount++] = body;
-        int k = Array.IndexOf(_sorted, body, 0, _sortedCount);
-        Array.Copy(_sorted, k + 1, _sorted, k, _sortedCount - k - 1);
-        _sortedCount--;
+        if (!IsAlive(b)) return;
+        WakeTouching(b);
+        while (FirstShape[b] >= 0) DestroyShape(FirstShape[b]);
+        RemoveJointsOf(b);
+        BodyAlive[b] = false;
+        BodyEntity[b] = default;
+        if (_freeBodyCount == _freeBodies.Length) Array.Resize(ref _freeBodies, _freeBodies.Length * 2);
+        _freeBodies[_freeBodyCount++] = b;
     }
 
-    public bool IsAlive(int body) => (uint)body < (uint)_count && Alive[body];
-    public Entity EntityOf(int body) => Entities[body];
+    public bool IsAlive(int b) => (uint)b < (uint)_bodyHigh && BodyAlive[b];
+    public Entity EntityOf(int b) => BodyEntity[b];
+    public BodyType TypeOf(int b) => Types[b];
+    public bool IsImplicit(int b) => Implicit[b];
+    public bool IsAwake(int b) => Awake[b];
 
-    public void SetMass(int body, float density)
+    /// <summary>The body's origin (where its shapes are defined), not its center of mass.</summary>
+    public Vector2 GetPosition(int b) => Center[b] - Rotation[b].Rotate(LocalCenter[b]);
+    public Rot GetRotation(int b) => Rotation[b];
+    public Vector2 GetCenterOfMass(int b) => Center[b];
+
+    /// <summary>Move a body (a teleport): wakes it, and moves its shapes' boxes.</summary>
+    public void SetTransform(int b, Vector2 origin, Rot rotation)
     {
-        if (Types[body] != BodyType.Dynamic) { InvMass[body] = 0; InvInertia[body] = 0; return; }
-        var (mass, inertia, center) = Shapes[body].MassData(Math.Max(density, 1e-6f));
-        // Bodies rotate about their origin; inertia about the origin includes the offset of the mass.
-        InvMass[body] = 1 / mass;
-        InvInertia[body] = inertia > 0 ? 1 / inertia : 0;
+        Rotation[b] = rotation;
+        Center[b] = origin + rotation.Rotate(LocalCenter[b]);
+        for (int s = FirstShape[b]; s >= 0; s = NextShape[s]) RefreshProxy(s, 0, force: true);
+        Wake(b);
     }
 
-    public void SetType(int body, BodyType type, float density) { Types[body] = type; SetMass(body, density); }
-    public void SetShape(int body, in Shape shape, float density) { Shapes[body] = shape; SetMass(body, density); }
-    public void FixRotation(int body) => InvInertia[body] = 0;
-    public ref Vector2 Position(int body) => ref Positions[body];
-    public ref Rot Rotation(int body) => ref Rotations[body];
-    public ref Vector2 Velocity(int body) => ref Velocities[body];
-    public ref float AngularVelocity(int body) => ref AngularVelocities[body];
-    public ref float GravityScaleOf(int body) => ref GravityScale[body];
-    public ref float LinearDampingOf(int body) => ref LinearDamping[body];
-    public ref float AngularDampingOf(int body) => ref AngularDamping[body];
-    public ref float FrictionOf(int body) => ref Friction[body];
-    public ref float RestitutionOf(int body) => ref Restitution[body];
-    public BodyType TypeOf(int body) => Types[body];
-    /// <summary>The pose last written to the entity's transform (as it reads back), to tell a teleport from our own write.</summary>
-    public ref Vector2 WrittenPosition(int body) => ref Written[body];
-    public ref Rot WrittenRotation(int body) => ref WrittenRotations[body];
-
-    private void Grow(int capacity)
+    public Vector2 GetVelocity(int b) => Velocity[b];
+    public float GetAngularVelocity(int b) => AngularVelocityOf[b];
+    public void SetVelocity(int b, Vector2 v, float w)
     {
-        Array.Resize(ref Entities, capacity); Array.Resize(ref Types, capacity); Array.Resize(ref Alive, capacity);
-        Array.Resize(ref Positions, capacity); Array.Resize(ref Velocities, capacity); Array.Resize(ref DeltaPositions, capacity); Array.Resize(ref Written, capacity);
-        Array.Resize(ref Rotations, capacity); Array.Resize(ref StartRotations, capacity); Array.Resize(ref WrittenRotations, capacity);
-        Array.Resize(ref AngularVelocities, capacity); Array.Resize(ref InvMass, capacity); Array.Resize(ref InvInertia, capacity);
-        Array.Resize(ref GravityScale, capacity); Array.Resize(ref LinearDamping, capacity); Array.Resize(ref AngularDamping, capacity);
-        Array.Resize(ref Friction, capacity); Array.Resize(ref Restitution, capacity);
-        Array.Resize(ref Shapes, capacity); Array.Resize(ref Bounds, capacity); Array.Resize(ref _sorted, capacity);
-        _capacity = capacity;
+        if (Types[b] == BodyType.Static) return;
+        if (FixedRotationOf[b]) w = 0;
+        if (v != Velocity[b] || w != AngularVelocityOf[b])
+        {
+            Velocity[b] = v; AngularVelocityOf[b] = w;
+            if (v != default || w != 0) Wake(b);
+        }
+    }
+
+    public void SetType(int b, BodyType type)
+    {
+        if (Types[b] == type) return;
+        Types[b] = type;
+        if (type == BodyType.Static) { Velocity[b] = default; AngularVelocityOf[b] = 0; }
+        // Shapes change trees (static bodies' shapes live in the static tree).
+        for (int s = FirstShape[b]; s >= 0; s = NextShape[s]) { DestroyProxy(s); CreateProxy(s); }
+        MassDirty[b] = true;
+        Wake(b);
+    }
+
+    public void SetDamping(int b, float linear, float angular, float gravityScale) { LinearDamping[b] = linear; AngularDamping[b] = angular; GravityScale[b] = gravityScale; }
+    public void SetFixedRotation(int b, bool fixedRotation) { if (FixedRotationOf[b] != fixedRotation) { FixedRotationOf[b] = fixedRotation; MassDirty[b] = true; } }
+    public void SetAllowSleep(int b, bool allow) { AllowSleep[b] = allow; if (!allow) Wake(b); }
+
+    /// <summary>Wake a body and everything touching it.</summary>
+    public void Wake(int b)
+    {
+        if (!IsAlive(b) || Types[b] == BodyType.Static) return;
+        SleepTime[b] = 0;
+        Awake[b] = true;
+    }
+
+    private void WakeTouching(int b)
+    {
+        for (int c = 0; c < ContactCount; c++)
+        {
+            ref var contact = ref Contacts[c];
+            if ((contact.Flags & ContactFlags.Touching) == 0) continue;
+            if (contact.BodyA == b) Wake(contact.BodyB);
+            else if (contact.BodyB == b) Wake(contact.BodyA);
+        }
+    }
+
+    /// <summary>Recompute mass, center of mass and inertia from the body's shapes (keeps the origin in place).</summary>
+    internal void UpdateMass(int b)
+    {
+        MassDirty[b] = false;
+        var origin = GetPosition(b);
+        if (Types[b] != BodyType.Dynamic)
+        {
+            InvMass[b] = 0; InvInertia[b] = 0; Mass[b] = 0; LocalCenter[b] = default;
+            Center[b] = origin;
+            return;
+        }
+        float mass = 0, inertia = 0;
+        var center = Vector2.Zero;
+        for (int s = FirstShape[b]; s >= 0; s = NextShape[s])
+        {
+            if (Sensor[s] || Density[s] <= 0) continue;
+            var (m, i, c) = Geometry[s].MassData(Density[s]);
+            mass += m; inertia += i; center += m * c;
+        }
+        if (mass > 0)
+        {
+            center /= mass;
+            inertia -= mass * SimMath.Dot(center, center); // about the center of mass
+        }
+        else { mass = 1; inertia = 0; }
+        Mass[b] = mass;
+        InvMass[b] = 1 / mass;
+        InvInertia[b] = inertia > 0 && !FixedRotationOf[b] ? 1 / inertia : 0;
+        LocalCenter[b] = center;
+        Center[b] = origin + Rotation[b].Rotate(center);
+    }
+
+    private void GrowBodies(int capacity)
+    {
+        Array.Resize(ref BodyEntity, capacity); Array.Resize(ref Types, capacity); Array.Resize(ref BodyAlive, capacity); Array.Resize(ref Awake, capacity);
+        Array.Resize(ref AllowSleep, capacity); Array.Resize(ref FixedRotationOf, capacity); Array.Resize(ref Implicit, capacity); Array.Resize(ref SleepTime, capacity);
+        Array.Resize(ref Center, capacity); Array.Resize(ref LocalCenter, capacity); Array.Resize(ref Velocity, capacity); Array.Resize(ref Rotation, capacity);
+        Array.Resize(ref AngularVelocityOf, capacity); Array.Resize(ref InvMass, capacity); Array.Resize(ref InvInertia, capacity); Array.Resize(ref Mass, capacity);
+        Array.Resize(ref GravityScale, capacity); Array.Resize(ref LinearDamping, capacity); Array.Resize(ref AngularDamping, capacity); Array.Resize(ref FirstShape, capacity);
+        Array.Resize(ref Written, capacity); Array.Resize(ref WrittenRotation, capacity); Array.Resize(ref MassDirty, capacity);
+        GrowSolver(capacity);
+        _bodyCapacity = capacity;
+    }
+
+    // ---------------------------------------------------------------- shapes
+
+    public int CreateShape(int body, Entity entity, in Shape shape, float density, float friction, float restitution, bool sensor = false, Filter2D? filter = null)
+    {
+        int s;
+        if (_freeShapeCount > 0) s = _freeShapes[--_freeShapeCount];
+        else
+        {
+            if (_shapeHigh == _shapeCapacity) GrowShapes(Math.Max(64, _shapeCapacity * 2));
+            s = _shapeHigh++;
+        }
+        ShapeBody[s] = body; ShapeEntity[s] = entity; Geometry[s] = shape; Density[s] = density; Friction[s] = friction; Restitution[s] = restitution;
+        Sensor[s] = sensor; Filters[s] = filter ?? Filter2D.Default; ShapeAlive[s] = true; Moved[s] = false;
+        NextShape[s] = FirstShape[body];
+        FirstShape[body] = s;
+        CreateProxy(s);
+        MassDirty[body] = true;
+        Wake(body);
+        return s;
+    }
+
+    public void DestroyShape(int s)
+    {
+        if (!ShapeAlive[s]) return;
+        int b = ShapeBody[s];
+        // Contacts of this shape end now.
+        for (int c = 0; c < ContactCount; c++)
+            if (Contacts[c].ShapeA == s || Contacts[c].ShapeB == s) Contacts[c].Flags |= ContactFlags.Destroy;
+        RemoveDestroyedContacts(emitEvents: true);
+        DestroyProxy(s);
+        if (FirstShape[b] == s) FirstShape[b] = NextShape[s];
+        else
+            for (int k = FirstShape[b]; k >= 0; k = NextShape[k])
+                if (NextShape[k] == s) { NextShape[k] = NextShape[s]; break; }
+        ShapeAlive[s] = false;
+        MassDirty[b] = true;
+        if (_freeShapeCount == _freeShapes.Length) Array.Resize(ref _freeShapes, _freeShapes.Length * 2);
+        _freeShapes[_freeShapeCount++] = s;
+    }
+
+    public bool IsShapeAlive(int s) => (uint)s < (uint)_shapeHigh && ShapeAlive[s];
+    public int BodyOfShape(int s) => ShapeBody[s];
+    public Entity EntityOfShape(int s) => ShapeEntity[s];
+
+    /// <summary>Change a shape's geometry and material (the body's mass is recomputed before the next step).</summary>
+    public void UpdateShape(int s, in Shape shape, float density, float friction, float restitution, bool sensor, Filter2D filter)
+    {
+        Geometry[s] = shape; Density[s] = density; Friction[s] = friction; Restitution[s] = restitution; Filters[s] = filter;
+        if (Sensor[s] != sensor)
+        {
+            Sensor[s] = sensor;
+            for (int c = 0; c < ContactCount; c++) if (Contacts[c].ShapeA == s || Contacts[c].ShapeB == s) Contacts[c].Flags |= ContactFlags.Destroy;
+            RemoveDestroyedContacts(emitEvents: true);
+        }
+        MassDirty[ShapeBody[s]] = true;
+        RefreshProxy(s, 0, force: true);
+        Wake(ShapeBody[s]);
+    }
+
+    private void GrowShapes(int capacity)
+    {
+        Array.Resize(ref ShapeBody, capacity); Array.Resize(ref NextShape, capacity); Array.Resize(ref Proxy, capacity); Array.Resize(ref Geometry, capacity);
+        Array.Resize(ref Density, capacity); Array.Resize(ref Friction, capacity); Array.Resize(ref Restitution, capacity); Array.Resize(ref Sensor, capacity);
+        Array.Resize(ref ShapeAlive, capacity); Array.Resize(ref InStaticTree, capacity); Array.Resize(ref Moved, capacity); Array.Resize(ref Filters, capacity);
+        Array.Resize(ref ShapeEntity, capacity); Array.Resize(ref Fat, capacity); Array.Resize(ref Sources, capacity);
+        _shapeCapacity = capacity;
+    }
+
+    private Aabb ShapeBox(int s)
+    {
+        int b = ShapeBody[s];
+        return Geometry[s].Bounds(GetPosition(b), Rotation[b]);
+    }
+
+    private void CreateProxy(int s)
+    {
+        int b = ShapeBody[s];
+        var box = ShapeBox(s);
+        box.Min -= new Vector2(AabbMargin); box.Max += new Vector2(AabbMargin);
+        Fat[s] = box;
+        InStaticTree[s] = Types[b] == BodyType.Static;
+        Proxy[s] = (InStaticTree[s] ? _staticTree : _movingTree).Create(box, s);
+        QueueMove(s);
+    }
+
+    private void DestroyProxy(int s) => (InStaticTree[s] ? _staticTree : _movingTree).Destroy(Proxy[s]);
+
+    private void QueueMove(int s)
+    {
+        if (Moved[s]) return;
+        Moved[s] = true;
+        if (_moveCount == _moveBuffer.Length) Array.Resize(ref _moveBuffer, _moveBuffer.Length * 2);
+        _moveBuffer[_moveCount++] = s;
+    }
+
+    private bool[] _needsMove = [];
+    private Aabb[] _swept = [];
+
+    /// <summary>The swept box of a shape, and whether it left its fat box (no tree changes: safe in parallel).</summary>
+    private void Sweep(int s, float dt)
+    {
+        var box = ShapeBox(s);
+        var reach = Velocity[ShapeBody[s]] * dt;
+        box.Min = Vector2.Min(box.Min, box.Min + reach);
+        box.Max = Vector2.Max(box.Max, box.Max + reach);
+        ref readonly var fat = ref Fat[s];
+        _swept[s] = box;
+        _needsMove[s] = !(fat.Min.X <= box.Min.X && fat.Min.Y <= box.Min.Y && fat.Max.X >= box.Max.X && fat.Max.Y >= box.Max.Y);
+    }
+
+    private struct SweepJob : IJobFor
+    {
+        public PhysicsWorld2D World;
+        public float Dt;
+        public readonly void Execute(int start, int end)
+        {
+            var w = World;
+            for (int b = start; b < end; b++)
+            {
+                if (!w.BodyAlive[b] || !w.Awake[b] || w.Types[b] == BodyType.Static) continue;
+                for (int s = w.FirstShape[b]; s >= 0; s = w.NextShape[s]) w.Sweep(s, Dt);
+            }
+        }
+    }
+
+    /// <summary>Re-fit a shape's fat box if it left it (or always, when forced), grown along the body's motion this step.</summary>
+    private void RefreshProxy(int s, float dt, bool force)
+    {
+        // The box swept through this step's motion: a fast body's pairs must exist before it gets there.
+        var box = ShapeBox(s);
+        var reach = Velocity[ShapeBody[s]] * dt;
+        box.Min = Vector2.Min(box.Min, box.Min + reach);
+        box.Max = Vector2.Max(box.Max, box.Max + reach);
+        ref var fat = ref Fat[s];
+        if (!force && fat.Min.X <= box.Min.X && fat.Min.Y <= box.Min.Y && fat.Max.X >= box.Max.X && fat.Max.Y >= box.Max.Y) return;
+        box.Min -= new Vector2(AabbMargin);
+        box.Max += new Vector2(AabbMargin);
+        fat = box;
+        (InStaticTree[s] ? _staticTree : _movingTree).Move(Proxy[s], box);
+        QueueMove(s);
     }
 
     // ---------------------------------------------------------------- step
 
-    private static readonly ProfileMarker BroadMarker = ProfileMarker.Get("Physics2D.Broadphase", ProfileCategory.Engine);
-    private static readonly ProfileMarker NarrowMarker = ProfileMarker.Get("Physics2D.Narrowphase", ProfileCategory.Engine);
+    private static readonly ProfileMarker PairsMarker = ProfileMarker.Get("Physics2D.Broadphase", ProfileCategory.Engine);
+    private static readonly ProfileMarker CollideMarker = ProfileMarker.Get("Physics2D.Narrowphase", ProfileCategory.Engine);
+    private static readonly ProfileMarker IslandMarker = ProfileMarker.Get("Physics2D.Islands", ProfileCategory.Engine);
     private static readonly ProfileMarker SolveMarker = ProfileMarker.Get("Physics2D.Solve", ProfileCategory.Engine);
 
     /// <summary>Advance by <paramref name="dt"/> seconds.</summary>
     public void Step(float dt)
     {
         if (dt <= 0) return;
-        using (BroadMarker.Scope()) Broadphase(dt);
+        _beginCount = _endCount = _sensorBeginCount = _sensorEndCount = 0;
+        for (int b = 0; b < _bodyHigh; b++) if (BodyAlive[b] && MassDirty[b]) UpdateMass(b);
+        using (PairsMarker.Scope()) UpdatePairs(dt);
+        using (CollideMarker.Scope()) Collide(dt);
+        using (IslandMarker.Scope()) BuildIslands();
         using (SolveMarker.Scope()) Solve(dt);
+        using (IslandMarker.Scope()) UpdateSleep(dt);
     }
 
-    /// <summary>Sort by min x (insertion sort: nearly sorted from the last step), sweep, and collide overlapping pairs.</summary>
-    private void Broadphase(float dt)
+    private struct PairQuery : ITreeQuery
     {
-        for (int k = 0; k < _sortedCount; k++)
+        public PhysicsWorld2D World;
+        public int Shape;
+        public bool Hit(int proxy, int other) { World.ConsiderPair(Shape, other); return true; }
+    }
+
+    /// <summary>Fat boxes of moving shapes, then new pairs for every moved shape, created in sorted order.</summary>
+    private void UpdatePairs(float dt)
+    {
+        // Boxes in parallel; the few that left their fat boxes move in the trees serially, in shape order.
+        if (_needsMove.Length < _shapeCapacity) { _needsMove = new bool[_shapeCapacity]; _swept = new Aabb[_shapeCapacity]; }
+        var sweep = new SweepJob { World = this, Dt = dt };
+        if (Jobs is { } jobs) jobs.ParallelFor(_bodyHigh, 256, ref sweep); else sweep.Execute(0, _bodyHigh);
+        for (int b = 0; b < _bodyHigh; b++)
         {
-            int i = _sorted[k];
-            var b = Shapes[i].Bounds(Positions[i], Rotations[i]);
-            // Grow by the motion this step, so speculative contacts find fast bodies before they pass through.
-            var reach = Velocities[i] * dt;
-            b.Min = Vector2.Min(b.Min, b.Min + reach) - new Vector2(Margin);
-            b.Max = Vector2.Max(b.Max, b.Max + reach) + new Vector2(Margin);
-            Bounds[i] = b;
-        }
-        for (int k = 1; k < _sortedCount; k++)
-        {
-            int i = _sorted[k], j = k - 1;
-            float x = Bounds[i].Min.X;
-            while (j >= 0 && (Bounds[_sorted[j]].Min.X > x || (Bounds[_sorted[j]].Min.X == x && _sorted[j] > i))) { _sorted[j + 1] = _sorted[j]; j--; }
-            _sorted[j + 1] = i;
-        }
-        (_cache, _nextCache) = (_nextCache, _cache);
-        (_cached, _nextCached) = (_nextCached, _cached);
-        _cachedCount = _nextCachedCount;
-        _nextCache.Clear();
-        _nextCachedCount = 0;
-        _contactCount = 0;
-        using var narrow = NarrowMarker.Scope();
-        for (int k = 0; k < _sortedCount; k++)
-        {
-            int a = _sorted[k];
-            ref readonly var ba = ref Bounds[a];
-            for (int l = k + 1; l < _sortedCount; l++)
+            if (!BodyAlive[b] || !Awake[b] || Types[b] == BodyType.Static) continue;
+            for (int s = FirstShape[b]; s >= 0; s = NextShape[s])
             {
-                int b = _sorted[l];
-                ref readonly var bb = ref Bounds[b];
-                if (bb.Min.X > ba.Max.X) break;
-                if (bb.Min.Y > ba.Max.Y || ba.Min.Y > bb.Max.Y) continue;
-                if (Types[a] != BodyType.Dynamic && Types[b] != BodyType.Dynamic) continue;
-                // A pair is always ordered by index, so its key and its contact are the same whichever sorted first.
-                int lo = Math.Min(a, b), hi = Math.Max(a, b);
-                float margin = Speculative + SimMath.Length(Velocities[lo] - Velocities[hi]) * dt;
-                Collision.Collide(Shapes[lo], Positions[lo], Rotations[lo], Shapes[hi], Positions[hi], Rotations[hi], margin, out var m);
-                if (m.Count == 0) continue;
-                AddContact(lo, hi, m);
+                if (!_needsMove[s]) continue;
+                var box = _swept[s];
+                box.Min -= new Vector2(AabbMargin);
+                box.Max += new Vector2(AabbMargin);
+                Fat[s] = box;
+                (InStaticTree[s] ? _staticTree : _movingTree).Move(Proxy[s], box);
+                QueueMove(s);
             }
         }
-    }
-
-    private const float LinearSlop = 0.005f, Speculative = 4 * LinearSlop, Margin = 0.1f;
-
-    private void AddContact(int a, int b, in Manifold m)
-    {
-        if (_contactCount == _contacts.Length) Array.Resize(ref _contacts, _contacts.Length * 2);
-        ref var c = ref _contacts[_contactCount++];
-        c = new Contact { A = a, B = b, Normal = m.Normal, Count = m.Count };
-        c.Friction = SimMath.Sqrt(Friction[a] * Friction[b]);
-        c.Restitution = Math.Max(Restitution[a], Restitution[b]);
-        c.P0 = new ContactPoint { AnchorA = m.P0.AnchorA, AnchorB = m.P0.AnchorB, AdjustedSeparation = m.P0.Separation, Id = m.P0.Id };
-        c.P1 = new ContactPoint { AnchorA = m.P1.AnchorA, AnchorB = m.P1.AnchorB, AdjustedSeparation = m.P1.Separation, Id = m.P1.Id };
-        // Warm start from last step's impulses for the same features.
-        ulong key = (ulong)(uint)a << 32 | (uint)b;
-        if (_cache.TryGetValue(key, out int slot))
+        MovedProxies = _moveCount;
+        // Queries in shape order, so pairs are found and created the same way every run.
+        Sort.Heap(_moveBuffer.AsSpan(0, _moveCount));
+        _newPairCount = 0;
+        var query = new PairQuery { World = this };
+        for (int k = 0; k < _moveCount; k++)
         {
-            ref var old = ref _cached[slot];
-            Match(ref c.P0, old); if (c.Count > 1) Match(ref c.P1, old);
+            int s = _moveBuffer[k];
+            if (!ShapeAlive[s]) continue;
+            query.Shape = s;
+            if (!InStaticTree[s]) _staticTree.Query(Fat[s], ref query);
+            _movingTree.Query(Fat[s], ref query);
+        }
+        for (int k = 0; k < _moveCount; k++) Moved[_moveBuffer[k]] = false;
+        _moveCount = 0;
+        PairCandidates = _newPairCount;
+        var pairs = _newPairs.AsSpan(0, _newPairCount);
+        Sort.Heap(pairs);
+        ulong last = ulong.MaxValue;
+        foreach (ulong key in pairs)
+        {
+            if (key == last) continue;
+            last = key;
+            if (!_pairs.ContainsKey(key)) AddContact((int)(key >> 32), (int)(uint)key);
         }
     }
 
-    private static void Match(ref ContactPoint p, in CachedImpulse old)
+    private void ConsiderPair(int s, int other)
     {
-        if (p.Id == old.Id0) { p.NormalImpulse = old.Normal0; p.TangentImpulse = old.Tangent0; }
-        else if (p.Id == old.Id1) { p.NormalImpulse = old.Normal1; p.TangentImpulse = old.Tangent1; }
+        if (other == s) return;
+        // Both moved: the lower shape's query reports the pair.
+        if (Moved[other] && other < s) return;
+        int a = ShapeBody[s], b = ShapeBody[other];
+        if (a == b) return;
+        if (Types[a] != BodyType.Dynamic && Types[b] != BodyType.Dynamic) return;
+        if (!Filters[s].Accepts(Filters[other])) return;
+        if (_noCollide.Count > 0 && _noCollide.Contains(BodyPairKey(a, b))) return;
+        ulong key = s < other ? (ulong)(uint)s << 32 | (uint)other : (ulong)(uint)other << 32 | (uint)s;
+        if (_newPairCount == _newPairs.Length) Array.Resize(ref _newPairs, _newPairs.Length * 2);
+        _newPairs[_newPairCount++] = key;
     }
 
-    private void Solve(float dt)
+    internal static ulong BodyPairKey(int a, int b) => a < b ? (ulong)(uint)a << 32 | (uint)b : (ulong)(uint)b << 32 | (uint)a;
+
+    private void AddContact(int shapeA, int shapeB)
     {
-        var s = Settings;
-        int substeps = Math.Max(1, s.Substeps);
-        float h = dt / substeps, invH = 1 / h;
-        // Soft contact: a spring of the given stiffness and damping, expressed as bias and mass scales for the substep.
-        float hertz = Math.Min(s.ContactHertz, 0.25f * invH);
-        float omega = 2 * SimMath.Pi * hertz;
-        float a1 = 2 * s.ContactDampingRatio + h * omega, a2 = h * omega * a1, a3 = 1 / (1 + a2);
-        float biasRate = omega / a1, massScale = a2 * a3, impulseScale = a3;
-
-        for (int i = 0; i < _count; i++) { DeltaPositions[i] = default; StartRotations[i] = Rotations[i]; }
-
-        // Prepare: anchors are fixed for the step; separation is tracked through body motion.
-        for (int k = 0; k < _contactCount; k++)
+        if (ContactCount == Contacts.Length) Array.Resize(ref Contacts, Contacts.Length * 2);
+        int c = ContactCount++;
+        Contacts[c] = new Contact
         {
-            ref var c = ref _contacts[k];
-            Prepare(ref c, ref c.P0);
-            if (c.Count > 1) Prepare(ref c, ref c.P1);
-        }
+            ShapeA = shapeA, ShapeB = shapeB, BodyA = ShapeBody[shapeA], BodyB = ShapeBody[shapeB],
+            Flags = Sensor[shapeA] || Sensor[shapeB] ? ContactFlags.Sensor : 0,
+            Friction = SimMath.Sqrt(Friction[shapeA] * Friction[shapeB]),
+            Restitution = Math.Max(Restitution[shapeA], Restitution[shapeB]),
+        };
+        _pairs[(ulong)(uint)shapeA << 32 | (uint)shapeB] = c;
+    }
 
-        for (int sub = 0; sub < substeps; sub++)
+    private struct CollideJob : IJobFor
+    {
+        public PhysicsWorld2D World;
+        public float Dt;
+        public readonly void Execute(int start, int end) { for (int c = start; c < end; c++) World.UpdateContact(c, Dt); }
+    }
+
+    /// <summary>Narrowphase for every contact (in parallel: each writes only itself), then events and removals in contact order.</summary>
+    private void Collide(float dt)
+    {
+        var job = new CollideJob { World = this, Dt = dt };
+        if (Jobs is { } jobs) jobs.ParallelFor(ContactCount, 64, ref job);
+        else job.Execute(0, ContactCount);
+        for (int c = 0; c < ContactCount; c++)
         {
-            for (int i = 0; i < _count; i++)
+            ref var contact = ref Contacts[c];
+            if ((contact.Flags & ContactFlags.Began) != 0)
             {
-                if (!Alive[i] || Types[i] != BodyType.Dynamic) continue;
-                var v = Velocities[i] + h * GravityScale[i] * s.Gravity;
-                Velocities[i] = v / (1 + h * LinearDamping[i]);
-                AngularVelocities[i] /= 1 + h * AngularDamping[i];
+                contact.Flags &= ~ContactFlags.Began;
+                if ((contact.Flags & ContactFlags.Sensor) != 0) Push(ref _sensorBegins, ref _sensorBeginCount, SensorEvent(contact));
+                else
+                {
+                    Push(ref _begins, ref _beginCount, BeginEvent(contact));
+                    // Something awake touched something asleep: wake it.
+                    if (!Awake[contact.BodyA]) Wake(contact.BodyA);
+                    if (!Awake[contact.BodyB]) Wake(contact.BodyB);
+                }
             }
-            for (int k = 0; k < _contactCount; k++) WarmStart(ref _contacts[k]);
-            for (int k = 0; k < _contactCount; k++) SolveContact(ref _contacts[k], invH, true, biasRate, massScale, impulseScale, s.MaxPushout);
-            for (int i = 0; i < _count; i++)
+            if ((contact.Flags & ContactFlags.Ended) != 0)
             {
-                if (!Alive[i] || Types[i] == BodyType.Static) continue;
-                var dp = h * Velocities[i];
-                Positions[i] += dp;
-                DeltaPositions[i] += dp;
-                Rotations[i] = Rot.Integrate(Rotations[i], h * AngularVelocities[i]);
+                contact.Flags &= ~ContactFlags.Ended;
+                if ((contact.Flags & ContactFlags.Sensor) != 0) Push(ref _sensorEnds, ref _sensorEndCount, SensorEvent(contact));
+                else Push(ref _ends, ref _endCount, new ContactEvent2D { A = ShapeEntity[contact.ShapeA], B = ShapeEntity[contact.ShapeB] });
             }
-            for (int k = 0; k < _contactCount; k++) SolveContact(ref _contacts[k], invH, false, biasRate, massScale, impulseScale, s.MaxPushout);
         }
+        RemoveDestroyedContacts(emitEvents: false);
+    }
 
-        for (int k = 0; k < _contactCount; k++) ApplyRestitution(ref _contacts[k], s.RestitutionThreshold);
+    private ContactEvent2D SensorEvent(in Contact c) => Sensor[c.ShapeA]
+        ? new ContactEvent2D { A = ShapeEntity[c.ShapeA], B = ShapeEntity[c.ShapeB] }
+        : new ContactEvent2D { A = ShapeEntity[c.ShapeB], B = ShapeEntity[c.ShapeA] };
 
-        // Keep the impulses for warm starting next step.
-        for (int k = 0; k < _contactCount; k++)
+    private ContactEvent2D BeginEvent(in Contact c)
+    {
+        var p = Center[c.BodyA] + c.P0.AnchorA;
+        var dv = Velocity[c.BodyB] + V.Cross(AngularVelocityOf[c.BodyB], c.P0.AnchorB) - Velocity[c.BodyA] - V.Cross(AngularVelocityOf[c.BodyA], c.P0.AnchorA);
+        return new ContactEvent2D { A = ShapeEntity[c.ShapeA], B = ShapeEntity[c.ShapeB], Point = p, Normal = c.Normal, Speed = -V.Dot(dv, c.Normal) };
+    }
+
+    private static void Push(ref ContactEvent2D[] list, ref int count, in ContactEvent2D e)
+    {
+        if (count == list.Length) Array.Resize(ref list, list.Length * 2);
+        list[count++] = e;
+    }
+
+    /// <summary>One contact's narrowphase: overlap test for sensors, a manifold (keeping matching impulses) otherwise.</summary>
+    internal void UpdateContact(int c, float dt)
+    {
+        ref var contact = ref Contacts[c];
+        int a = contact.BodyA, b = contact.BodyB;
+        bool awakeA = Awake[a] && Types[a] != BodyType.Static, awakeB = Awake[b] && Types[b] != BodyType.Static;
+        if (!awakeA && !awakeB) return; // nothing moved; keep as is
+        if (!Fat[contact.ShapeA].Overlaps(Fat[contact.ShapeB]) || (_noCollide.Count > 0 && _noCollide.Contains(BodyPairKey(a, b))))
         {
-            ref var c = ref _contacts[k];
-            if (_nextCachedCount == _nextCached.Length) Array.Resize(ref _nextCached, _nextCached.Length * 2);
-            _nextCached[_nextCachedCount] = new CachedImpulse
+            if ((contact.Flags & ContactFlags.Touching) != 0) contact.Flags |= ContactFlags.Ended;
+            contact.Flags = (contact.Flags & ~ContactFlags.Touching) | ContactFlags.Destroy;
+            return;
+        }
+        var pa = GetPosition(a); var pb = GetPosition(b);
+        bool sensor = (contact.Flags & ContactFlags.Sensor) != 0;
+        float margin = sensor ? 0 : Speculative + SimMath.Length(Velocity[a] - Velocity[b]) * dt;
+        Collision.Collide(Geometry[contact.ShapeA], pa, Rotation[a], Geometry[contact.ShapeB], pb, Rotation[b], margin, out var m);
+        bool touching;
+        if (sensor)
+        {
+            touching = m.Count > 0 && (m.P0.Separation < 0 || (m.Count > 1 && m.P1.Separation < 0));
+        }
+        else
+        {
+            touching = m.Count > 0;
+            // Anchors relative to the centers of mass; keep impulses of points whose features persist.
+            var ca = Center[a] - pa; var cb = Center[b] - pb;
+            var old0 = contact.P0; var old1 = contact.P1; int oldCount = contact.Count;
+            contact.Normal = m.Normal;
+            contact.Count = m.Count;
+            contact.P0 = Point(m.P0, ca, cb, old0, old1, oldCount);
+            contact.P1 = m.Count > 1 ? Point(m.P1, ca, cb, old0, old1, oldCount) : default;
+        }
+        bool was = (contact.Flags & ContactFlags.Touching) != 0;
+        if (touching && !was) contact.Flags |= ContactFlags.Touching | ContactFlags.Began;
+        else if (!touching && was) contact.Flags = (contact.Flags & ~ContactFlags.Touching) | ContactFlags.Ended;
+    }
+
+    private static ContactPoint Point(in ManifoldPoint mp, Vector2 ca, Vector2 cb, in ContactPoint old0, in ContactPoint old1, int oldCount)
+    {
+        var p = new ContactPoint { AnchorA = mp.AnchorA - ca, AnchorB = mp.AnchorB - cb, Separation = mp.Separation, Id = mp.Id };
+        if (oldCount > 0 && old0.Id == mp.Id) { p.NormalImpulse = old0.NormalImpulse; p.TangentImpulse = old0.TangentImpulse; }
+        else if (oldCount > 1 && old1.Id == mp.Id) { p.NormalImpulse = old1.NormalImpulse; p.TangentImpulse = old1.TangentImpulse; }
+        return p;
+    }
+
+    /// <summary>Compact the contact list in place (order kept), dropping destroyed contacts.</summary>
+    private void RemoveDestroyedContacts(bool emitEvents)
+    {
+        int write = 0;
+        for (int c = 0; c < ContactCount; c++)
+        {
+            ref var contact = ref Contacts[c];
+            ulong key = (ulong)(uint)contact.ShapeA << 32 | (uint)contact.ShapeB;
+            if ((contact.Flags & ContactFlags.Destroy) != 0)
             {
-                Id0 = c.P0.Id, Normal0 = c.P0.NormalImpulse, Tangent0 = c.P0.TangentImpulse,
-                Id1 = c.Count > 1 ? c.P1.Id : (ushort)0xFFFF, Normal1 = c.P1.NormalImpulse, Tangent1 = c.P1.TangentImpulse,
-            };
-            _nextCache[(ulong)(uint)c.A << 32 | (uint)c.B] = _nextCachedCount++;
+                if (emitEvents && (contact.Flags & ContactFlags.Touching) != 0)
+                {
+                    var e = (contact.Flags & ContactFlags.Sensor) != 0 ? SensorEvent(contact) : new ContactEvent2D { A = ShapeEntity[contact.ShapeA], B = ShapeEntity[contact.ShapeB] };
+                    if ((contact.Flags & ContactFlags.Sensor) != 0) Push(ref _sensorEnds, ref _sensorEndCount, e);
+                    else Push(ref _ends, ref _endCount, e);
+                }
+                _pairs.Remove(key);
+                continue;
+            }
+            if (write != c)
+            {
+                Contacts[write] = contact;
+                _pairs[key] = write;
+            }
+            write++;
         }
-    }
-
-    private void Prepare(ref Contact c, ref ContactPoint p)
-    {
-        int a = c.A, b = c.B;
-        float mA = InvMass[a], mB = InvMass[b], iA = InvInertia[a], iB = InvInertia[b];
-        var n = c.Normal; var t = V.RightPerp(n);
-        float rnA = V.Cross(p.AnchorA, n), rnB = V.Cross(p.AnchorB, n);
-        float kNormal = mA + mB + iA * rnA * rnA + iB * rnB * rnB;
-        p.NormalMass = kNormal > 0 ? 1 / kNormal : 0;
-        float rtA = V.Cross(p.AnchorA, t), rtB = V.Cross(p.AnchorB, t);
-        float kTangent = mA + mB + iA * rtA * rtA + iB * rtB * rtB;
-        p.TangentMass = kTangent > 0 ? 1 / kTangent : 0;
-        // Separation now = Δ(pB + rB) − Δ(pA + rA) along n, plus this constant.
-        p.AdjustedSeparation -= V.Dot(p.AnchorB - p.AnchorA, n);
-        var dv = Velocities[b] + V.Cross(AngularVelocities[b], p.AnchorB) - Velocities[a] - V.Cross(AngularVelocities[a], p.AnchorA);
-        p.RelativeVelocity = V.Dot(n, dv);
-        p.MaxNormalImpulse = 0;
-    }
-
-    private void WarmStart(ref Contact c)
-    {
-        var t = V.RightPerp(c.Normal);
-        Apply(ref c, c.P0, c.P0.NormalImpulse * c.Normal + c.P0.TangentImpulse * t);
-        if (c.Count > 1) Apply(ref c, c.P1, c.P1.NormalImpulse * c.Normal + c.P1.TangentImpulse * t);
-    }
-
-    private void Apply(ref Contact c, in ContactPoint p, Vector2 impulse)
-    {
-        int a = c.A, b = c.B;
-        Velocities[a] -= InvMass[a] * impulse; AngularVelocities[a] -= InvInertia[a] * V.Cross(p.AnchorA, impulse);
-        Velocities[b] += InvMass[b] * impulse; AngularVelocities[b] += InvInertia[b] * V.Cross(p.AnchorB, impulse);
-    }
-
-    private void SolveContact(ref Contact c, float invH, bool useBias, float biasRate, float massScale, float impulseScale, float maxPushout)
-    {
-        int a = c.A, b = c.B;
-        var n = c.Normal;
-        var dp = DeltaPositions[b] - DeltaPositions[a];
-        var qA = Rot.InvMul(StartRotations[a], Rotations[a]);
-        var qB = Rot.InvMul(StartRotations[b], Rotations[b]);
-        for (int k = 0; k < c.Count; k++)
-        {
-            ref var p = ref k == 0 ? ref c.P0 : ref c.P1;
-            var d = dp + qB.Rotate(p.AnchorB) - qA.Rotate(p.AnchorA);
-            float separation = V.Dot(d, n) + p.AdjustedSeparation;
-            float bias = 0, ms = 1, isc = 0;
-            if (separation > 0) bias = separation * invH; // speculative: close the gap this substep, no further
-            else if (useBias) { bias = Math.Max(biasRate * separation, -maxPushout); ms = massScale; isc = impulseScale; }
-            var dv = Velocities[b] + V.Cross(AngularVelocities[b], p.AnchorB) - Velocities[a] - V.Cross(AngularVelocities[a], p.AnchorA);
-            float vn = V.Dot(dv, n);
-            float impulse = -p.NormalMass * ms * (vn + bias) - isc * p.NormalImpulse;
-            float total = Math.Max(p.NormalImpulse + impulse, 0);
-            impulse = total - p.NormalImpulse;
-            p.NormalImpulse = total;
-            p.MaxNormalImpulse = Math.Max(p.MaxNormalImpulse, impulse);
-            Apply(ref c, p, impulse * n);
-        }
-        var t = V.RightPerp(n);
-        for (int k = 0; k < c.Count; k++)
-        {
-            ref var p = ref k == 0 ? ref c.P0 : ref c.P1;
-            var dv = Velocities[b] + V.Cross(AngularVelocities[b], p.AnchorB) - Velocities[a] - V.Cross(AngularVelocities[a], p.AnchorA);
-            float vt = V.Dot(dv, t);
-            float impulse = -p.TangentMass * vt;
-            float limit = c.Friction * p.NormalImpulse;
-            float total = Math.Clamp(p.TangentImpulse + impulse, -limit, limit);
-            impulse = total - p.TangentImpulse;
-            p.TangentImpulse = total;
-            Apply(ref c, p, impulse * t);
-        }
-    }
-
-    private void ApplyRestitution(ref Contact c, float threshold)
-    {
-        if (c.Restitution == 0) return;
-        int a = c.A, b = c.B;
-        for (int k = 0; k < c.Count; k++)
-        {
-            ref var p = ref k == 0 ? ref c.P0 : ref c.P1;
-            if (p.RelativeVelocity > -threshold || p.MaxNormalImpulse == 0) continue;
-            var dv = Velocities[b] + V.Cross(AngularVelocities[b], p.AnchorB) - Velocities[a] - V.Cross(AngularVelocities[a], p.AnchorA);
-            float vn = V.Dot(dv, c.Normal);
-            float impulse = -p.NormalMass * (vn + c.Restitution * p.RelativeVelocity);
-            float total = Math.Max(p.NormalImpulse + impulse, 0);
-            impulse = total - p.NormalImpulse;
-            p.NormalImpulse = total;
-            Apply(ref c, p, impulse * c.Normal);
-        }
+        ContactCount = write;
     }
 
     // ---------------------------------------------------------------- queries
 
-    /// <summary>The closest body hit by the segment from <paramref name="origin"/> to <paramref name="origin"/> + <paramref name="translation"/>.</summary>
-    public bool RayCast(Vector2 origin, Vector2 translation, out RayHit2D hit)
+    private struct RayQuery : ITreeQuery
     {
-        hit = default;
-        hit.Fraction = 1;
-        bool found = false;
-        for (int k = 0; k < _sortedCount; k++)
+        public PhysicsWorld2D World;
+        public Vector2 Origin, Translation;
+        public float Fraction;
+        public int Shape;
+        public Vector2 Normal;
+        public uint Mask;
+        public bool Hit(int proxy, int s)
         {
-            int i = _sorted[k];
-            if (RayShape(Shapes[i], Positions[i], Rotations[i], origin, translation, hit.Fraction, out float f, out var normal))
+            if (World.Sensor[s] || (World.Filters[s].Category & Mask) == 0) return true;
+            int b = World.ShapeBody[s];
+            var q = World.Rotation[b]; var p = World.GetPosition(b);
+            if (ShapeRay.Cast(World.Geometry[s], q.InvRotate(Origin - p), q.InvRotate(Translation), Fraction, out float f, out var n) && f < Fraction)
             {
-                found = true;
-                hit = new RayHit2D { Entity = Entities[i], Fraction = f, Point = origin + translation * f, Normal = normal };
+                Fraction = f; Shape = s; Normal = q.Rotate(n);
             }
-        }
-        return found;
-    }
-
-    /// <summary>Entities whose shape bounds overlap the box; writes up to <c>results.Length</c> and returns how many matched.</summary>
-    public int OverlapBox(Vector2 min, Vector2 max, Span<Entity> results)
-    {
-        var box = new Aabb { Min = min, Max = max };
-        int n = 0;
-        for (int k = 0; k < _sortedCount; k++)
-        {
-            int i = _sorted[k];
-            if (!Shapes[i].Bounds(Positions[i], Rotations[i]).Overlaps(box)) continue;
-            if (n < results.Length) results[n] = Entities[i];
-            n++;
-        }
-        return n;
-    }
-
-    private static bool RayShape(in Shape s, Vector2 p, Rot q, Vector2 origin, Vector2 d, float maxFraction, out float fraction, out Vector2 normal)
-    {
-        fraction = 0; normal = default;
-        if (s.Kind == ShapeKind.Circle)
-        {
-            var c = p + q.Rotate(s.Center);
-            var m = origin - c;
-            float a = V.Dot(d, d), b = V.Dot(m, d), cc = V.Dot(m, m) - s.Radius * s.Radius;
-            if (a == 0) return false;
-            float disc = b * b - a * cc;
-            if (disc < 0) return false;
-            float t = (-b - SimMath.Sqrt(disc)) / a;
-            if (t < 0 || t > maxFraction) return false;
-            fraction = t;
-            normal = SimMath.Normalize(m + d * t);
             return true;
         }
-        // Polygon: clip the ray against every face plane (in the polygon's frame).
-        var o = q.InvRotate(origin - p); var dir = q.InvRotate(d);
-        float lower = 0, upper = maxFraction;
-        int index = -1;
-        for (int i = 0; i < s.Count; i++)
-        {
-            var n = s.Normal(i);
-            float numerator = V.Dot(n, s.Vertex(i) - o), denominator = V.Dot(n, dir);
-            if (denominator == 0) { if (numerator < 0) return false; continue; }
-            float t = numerator / denominator;
-            if (denominator < 0 && t > lower) { lower = t; index = i; }
-            else if (denominator > 0 && t < upper) upper = t;
-            if (upper < lower) return false;
-        }
-        if (index < 0) return false;
-        fraction = lower;
-        normal = q.Rotate(s.Normal(index));
+    }
+
+    /// <summary>The closest collider hit by the segment from <paramref name="origin"/> to <paramref name="origin"/> + <paramref name="translation"/>.</summary>
+    public bool RayCast(Vector2 origin, Vector2 translation, out RayHit2D hit, uint mask = uint.MaxValue)
+    {
+        var q = new RayQuery { World = this, Origin = origin, Translation = translation, Fraction = 1, Shape = -1, Mask = mask };
+        _staticTree.RayQuery(origin, translation, 1, ref q);
+        _movingTree.RayQuery(origin, translation, q.Fraction, ref q);
+        hit = default;
+        if (q.Shape < 0) return false;
+        hit = new RayHit2D { Entity = ShapeEntity[q.Shape], Fraction = q.Fraction, Point = origin + translation * q.Fraction, Normal = q.Normal };
         return true;
+    }
+
+    private struct BoxQuery : ITreeQuery
+    {
+        public PhysicsWorld2D World;
+        public Aabb Box;
+        public Entity[] Results;
+        public int Count;
+        public bool Hit(int proxy, int s)
+        {
+            if (!World.ShapeBox(s).Overlaps(Box)) return true;
+            if (Count < Results.Length) Results[Count] = World.ShapeEntity[s];
+            Count++;
+            return true;
+        }
+    }
+
+    private Entity[] _boxResults = new Entity[64];
+
+    /// <summary>Colliders whose bounds overlap the box; writes up to <c>results.Length</c> and returns how many matched.</summary>
+    public int OverlapBox(Vector2 min, Vector2 max, Span<Entity> results)
+    {
+        if (_boxResults.Length < results.Length) _boxResults = new Entity[results.Length];
+        var q = new BoxQuery { World = this, Box = new Aabb { Min = min, Max = max }, Results = _boxResults };
+        _staticTree.Query(q.Box, ref q);
+        _movingTree.Query(q.Box, ref q);
+        _boxResults.AsSpan(0, Math.Min(q.Count, results.Length)).CopyTo(results);
+        return q.Count;
     }
 
     // ---------------------------------------------------------------- snapshots
@@ -474,21 +751,20 @@ public sealed class PhysicsWorld2D
     public PhysicsWorld2D Clone()
     {
         var w = (PhysicsWorld2D)MemberwiseClone();
-        w.Entities = (Entity[])Entities.Clone(); w.Types = (BodyType[])Types.Clone(); w.Alive = (bool[])Alive.Clone();
-        w.Positions = (Vector2[])Positions.Clone(); w.Velocities = (Vector2[])Velocities.Clone(); w.DeltaPositions = (Vector2[])DeltaPositions.Clone();
-        w.Rotations = (Rot[])Rotations.Clone(); w.StartRotations = (Rot[])StartRotations.Clone();
-        w.Written = (Vector2[])Written.Clone(); w.WrittenRotations = (Rot[])WrittenRotations.Clone();
-        w.AngularVelocities = (float[])AngularVelocities.Clone(); w.InvMass = (float[])InvMass.Clone(); w.InvInertia = (float[])InvInertia.Clone();
-        w.GravityScale = (float[])GravityScale.Clone(); w.LinearDamping = (float[])LinearDamping.Clone(); w.AngularDamping = (float[])AngularDamping.Clone();
-        w.Friction = (float[])Friction.Clone(); w.Restitution = (float[])Restitution.Clone();
-        w.Shapes = (Shape[])Shapes.Clone(); w.Bounds = (Aabb[])Bounds.Clone();
-        w._free = (int[])_free.Clone(); w._sorted = (int[])_sorted.Clone();
-        w._contacts = (Contact[])_contacts.Clone();
-        w._cache = new Dictionary<ulong, int>(_cache); w._nextCache = new Dictionary<ulong, int>(_nextCache);
-        w._cached = (CachedImpulse[])_cached.Clone(); w._nextCached = (CachedImpulse[])_nextCached.Clone();
+        static T[] C<T>(T[] a) => (T[])a.Clone();
+        w._freeBodies = C(_freeBodies); w.BodyEntity = C(BodyEntity); w.Types = C(Types); w.BodyAlive = C(BodyAlive); w.Awake = C(Awake);
+        w.AllowSleep = C(AllowSleep); w.FixedRotationOf = C(FixedRotationOf); w.Implicit = C(Implicit); w.SleepTime = C(SleepTime);
+        w.Center = C(Center); w.LocalCenter = C(LocalCenter); w.Velocity = C(Velocity); w.Rotation = C(Rotation); w.AngularVelocityOf = C(AngularVelocityOf);
+        w.InvMass = C(InvMass); w.InvInertia = C(InvInertia); w.Mass = C(Mass); w.GravityScale = C(GravityScale); w.LinearDamping = C(LinearDamping);
+        w.AngularDamping = C(AngularDamping); w.FirstShape = C(FirstShape); w.Written = C(Written); w.WrittenRotation = C(WrittenRotation); w.MassDirty = C(MassDirty);
+        w._freeShapes = C(_freeShapes); w.ShapeBody = C(ShapeBody); w.NextShape = C(NextShape); w.Proxy = C(Proxy); w.Geometry = C(Geometry);
+        w.Density = C(Density); w.Friction = C(Friction); w.Restitution = C(Restitution); w.Sensor = C(Sensor); w.ShapeAlive = C(ShapeAlive);
+        w.InStaticTree = C(InStaticTree); w.Moved = C(Moved); w.Filters = C(Filters); w.ShapeEntity = C(ShapeEntity); w.Fat = C(Fat); w.Sources = C(Sources); w._needsMove = new bool[_needsMove.Length]; w._swept = new Aabb[_swept.Length];
+        w._staticTree = _staticTree.Clone(); w._movingTree = _movingTree.Clone(); w._moveBuffer = C(_moveBuffer); w._newPairs = C(_newPairs);
+        w.Contacts = C(Contacts); w._pairs = new Dictionary<ulong, int>(_pairs); w._noCollide = new HashSet<ulong>(_noCollide);
+        w._begins = C(_begins); w._ends = C(_ends); w._sensorBegins = C(_sensorBegins); w._sensorEnds = C(_sensorEnds); w._boxResults = new Entity[_boxResults.Length];
+        CloneSolver(w);
+        CloneJoints(w);
         return w;
     }
-
-    /// <summary>Bodies, for tools: index, entity, type, position and rotation.</summary>
-    public int BodyCapacity => _count;
 }

@@ -172,27 +172,32 @@ public static class Scenarios
     private static void Body2D(World w, Vector2 p, Collider2D c, RigidBody2D body) =>
         w.Spawn(new LocalTransform { Position = new Vector3(p, 0), Rotation = Quaternion.Identity, Scale = Vector3.One }, new LocalToWorld(), body, c);
 
-    /// <summary>A 30-row pyramid of boxes resting on the ground (465 bodies in contact): solver and contact cost.</summary>
-    public static App Pyramid() => Build(b =>
+    /// <summary>
+    /// A pyramid of boxes resting on the ground, awake (sleep off, so it measures solving, not sleeping): 30 rows is 465
+    /// bodies, 100 rows is 5050.
+    /// </summary>
+    public static App Pyramid(int rows, int workers) => Build(b =>
     {
         b.AddModule(new Physics2DModule());
-        Body2D(b.World, new Vector2(0, -0.5f), Collider2D.Box(new Vector2(200, 1)), RigidBody2D.Static);
-        for (int row = 0; row < 30; row++)
-            for (int i = 0; i < 30 - row; i++)
-                Body2D(b.World, new Vector2((i - (30 - row) / 2f) * 1.05f, 0.5f + row), Collider2D.Box(Vector2.One), RigidBody2D.Default);
-    }, workers: 0);
+        b.World.Resource<PhysicsSettings2D>().EnableSleep = false;
+        Body2D(b.World, new Vector2(0, -0.5f), Collider2D.Box(new Vector2(400, 1)), RigidBody2D.Static);
+        for (int row = 0; row < rows; row++)
+            for (int i = 0; i < rows - row; i++)
+                Body2D(b.World, new Vector2((i - (rows - row) / 2f) * 1.05f, 0.5f + row), Collider2D.Box(Vector2.One), RigidBody2D.Default);
+    }, workers);
 
     /// <summary>2000 circles poured into a bin: broadphase, many contacts, bodies in motion.</summary>
     public static App Rain() => Build(b =>
     {
         b.AddModule(new Physics2DModule());
+        b.World.Resource<PhysicsSettings2D>().EnableSleep = false; // measure the dense pile, not sleeping bodies
         Body2D(b.World, new Vector2(0, -0.5f), Collider2D.Box(new Vector2(40, 1)), RigidBody2D.Static);
         Body2D(b.World, new Vector2(-20.5f, 20), Collider2D.Box(new Vector2(1, 40)), RigidBody2D.Static);
         Body2D(b.World, new Vector2(20.5f, 20), Collider2D.Box(new Vector2(1, 40)), RigidBody2D.Static);
         var r = new SimRandom(3);
         for (int i = 0; i < 2000; i++)
             Body2D(b.World, new Vector2(r.Range(-19f, 19f), 2 + i * 0.05f), Collider2D.Circle(r.Range(0.2f, 0.4f)), RigidBody2D.Default);
-    }, workers: 0);
+    });
 
     /// <summary>10k lit cubes drawn offscreen at 1280×720 through the renderer, with GPU timings.</summary>
     public static App Render() => Build(b =>

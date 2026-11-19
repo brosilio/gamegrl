@@ -28,10 +28,12 @@ public static class SimMath
     public static float Log(float x) => Determinism.CrossPlatform ? Strict.Log(x) : MathF.Log(x);
     public static float Pow(float x, float y) => Determinism.CrossPlatform ? Strict.Pow(x, y) : MathF.Pow(x, y);
 
+    // Scalar in both modes: a fixed order, and faster than Vector2/3.Dot, which compiles to dpps (about 13 cycles of
+    // latency on common x64 cores) against two or three multiplies and adds.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static float Dot(Vector2 a, Vector2 b) => Determinism.CrossPlatform ? a.X * b.X + a.Y * b.Y : Vector2.Dot(a, b);
+    public static float Dot(Vector2 a, Vector2 b) => a.X * b.X + a.Y * b.Y;
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static float Dot(Vector3 a, Vector3 b) => Determinism.CrossPlatform ? (a.X * b.X + a.Y * b.Y) + a.Z * b.Z : Vector3.Dot(a, b);
+    public static float Dot(Vector3 a, Vector3 b) => (a.X * b.X + a.Y * b.Y) + a.Z * b.Z;
     /// <summary>The z of the 3D cross product of (a, 0) and (b, 0).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float Cross(Vector2 a, Vector2 b) => a.X * b.Y - a.Y * b.X;

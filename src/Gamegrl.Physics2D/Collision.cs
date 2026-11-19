@@ -127,8 +127,78 @@ internal static class Collision
         if (sb - radius > margin) return;
         // Prefer A's face unless B's is clearly better, so the choice doesn't flicker between steps.
         bool flip = sb > sa + 0.1f * 0.005f;
+        float coreSeparation = Math.Max(sa, sb);
+        if (coreSeparation > 0.1f * 0.005f)
+        {
+            // The cores are apart: if their closest features are two corners, contact is corner to corner, along the
+            // line between them (a face normal there would catch on the corner). Rounded shapes need this most.
+            if (flip ? CornerContact(b, pb, qb, edgeB, a, pa, qa, radius, margin, true, ref m)
+                     : CornerContact(a, pa, qa, edgeA, b, pb, qb, radius, margin, false, ref m)) return;
+        }
         if (flip) Clip(b, pb, qb, edgeB, a, pa, qa, radius, margin, true, ref m);
         else Clip(a, pa, qa, edgeA, b, pb, qb, radius, margin, false, ref m);
+    }
+
+    /// <summary>
+    /// The closest points between the reference edge and the incident edge; when both sit at segment ends, a single
+    /// corner-to-corner contact (true, done). Otherwise false: clipping handles edge contact.
+    /// </summary>
+    private static bool CornerContact(in Shape refShape, Vector2 pr, Rot qr, int refEdge, in Shape inc, Vector2 pi, Rot qi, float radius, float margin, bool flip, ref Manifold m)
+    {
+        var q = Rot.InvMul(qr, qi);
+        var p = qr.InvRotate(pi - pr);
+        var n = refShape.Normal(refEdge);
+        int incEdge = 0;
+        float minDot = float.MaxValue;
+        for (int i = 0; i < inc.Count; i++)
+        {
+            float d = V.Dot(n, q.Rotate(inc.Normal(i)));
+            if (d < minDot) { minDot = d; incEdge = i; }
+        }
+        int r1 = refEdge, r2 = refEdge + 1 < refShape.Count ? refEdge + 1 : 0;
+        int i1 = incEdge, i2 = incEdge + 1 < inc.Count ? incEdge + 1 : 0;
+        var a1 = refShape.Vertex(r1); var a2 = refShape.Vertex(r2);
+        var b1 = p + q.Rotate(inc.Vertex(i1)); var b2 = p + q.Rotate(inc.Vertex(i2));
+        SegmentDistance(a1, a2, b1, b2, out float f1, out float f2, out var c1, out var c2);
+        bool corner1 = f1 == 0 || f1 == 1, corner2 = f2 == 0 || f2 == 1;
+        if (!corner1 || !corner2) return false;
+        float distance = SimMath.Distance(c1, c2);
+        if (distance - radius > margin) return true; // apart: no contact, and clipping wouldn't add one
+        if (distance < 1e-6f) return false;
+        var normal = (c2 - c1) / distance; // reference to incident
+        var point = pr + qr.Rotate(0.5f * ((c1 + normal * refShape.Radius) + (c2 - normal * inc.Radius)));
+        var worldNormal = qr.Rotate(normal);
+        m.Normal = flip ? -worldNormal : worldNormal;
+        ushort id = (ushort)((f1 == 0 ? r1 : r2) << 8 | (f2 == 0 ? i1 : i2) | 0x2000 | (flip ? 0x4000 : 0));
+        var mp = new ManifoldPoint { Separation = distance - radius, Id = id };
+        if (flip) { mp.AnchorA = point - pi; mp.AnchorB = point - pr; }
+        else { mp.AnchorA = point - pr; mp.AnchorB = point - pi; }
+        m.P0 = mp;
+        m.Count = 1;
+        return true;
+    }
+
+    /// <summary>Closest points between segments p1–q1 and p2–q2 (Ericson), with their parameters clamped to [0, 1].</summary>
+    private static void SegmentDistance(Vector2 p1, Vector2 q1, Vector2 p2, Vector2 q2, out float s, out float t, out Vector2 c1, out Vector2 c2)
+    {
+        var d1 = q1 - p1; var d2 = q2 - p2; var r = p1 - p2;
+        float a = V.Dot(d1, d1), e = V.Dot(d2, d2), f = V.Dot(d2, r);
+        if (a <= 1e-12f && e <= 1e-12f) { s = t = 0; c1 = p1; c2 = p2; return; }
+        if (a <= 1e-12f) { s = 0; t = Math.Clamp(f / e, 0, 1); }
+        else
+        {
+            float c = V.Dot(d1, r);
+            if (e <= 1e-12f) { t = 0; s = Math.Clamp(-c / a, 0, 1); }
+            else
+            {
+                float b = V.Dot(d1, d2), denom = a * e - b * b;
+                s = denom != 0 ? Math.Clamp((b * f - c * e) / denom, 0, 1) : 0;
+                t = (b * s + f) / e;
+                if (t < 0) { t = 0; s = Math.Clamp(-c / a, 0, 1); }
+                else if (t > 1) { t = 1; s = Math.Clamp((b - c) / a, 0, 1); }
+            }
+        }
+        c1 = p1 + d1 * s; c2 = p2 + d2 * t;
     }
 
     /// <summary>Clip the incident face of <paramref name="inc"/> against the reference face of <paramref name="refShape"/>.</summary>

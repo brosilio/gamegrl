@@ -14,7 +14,9 @@ Console.WriteLine($"gamegrl bench · {BenchSuite.Machine} · {BenchSuite.Mode} �
     ("ecs.hierarchy", Scenarios.Hierarchy, false),
     ("ecs.structural", Scenarios.Structural, false),
     ("ui.frame", Scenarios.Interface, false),
-    ("physics2d.pyramid", Scenarios.Pyramid, false),
+    ("physics2d.pyramid.serial", () => Scenarios.Pyramid(30, 0), false),
+    ("physics2d.pyramid", () => Scenarios.Pyramid(30, -1), false),
+    ("physics2d.pyramid100", () => Scenarios.Pyramid(100, -1), false),
     ("physics2d.rain", Scenarios.Rain, false),
     ("render.cubes", Scenarios.Render, true),
 ];

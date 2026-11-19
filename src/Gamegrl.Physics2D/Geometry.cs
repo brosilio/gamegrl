@@ -60,13 +60,24 @@ public struct Aabb
     public readonly bool Overlaps(in Aabb o) => Min.X <= o.Max.X && o.Min.X <= Max.X && Min.Y <= o.Max.Y && o.Min.Y <= Max.Y;
 }
 
+/// <summary>
+/// Plain-comparison min, max and clamp for the hot loops. <see cref="Math.Max(float, float)"/> implements IEEE 754-2019
+/// (NaN and signed-zero cases), which costs branches per call; these are identical for the values physics produces.
+/// </summary>
+internal static class F
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Max(float a, float b) => a > b ? a : b;
+    [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Min(float a, float b) => a < b ? a : b;
+    [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Clamp(float v, float lo, float hi) => v < lo ? lo : v > hi ? hi : v;
+}
+
 internal static class V
 {
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Cross(Vector2 a, Vector2 b) => a.X * b.Y - a.Y * b.X;
     /// <summary>ω × r for a scalar angular velocity.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static Vector2 Cross(float w, Vector2 r) => new(-w * r.Y, w * r.X);
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static Vector2 RightPerp(Vector2 v) => new(v.Y, -v.X);
-    [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Dot(Vector2 a, Vector2 b) => SimMath.Dot(a, b);
+    [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Dot(Vector2 a, Vector2 b) => a.X * b.X + a.Y * b.Y;
 }
 
 /// <summary>A convex collision shape in body space: a circle or a convex polygon of up to <see cref="MaxVertices"/> corners, with an optional rounding radius.</summary>
@@ -86,6 +97,31 @@ public unsafe struct Shape
     public readonly Vector2 Normal(int i) => new(Nx[i], Ny[i]);
 
     public static Shape Circle(float radius, Vector2 center) => new() { Kind = ShapeKind.Circle, Radius = radius, Center = center };
+
+    /// <summary>A capsule: the segment <paramref name="a"/>–<paramref name="b"/> grown by <paramref name="radius"/> (a two-vertex rounded polygon).</summary>
+    public static Shape Capsule(Vector2 a, Vector2 b, float radius)
+    {
+        var axis = b - a;
+        if (SimMath.LengthSquared(axis) < 1e-8f) return Circle(radius, a);
+        var n = SimMath.Normalize(V.RightPerp(axis));
+        var s = new Shape { Kind = ShapeKind.Polygon, Count = 2, Radius = radius, Center = 0.5f * (a + b) };
+        s.Vx[0] = a.X; s.Vy[0] = a.Y; s.Vx[1] = b.X; s.Vy[1] = b.Y;
+        s.Nx[0] = n.X; s.Ny[0] = n.Y; s.Nx[1] = -n.X; s.Ny[1] = -n.Y;
+        return s;
+    }
+
+    /// <summary>This shape moved into a parent body's frame by <paramref name="offset"/> and <paramref name="rotation"/> (compound bodies).</summary>
+    public readonly Shape Transformed(Vector2 offset, Rot rotation)
+    {
+        var s = this;
+        s.Center = offset + rotation.Rotate(Center);
+        for (int i = 0; i < Count; i++)
+        {
+            var v = offset + rotation.Rotate(Vertex(i)); var n = rotation.Rotate(Normal(i));
+            s.Vx[i] = v.X; s.Vy[i] = v.Y; s.Nx[i] = n.X; s.Ny[i] = n.Y;
+        }
+        return s;
+    }
 
     public static Shape Box(Vector2 halfExtents, Vector2 center, Rot rotation)
     {
@@ -123,6 +159,18 @@ public unsafe struct Shape
         {
             float m = density * SimMath.Pi * Radius * Radius;
             return (m, m * (0.5f * Radius * Radius + SimMath.Dot(Center, Center)), Center);
+        }
+        if (Count == 2)
+        {
+            // A capsule: a box plus two half discs (Box2D's formula, parallel-axis shifts included).
+            var p1 = Vertex(0); var p2 = Vertex(1);
+            float rr = Radius * Radius, length = SimMath.Distance(p1, p2), ll = length * length;
+            float circleMass = density * SimMath.Pi * rr, boxMass = density * 2 * Radius * length;
+            float lc = 4 * Radius / (3 * SimMath.Pi), h = 0.5f * length;
+            var mid = 0.5f * (p1 + p2);
+            float inertiaAtCenter = circleMass * (0.5f * rr + h * h + 2 * h * lc) + boxMass * (4 * rr + ll) / 12;
+            float m = circleMass + boxMass;
+            return (m, inertiaAtCenter + m * SimMath.Dot(mid, mid), mid);
         }
         // Triangle fan about the first vertex; inertia about the origin.
         float area = 0, inertia = 0;
@@ -163,3 +211,74 @@ public unsafe struct Shape
 }
 
 public enum ShapeKind : byte { Circle, Polygon }
+
+internal static class ShapeRay
+{
+    /// <summary>
+    /// Where the segment from <paramref name="origin"/> along <paramref name="d"/> first enters the shape (all in the
+    /// shape's frame), up to <paramref name="maxFraction"/>. Rounded polygons and capsules test their corner circles and
+    /// their faces pushed out by the radius.
+    /// </summary>
+    public static bool Cast(in Shape s, Vector2 origin, Vector2 d, float maxFraction, out float fraction, out Vector2 normal)
+    {
+        fraction = maxFraction; normal = default;
+        if (s.Kind == ShapeKind.Circle) return Circle(s.Center, s.Radius, origin, d, ref fraction, ref normal);
+        if (s.Radius > 0)
+        {
+            bool hit = false;
+            for (int i = 0; i < s.Count; i++)
+            {
+                hit |= Circle(s.Vertex(i), s.Radius, origin, d, ref fraction, ref normal);
+                var n = s.Normal(i);
+                var a = s.Vertex(i) + n * s.Radius; var b = s.Vertex(i + 1 < s.Count ? i + 1 : 0) + n * s.Radius;
+                hit |= Segment(a, b, n, origin, d, ref fraction, ref normal);
+            }
+            return hit;
+        }
+        float lower = 0, upper = maxFraction;
+        int index = -1;
+        for (int i = 0; i < s.Count; i++)
+        {
+            var n = s.Normal(i);
+            float numerator = V.Dot(n, s.Vertex(i) - origin), denominator = V.Dot(n, d);
+            if (denominator == 0) { if (numerator < 0) return false; continue; }
+            float t = numerator / denominator;
+            if (denominator < 0 && t > lower) { lower = t; index = i; }
+            else if (denominator > 0 && t < upper) upper = t;
+            if (upper < lower) return false;
+        }
+        if (index < 0) return false;
+        fraction = lower;
+        normal = s.Normal(index);
+        return true;
+    }
+
+    private static bool Circle(Vector2 center, float radius, Vector2 origin, Vector2 d, ref float fraction, ref Vector2 normal)
+    {
+        var m = origin - center;
+        float a = V.Dot(d, d), b = V.Dot(m, d), c = V.Dot(m, m) - radius * radius;
+        if (a == 0) return false;
+        float disc = b * b - a * c;
+        if (disc < 0) return false;
+        float t = (-b - SimMath.Sqrt(disc)) / a;
+        if (t < 0 || t > fraction) return false;
+        fraction = t;
+        normal = SimMath.Normalize(m + d * t);
+        return true;
+    }
+
+    private static bool Segment(Vector2 a, Vector2 b, Vector2 n, Vector2 origin, Vector2 d, ref float fraction, ref Vector2 normal)
+    {
+        float denominator = V.Dot(n, d);
+        if (denominator >= 0) return false; // only from the outside
+        float t = V.Dot(n, a - origin) / denominator;
+        if (t < 0 || t > fraction) return false;
+        var p = origin + d * t;
+        var e = b - a;
+        float u = V.Dot(p - a, e);
+        if (u < 0 || u > V.Dot(e, e)) return false;
+        fraction = t;
+        normal = n;
+        return true;
+    }
+}
