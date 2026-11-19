@@ -18,6 +18,7 @@ internal static class VkLayoutTests
             Check<VkPhysicalDeviceFeatures2>(240);
             Check<VkPhysicalDeviceVulkan13Features>(80);
             Check<VkQueueFamilyProperties>(24);
+            Check<VkQueryPoolCreateInfo>(32);
             Check<VkPhysicalDeviceMemoryProperties>(520);
             Check<VkMemoryType>(8);
             Check<VkMemoryHeap>(16);

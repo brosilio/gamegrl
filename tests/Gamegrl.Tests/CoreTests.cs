@@ -10,7 +10,7 @@ public struct Frozen : IComponent;
 public struct Counter : IComponent { public int Value; }
 
 public struct Gravity { public float Value; }
-public struct Tally { public int Visited; }
+public struct Tally { public int Visited, Ticks; }
 
 public static partial class TestSystems
 {
@@ -30,6 +30,10 @@ public static partial class TestSystems
     {
         if (!e.IsNull && h.Value > 0) tally.Visited++;
     }
+
+    /// <summary>Resources only: runs once per tick, not once per entity.</summary>
+    [System(Phase.Last)]
+    private static void CountTicks([Res] ref Tally tally) => tally.Ticks++;
 
     [System(Phase.Update, Order = 10)]
     private static void Reap(Entity e, in Health h, CommandBuffer commands)
@@ -151,6 +155,7 @@ internal static class CoreTests
             Assert.Equal(n, checkedCount);
             Assert.Equal(0f, app.World.Get<Velocity>(frozen).Y);
             Assert.Equal(1, app.World.Resource<Tally>().Visited);
+            Assert.Equal(1, app.World.Resource<Tally>().Ticks); // a resource-only system ran once, not once per entity
             Assert.True(app.World.IsAlive(alive));
             Assert.True(!app.World.IsAlive(dead));
         });

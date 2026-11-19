@@ -109,6 +109,7 @@ internal sealed partial class EditorHost : IDisposable
         public string Name => name;
         public Phase Phase => phase;
         public int Order => order;
+        public ProfileCategory Category => ProfileCategory.Editor;
         public void Initialize(World world) { }
         public void Run(World world) => run(world);
     }
@@ -286,8 +287,9 @@ internal sealed partial class EditorHost : IDisposable
             Files.RequestClose();
         }
         _ui.End();
-        _terminal?.Publish(_ui.Draw.Surface);
+        using (PublishMarker.Scope()) _terminal?.Publish(_ui.Draw.Surface);
     }
+    private static readonly ProfileMarker PublishMarker = ProfileMarker.Get("Editor.TerminalPublish", ProfileCategory.Editor);
 
     /// <summary>
     /// The borders are the splitters: the sidebar rule, the pair of box edges between the panes and the right pane,
@@ -311,7 +313,7 @@ internal sealed partial class EditorHost : IDisposable
         bool click = input.WasPressed(MouseButton.Left) || input.WasPressed(MouseButton.Right) || input.WasPressed(MouseButton.Middle);
         if (click) _gameFocused = _gameArea.W > 0 && _ui.IsHovered(_gameArea);
         if (_gameArea.W <= 0 || !Document.Playing || _ui.WantsKeyboard) _gameFocused = false;
-        GameInput.RouteFrom(_app.World.Resource<Input>(), _gameFocused, PixelRect(_gameArea).Min, [Key.F5]);
+        GameInput.RouteFrom(_app.World.Resource<Input>(), _gameFocused, PixelRect(_gameArea).Min, [Key.F5, Key.F9]);
         GameInput.ScaleMouse(new Vector2(GamePreviewScale));
     }
 
@@ -319,6 +321,7 @@ internal sealed partial class EditorHost : IDisposable
     {
         if (_ui.WantsKeyboard) return;
         if (input.WasPressed(Key.F5)) TogglePlay();
+        if (input.WasPressed(Key.F9)) ToggleProfilerPause();
         if (_gameFocused) return;
         if (input.WasPressed(Key.F6)) TogglePause();
         if (input.WasPressed(Key.Delete) && _focusRegion != DockRegion.Bottom && CanEditSelection) Document.Edit(DeleteSelected);
@@ -348,6 +351,9 @@ internal sealed partial class EditorHost : IDisposable
         color = _render.Device.CreateTexture(new TextureDesc(w, h, _render.Swapchain.Format, TextureUsage.RenderTarget | TextureUsage.Sampled | TextureUsage.CopySrc));
         depth = _render.Device.CreateTexture(new TextureDesc(w, h, RenderContext.DepthFormat, TextureUsage.DepthStencil));
     }
+    private static readonly ProfileMarker SceneViewMarker = ProfileMarker.Get("GPU.SceneView", ProfileCategory.Gpu);
+    private static readonly ProfileMarker GameViewMarker = ProfileMarker.Get("GPU.GameView", ProfileCategory.Gpu);
+
     private void Render()
     {
         if (!_render.HasFrame) return;
@@ -361,6 +367,7 @@ internal sealed partial class EditorHost : IDisposable
                 ViewProjection = _camera.Matrix(_sceneColor.Width / (float)_sceneColor.Height),
                 ClearColor = new Vector4(0.08f, 0.09f, 0.12f, 1),
                 DebugLines = true,
+                Marker = SceneViewMarker,
             });
         }
         if (_gameArea.W > 0 && _gameColor is not null)
@@ -374,6 +381,7 @@ internal sealed partial class EditorHost : IDisposable
                 ClearColor = clear,
                 Sprites = true,
                 SpriteSize = new Vector2(_gameColor.Width, _gameColor.Height) * GamePreviewScale,
+                Marker = GameViewMarker,
             });
             // The game's own pixel UI (UiModule), drawn over its view at the preview's scale.
             if (Document.Playing && _app.World.HasResource<UiLayer>()) _app.World.Resource<UiLayer>().Render(frame, _gameColor, 1 / GamePreviewScale);

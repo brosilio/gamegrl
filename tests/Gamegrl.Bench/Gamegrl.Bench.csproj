@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Performance scenarios for the engine, run under the profiler against per-machine baselines (perf/baselines). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Gamegrl.Core/Gamegrl.Core.csproj" />
+    <ProjectReference Include="../../src/Gamegrl.Rhi.Vulkan/Gamegrl.Rhi.Vulkan.csproj" />
+    <ProjectReference Include="../../src/Gamegrl.Rendering/Gamegrl.Rendering.csproj" />
+    <ProjectReference Include="../../src/Gamegrl.UI/Gamegrl.UI.csproj" />
+  </ItemGroup>
+</Project>

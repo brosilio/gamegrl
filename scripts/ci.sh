@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build everything, run the tests under the JIT and as a NativeAOT binary, and publish the sample as NativeAOT.
+# Build everything, run the tests under the JIT and as a NativeAOT binary, run the benchmarks, and publish the sample as NativeAOT.
 # "It builds" is not "it works under AOT": the AOT test run is the one that counts.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -19,6 +19,16 @@ fi
 echo "== tests (NativeAOT)"
 dotnet publish tests/Gamegrl.Tests -c Release -o artifacts/tests-aot -nologo -v q -m:1
 ./artifacts/tests-aot/Gamegrl.Tests
+
+# Performance: scenarios under the profiler, gated against perf/baselines/<machine>.json (allocations exactly, times
+# within a tolerance). No baseline for this machine only warns. GAMEGRL_BENCH=0 skips this on a loaded machine.
+if [[ "${GAMEGRL_BENCH:-1}" == "1" ]]; then
+    echo "== bench (NativeAOT engine scenarios)"
+    dotnet publish tests/Gamegrl.Bench -c Release -o artifacts/bench-aot -nologo -v q -m:1
+    ./artifacts/bench-aot/Gamegrl.Bench
+    echo "== bench (editor, terminal host)"
+    dotnet run --project tests/Gamegrl.Editor.Tests -c Release --no-build -- --bench
+fi
 
 echo "== sample: NativeAOT player + packed assets"
 dotnet publish samples/Spinners/Player -c Release -o artifacts/spinners -nologo -v q -m:1

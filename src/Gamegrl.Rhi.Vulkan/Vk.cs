@@ -16,7 +16,7 @@ internal enum VkResult
 
 internal static class VkStructureType
 {
-    public const uint ApplicationInfo = 0, InstanceCreateInfo = 1, DeviceQueueCreateInfo = 2, DeviceCreateInfo = 3,
+    public const uint ApplicationInfo = 0, InstanceCreateInfo = 1, DeviceQueueCreateInfo = 2, DeviceCreateInfo = 3, QueryPoolCreateInfo = 11,
         MemoryAllocateInfo = 5, FenceCreateInfo = 8, SemaphoreCreateInfo = 9, BufferCreateInfo = 12, ImageCreateInfo = 14,
         ImageViewCreateInfo = 15, ShaderModuleCreateInfo = 16, PipelineShaderStageCreateInfo = 18,
         PipelineVertexInputStateCreateInfo = 19, PipelineInputAssemblyStateCreateInfo = 20, PipelineViewportStateCreateInfo = 22,
@@ -38,7 +38,7 @@ internal static class VkConst
     public const ulong WholeSize = ulong.MaxValue;
     public const uint QueueFamilyIgnored = uint.MaxValue;
     public const uint QueueGraphics = 1;
-    public const uint MemoryDeviceLocal = 1, MemoryHostVisible = 2, MemoryHostCoherent = 4;
+    public const uint MemoryDeviceLocal = 1, MemoryHostVisible = 2, MemoryHostCoherent = 4, MemoryHostCached = 8;
     public const uint ImageLayoutUndefined = 0, ImageLayoutColorAttachment = 2, ImageLayoutDepthAttachment = 3,
         ImageLayoutShaderReadOnly = 5, ImageLayoutTransferSrc = 6, ImageLayoutTransferDst = 7, ImageLayoutPresentSrc = 1000001002;
     public const uint AspectColor = 1, AspectDepth = 2;
@@ -125,6 +125,12 @@ internal unsafe struct VkPhysicalDeviceVulkan13Features
 internal struct VkQueueFamilyProperties
 {
     public uint QueueFlags; public uint QueueCount; public uint TimestampValidBits; public uint GranularityW, GranularityH, GranularityD;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct VkQueryPoolCreateInfo
+{
+    public uint SType; public void* PNext; public uint Flags; public uint QueryType; public uint QueryCount; public uint PipelineStatistics;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -471,6 +477,7 @@ internal unsafe struct VkDebugUtilsMessengerCallbackDataEXT
 internal static class VkPhysicalDevicePropertiesLayout
 {
     public const int Size = 824, ApiVersion = 0, DeviceType = 16, DeviceName = 20, Limits = 296;
+    public const int TimestampPeriod = 720;
     public const int MaxUniformBufferRange = Limits + 24, MinUniformBufferOffsetAlignment = Limits + 320, MinStorageBufferOffsetAlignment = Limits + 328;
 }
 
@@ -508,6 +515,11 @@ internal static unsafe class Vk
     public static delegate* unmanaged<nint, void*, void> DestroyDevice;
     public static delegate* unmanaged<nint, uint, uint, nint*, void> GetDeviceQueue;
     public static delegate* unmanaged<nint, VkResult> DeviceWaitIdle;
+    public static delegate* unmanaged<nint, VkQueryPoolCreateInfo*, void*, ulong*, VkResult> CreateQueryPool;
+    public static delegate* unmanaged<nint, ulong, void*, void> DestroyQueryPool;
+    public static delegate* unmanaged<nint, ulong, uint, uint, void> CmdResetQueryPool;
+    public static delegate* unmanaged<nint, ulong, ulong, uint, void> CmdWriteTimestamp2;
+    public static delegate* unmanaged<nint, ulong, uint, uint, nuint, void*, ulong, uint, VkResult> GetQueryPoolResults;
     public static delegate* unmanaged<nint, VkSwapchainCreateInfoKHR*, void*, ulong*, VkResult> CreateSwapchainKHR;
     public static delegate* unmanaged<nint, ulong, void*, void> DestroySwapchainKHR;
     public static delegate* unmanaged<nint, ulong, uint*, ulong*, VkResult> GetSwapchainImagesKHR;
@@ -616,6 +628,11 @@ internal static unsafe class Vk
         DestroyDevice = (delegate* unmanaged<nint, void*, void>)Device(d, "vkDestroyDevice");
         GetDeviceQueue = (delegate* unmanaged<nint, uint, uint, nint*, void>)Device(d, "vkGetDeviceQueue");
         DeviceWaitIdle = (delegate* unmanaged<nint, VkResult>)Device(d, "vkDeviceWaitIdle");
+        CreateQueryPool = (delegate* unmanaged<nint, VkQueryPoolCreateInfo*, void*, ulong*, VkResult>)Device(d, "vkCreateQueryPool");
+        DestroyQueryPool = (delegate* unmanaged<nint, ulong, void*, void>)Device(d, "vkDestroyQueryPool");
+        CmdResetQueryPool = (delegate* unmanaged<nint, ulong, uint, uint, void>)Device(d, "vkCmdResetQueryPool");
+        CmdWriteTimestamp2 = (delegate* unmanaged<nint, ulong, ulong, uint, void>)Device(d, "vkCmdWriteTimestamp2");
+        GetQueryPoolResults = (delegate* unmanaged<nint, ulong, uint, uint, nuint, void*, ulong, uint, VkResult>)Device(d, "vkGetQueryPoolResults");
         CreateSwapchainKHR = (delegate* unmanaged<nint, VkSwapchainCreateInfoKHR*, void*, ulong*, VkResult>)Device(d, "vkCreateSwapchainKHR", optional: true);
         DestroySwapchainKHR = (delegate* unmanaged<nint, ulong, void*, void>)Device(d, "vkDestroySwapchainKHR", optional: true);
         GetSwapchainImagesKHR = (delegate* unmanaged<nint, ulong, uint*, ulong*, VkResult>)Device(d, "vkGetSwapchainImagesKHR", optional: true);

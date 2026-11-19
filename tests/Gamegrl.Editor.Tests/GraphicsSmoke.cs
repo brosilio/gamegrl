@@ -17,6 +17,7 @@ internal static class GraphicsSmoke
 {
     public static int Run(bool terminalMode = false)
     {
+        Profiler.Enabled = true;
         string source = Path.GetFullPath("samples/Spinners");
         string root = Path.Combine(Path.GetTempPath(), "gamegrl-smoke-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path.Combine(root, "Assets"));
@@ -91,6 +92,21 @@ internal static class GraphicsSmoke
         Frame();
         Check(app.World.HasResource<Gamegrl.UI.Ui>() && !app.World.Resource<Gamegrl.UI.Ui>().Draw.IsEmpty, "The game's debug window did not draw");
         Check(!editor.GameInput.IsDown(Gamegrl.Platform.MouseButton.Left), "Toolbar input leaked");
+        // The profiler: game systems time as Game, the GPU reports frame timings a frame or two late, the panel and export work.
+        for (int i = 0; i < 8; i++) Frame();
+        var profile = new ProfileTree();
+        profile.Build(Profiler.FrameCount - 6, 6);
+        Check(profile.CategoryMs(ProfileCategory.Game) > 0 && profile.CategoryMs(ProfileCategory.Editor) > 0, "Profiler lacks game or editor time");
+        Check(profile.Stats.GpuMeanMs > 0, "No GPU timings reached the profiler");
+        Command("profiler.show"); Frame();
+        Check(editor.Docks.Selected(DockRegion.Bottom) == "profiler", "Profiler panel did not open");
+        Command("profiler.export");
+        string[] traces = Directory.GetFiles(Path.Combine(root, "Library", "Profiles"), "*.json");
+        Check(traces.Length == 1, "Profile export missing");
+        using (var trace = System.Text.Json.JsonDocument.Parse(File.ReadAllText(traces[0])))
+            Check(trace.RootElement.GetProperty("traceEvents").GetArrayLength() > 100, "Profile export is empty");
+        Command("profiler.pause"); Check(Profiler.Paused, "Profiler did not pause"); Command("profiler.pause");
+        editor.Docks.Select(DockRegion.Bottom, "console");
         Click(editor.GameArea.Center); Frame(() => input.OnKey((int)Key.Space, true, false));
         Check(editor.GameInput.IsDown(Key.Space), "Game focus failed");
         Check(Vector2.Distance(editor.GameInput.MousePosition, (input.MousePosition - editor.PixelRect(editor.GameArea).Min) * editor.GamePreviewScale) < 0.01f, "Game coordinates failed");

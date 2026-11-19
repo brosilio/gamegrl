@@ -134,7 +134,9 @@ public sealed class SystemGenerator : IIncrementalGenerator
         return new SystemModel(
             ns, containers.ToEquatableArray(), method.Name, fullName, phase, parallel, order,
             parameters.ToEquatableArray(), with.ToEquatableArray(), without.ToEquatableArray(),
-            diagnostics.ToEquatableArray(), hint, span.Path ?? "", span.StartLinePosition.Line);
+            diagnostics.ToEquatableArray(), hint, span.Path ?? "", span.StartLinePosition.Line,
+            // The engine's own systems profile as Engine; everything else (games, samples) as Game.
+            !(ctx.SemanticModel.Compilation.AssemblyName ?? "").StartsWith("Gamegrl.", System.StringComparison.Ordinal));
     }
 }
 
@@ -161,7 +163,8 @@ internal sealed record SystemModel(
     EquatableArray<DiagnosticInfo> Diagnostics,
     string HintName,
     string FilePath,
-    int Line)
+    int Line,
+    bool IsGame)
 {
     public string ClassName => MethodName + "_System";
 
@@ -240,23 +243,31 @@ internal static class Emit
         sb.Append(I()).AppendLine("[global::System.CodeDom.Compiler.GeneratedCode(\"Gamegrl.Generators\", \"1.0\")]");
         sb.Append(I()).Append("internal sealed unsafe class ").Append(m.ClassName).AppendLine(" : global::Gamegrl.ISystem");
         sb.Append(I()).AppendLine("{");
-        sb.Append(I(1)).AppendLine("private global::Gamegrl.Query _query = null!;");
+        // A system with no per-entity parameters (no components, no Entity, no With/Without filter) runs once per tick:
+        // a query with no filter matches every entity, which would call it once per entity.
+        bool once = comps.Count == 0 && !m.Parameters.Any(p => p.Kind == ParamKind.Entity) && m.With.Count == 0 && m.Without.Count == 0;
+        if (!once) sb.Append(I(1)).AppendLine("private global::Gamegrl.Query _query = null!;");
         sb.Append(I(1)).Append("public string Name => \"").Append(m.FullName).AppendLine("\";");
         sb.Append(I(1)).Append("public global::Gamegrl.Phase Phase => (global::Gamegrl.Phase)").Append(m.Phase).AppendLine(";");
         sb.Append(I(1)).Append("public int Order => ").Append(m.Order).AppendLine(";");
+        if (m.IsGame) sb.Append(I(1)).AppendLine("public global::Gamegrl.ProfileCategory Category => global::Gamegrl.ProfileCategory.Game;");
         sb.AppendLine();
 
         // Initialize: the cached query.
         sb.Append(I(1)).AppendLine("public void Initialize(global::Gamegrl.World world)");
         sb.Append(I(1)).AppendLine("{");
-        sb.Append(I(2)).Append("_query = world.Query(new global::Gamegrl.QueryDesc()");
-        foreach (var c in comps.Select(c => c.Type).Concat(m.With).Distinct()) sb.Append(".With<").Append(c).Append(">()");
-        foreach (var c in m.Without) sb.Append(".Without<").Append(c).Append(">()");
-        sb.AppendLine(");");
+        if (!once)
+        {
+            sb.Append(I(2)).Append("_query = world.Query(new global::Gamegrl.QueryDesc()");
+            foreach (var c in comps.Select(c => c.Type).Concat(m.With).Distinct()) sb.Append(".With<").Append(c).Append(">()");
+            foreach (var c in m.Without) sb.Append(".Without<").Append(c).Append(">()");
+            sb.AppendLine(");");
+        }
         sb.Append(I(1)).AppendLine("}");
         sb.AppendLine();
 
-        if (m.Parallel) EmitParallel(sb, m, comps, I);
+        if (once) EmitOnce(sb, m, I);
+        else if (m.Parallel) EmitParallel(sb, m, comps, I);
         else EmitSerial(sb, m, comps, I);
 
         sb.Append(I()).AppendLine("}");
@@ -275,6 +286,22 @@ internal static class Emit
         ParamKind.Commands => "commands",
         _ => "default",
     };
+
+    private static void EmitOnce(StringBuilder sb, SystemModel m, global::System.Func<int, string> I)
+    {
+        sb.Append(I(1)).AppendLine("public void Run(global::Gamegrl.World world)");
+        sb.Append(I(1)).AppendLine("{");
+        for (int i = 0; i < m.Parameters.Count; i++)
+        {
+            var p = m.Parameters[i];
+            if (p.Kind == ParamKind.ResourceRef) sb.Append(I(2)).Append("ref var r").Append(i).Append(" = ref world.Resource<").Append(p.Type).AppendLine(">();");
+            if (p.Kind == ParamKind.ResourceIn) sb.Append(I(2)).Append("ref readonly var r").Append(i).Append(" = ref world.Resource<").Append(p.Type).AppendLine(">();");
+            if (p.Kind == ParamKind.Commands) sb.Append(I(2)).AppendLine("var commands = world.Commands;");
+        }
+        sb.Append(I(2)).Append(m.QualifiedMethod).Append('(')
+            .Append(string.Join(", ", m.Parameters.Select((p, i) => Arg(p, i, "0")))).AppendLine(");");
+        sb.Append(I(1)).AppendLine("}");
+    }
 
     private static void EmitSerial(StringBuilder sb, SystemModel m, List<ParamInfo> comps, global::System.Func<int, string> I)
     {

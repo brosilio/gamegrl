@@ -45,6 +45,8 @@ public struct ViewDesc
     /// <summary>Logical sprite coordinates, independent of preview resolution; zero uses the target size.</summary>
     public Vector2 SpriteSize;
     public bool DebugLines;
+    /// <summary>The view's GPU zone in the profiler; null uses "GPU.View".</summary>
+    public ProfileMarker? Marker;
 }
 
 /// <summary>Lines for gizmos and debugging, drawn in views that ask for them; cleared every frame.</summary>
@@ -95,6 +97,9 @@ public sealed class SceneRenderer : IDisposable
     private SpriteInstanceGpu[] _spriteScratch = new SpriteInstanceGpu[256];
     private long _meshOffset = -1, _spriteOffset = -1, _lineOffset = -1;
     private ulong _uploadedFrame = ulong.MaxValue;
+    // Instances grouped by mesh / texture slot: one instanced draw per batch.
+    private readonly List<(int Slot, int Start, int Count)> _meshBatches = new(), _spriteBatches = new();
+    private int[] _slotCursor = new int[64];
 
     public SceneRenderer(RenderContext ctx)
     {
@@ -169,9 +174,12 @@ public sealed class SceneRenderer : IDisposable
     }
 
     /// <summary>Draw one view: clears the target, then meshes, sprites (screen pixels of the target) and debug lines.</summary>
+    private static readonly ProfileMarker ViewMarker = ProfileMarker.Get("GPU.View", ProfileCategory.Gpu);
+
     public void DrawView(CommandList cmd, in ViewDesc view)
     {
         if (!_ctx.HasFrame) return;
+        using var gpu = cmd.Zone(view.Marker ?? ViewMarker);
         UploadInstancesOnce();
         var ring = _ctx.Ring;
         int align = _ctx.Device.Limits.MinUniformBufferOffsetAlignment;
@@ -195,18 +203,13 @@ public sealed class SceneRenderer : IDisposable
         {
             cmd.SetPipeline(_meshes);
             cmd.SetBindGroup(0, _cameraGroup, [cameraOffset]);
-            int start = 0;
-            while (start < meshes.Length)
+            foreach (var (slot, start, count) in CollectionsMarshal.AsSpan(_meshBatches))
             {
-                int slot = meshes[start].Mesh;
-                int end = start;
-                while (end < meshes.Length && meshes[end].Mesh == slot) end++;
                 var mesh = _ctx.GetMesh(slot);
                 cmd.SetVertexBuffer(0, mesh.Vertices);
                 cmd.SetVertexBuffer(1, ring.Buffer, _meshOffset);
                 cmd.SetIndexBuffer(mesh.Indices, mesh.IndexFormat);
-                cmd.DrawIndexed(mesh.IndexCount, end - start, 0, 0, start);
-                start = end;
+                cmd.DrawIndexed(mesh.IndexCount, count, 0, 0, start);
             }
         }
 
@@ -218,15 +221,10 @@ public sealed class SceneRenderer : IDisposable
             cmd.SetPipeline(_sprites);
             cmd.SetBindGroup(0, _screenGroup, [screenOffset]);
             cmd.SetVertexBuffer(0, ring.Buffer, _spriteOffset);
-            int start = 0;
-            while (start < sprites.Length)
+            foreach (var (texture, start, count) in CollectionsMarshal.AsSpan(_spriteBatches))
             {
-                int tex = sprites[start].Texture;
-                int end = start;
-                while (end < sprites.Length && sprites[end].Texture == tex) end++;
-                cmd.SetBindGroup(1, _ctx.GetTexture(tex).Group);
-                cmd.Draw(6, end - start, 0, start);
-                start = end;
+                cmd.SetBindGroup(1, _ctx.GetTexture(texture).Group);
+                cmd.Draw(6, count, 0, start);
             }
         }
 
@@ -240,7 +238,11 @@ public sealed class SceneRenderer : IDisposable
         cmd.EndRenderPass();
     }
 
-    /// <summary>Sort and upload the frame's instances once, however many views draw them.</summary>
+    /// <summary>
+    /// Group and upload the frame's instances once, however many views draw them. Slots are small integers, so a
+    /// counting sort groups in O(n), keeps submission order within a batch (2D layering), and scatters straight into
+    /// the GPU layout; a comparison sort through a delegate cost milliseconds per 10k instances under NativeAOT.
+    /// </summary>
     private void UploadInstancesOnce()
     {
         if (_uploadedFrame == _ctx.Frame.Number) return;
@@ -248,23 +250,53 @@ public sealed class SceneRenderer : IDisposable
         var ring = _ctx.Ring;
 
         var meshes = CollectionsMarshal.AsSpan(_ctx.MeshInstances);
-        meshes.Sort(static (a, b) => a.Mesh.CompareTo(b.Mesh));
         if (_meshScratch.Length < meshes.Length) _meshScratch = new MeshInstanceGpu[meshes.Length * 2];
-        for (int i = 0; i < meshes.Length; i++) _meshScratch[i] = new MeshInstanceGpu { Model = meshes[i].Model, Color = meshes[i].Color };
+        int maxSlot = -1;
+        foreach (ref readonly var m in meshes) maxSlot = Math.Max(maxSlot, m.Mesh);
+        var cursor = Counts(maxSlot);
+        foreach (ref readonly var m in meshes) cursor[m.Mesh]++;
+        Batches(_meshBatches, cursor);
+        foreach (ref readonly var m in meshes) _meshScratch[cursor[m.Mesh]++] = new MeshInstanceGpu { Model = m.Model, Color = m.Color };
         _meshOffset = meshes.Length > 0 ? ring.Push<MeshInstanceGpu>(_meshScratch.AsSpan(0, meshes.Length)) : -1;
 
         var sprites = CollectionsMarshal.AsSpan(_ctx.SpriteInstances);
-        sprites.Sort(static (a, b) => a.Texture.CompareTo(b.Texture));
         if (_spriteScratch.Length < sprites.Length) _spriteScratch = new SpriteInstanceGpu[sprites.Length * 2];
-        for (int i = 0; i < sprites.Length; i++)
-        {
-            ref readonly var s = ref sprites[i];
-            _spriteScratch[i] = new SpriteInstanceGpu { PosSize = s.PosSize, Uv = s.Uv, Color = s.Color, RotPivot = s.RotPivot };
-        }
+        maxSlot = -1;
+        foreach (ref readonly var sp in sprites) maxSlot = Math.Max(maxSlot, sp.Texture);
+        cursor = Counts(maxSlot);
+        foreach (ref readonly var sp in sprites) cursor[sp.Texture]++;
+        Batches(_spriteBatches, cursor);
+        foreach (ref readonly var sp in sprites)
+            _spriteScratch[cursor[sp.Texture]++] = new SpriteInstanceGpu { PosSize = sp.PosSize, Uv = sp.Uv, Color = sp.Color, RotPivot = sp.RotPivot };
         _spriteOffset = sprites.Length > 0 ? ring.Push<SpriteInstanceGpu>(_spriteScratch.AsSpan(0, sprites.Length)) : -1;
 
         var lines = CollectionsMarshal.AsSpan(_ctx.Debug.Vertices);
         _lineOffset = lines.Length > 0 ? ring.Push<LineVertex>(lines) : -1;
+    }
+
+    /// <summary>Zeroed per-slot counters for slots 0..<paramref name="maxSlot"/>.</summary>
+    private Span<int> Counts(int maxSlot)
+    {
+        if (_slotCursor.Length <= maxSlot) _slotCursor = new int[(maxSlot + 1) * 2];
+        var counts = _slotCursor.AsSpan(0, maxSlot + 1);
+        counts.Clear();
+        return counts;
+    }
+
+    /// <summary>Turn per-slot counts into a batch per used slot, leaving each slot's first write index in its counter.</summary>
+    private static void Batches(List<(int Slot, int Start, int Count)> batches, Span<int> counts)
+    {
+        batches.Clear();
+        int maxSlot = counts.Length - 1;
+        int offset = 0;
+        for (int slot = 0; slot <= maxSlot; slot++)
+        {
+            int n = counts[slot];
+            if (n == 0) continue;
+            batches.Add((slot, offset, n));
+            counts[slot] = offset;
+            offset += n;
+        }
     }
 
     public void Dispose()

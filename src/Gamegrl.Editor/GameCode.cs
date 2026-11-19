@@ -49,6 +49,7 @@ internal sealed class GameCode : IDisposable
         public string Name => inner.Name;
         public Phase Phase => inner.Phase;
         public int Order => inner.Order;
+        public ProfileCategory Category => inner.Category;
         public void Initialize(World world) { using var scope = new InputScope(world, input); inner.Initialize(world); }
         public void Run(World world)
         {

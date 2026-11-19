@@ -23,8 +23,11 @@ internal sealed class CellRenderer : IDisposable
         _renderer = new UiRenderer(device, format, _font);
     }
     public void Forget(GpuTexture texture) => _renderer.Forget(texture);
+    private static readonly ProfileMarker GpuMarker = ProfileMarker.Get("GPU.EditorCells", ProfileCategory.Gpu);
+
     public void Render(Frame frame, CellDraw cells, int width, int height)
     {
+        using var gpu = frame.Commands.Zone(GpuMarker);
         _draw.Reset(_font, _renderer.FontTexture, new Rect(0, 0, width, height));
         foreach (var (area, texture) in cells.Images) _draw.Image(Pixels(area), texture, Color32.White, Vector2.Zero, Vector2.One);
         for (int y = 0; y < cells.Surface.Height; y++)

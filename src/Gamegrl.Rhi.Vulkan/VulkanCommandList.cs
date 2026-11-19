@@ -147,6 +147,72 @@ internal sealed unsafe class VulkanCommandList : CommandList
     };
 
     private static uint StoreOp(StoreOp op) => op == Rhi.StoreOp.Store ? VkConst.AttachmentStoreStore : VkConst.AttachmentStoreDontCare;
+
+    // ------------------------------------------------------------------ GPU timing
+    // Queries 0 and 1 bracket the frame; each zone takes the next two. Results are read when the slot comes round again.
+
+    public const int MaxQueries = 256;
+    private const ulong AllCommands = 0x00010000; // VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT
+    private static readonly ProfileMarker FrameMarker = ProfileMarker.Get("GPU.Frame", ProfileCategory.Gpu);
+    internal ulong QueryPool;
+    internal bool Timing;
+    internal int QueryCount;
+    internal ulong TimedFrame;
+    internal readonly (int Marker, ushort Depth, int Query)[] Zones = new (int, ushort, int)[(MaxQueries - 2) / 2];
+    internal int ZoneCount;
+    private readonly int[] _open = new int[64];
+    private int _openCount;
+
+    internal void StartTiming(ulong frame)
+    {
+        Vk.CmdResetQueryPool(Cmd, QueryPool, 0, MaxQueries);
+        Vk.CmdWriteTimestamp2(Cmd, AllCommands, QueryPool, 0);
+        Timing = true; QueryCount = 2; ZoneCount = 0; _openCount = 0; TimedFrame = frame;
+        Zones[ZoneCount++] = (FrameMarker.Id, 0, 0);
+    }
+
+    internal void FinishTiming()
+    {
+        if (!Timing) return;
+        while (_openCount > 0) EndZone();
+        Vk.CmdWriteTimestamp2(Cmd, AllCommands, QueryPool, 1);
+        Timing = false;
+    }
+
+    protected override void BeginZone(ProfileMarker marker)
+    {
+        if (_openCount == _open.Length) return;
+        if (!Timing || ZoneCount == Zones.Length || QueryCount + 2 > MaxQueries) { _open[_openCount++] = -1; return; }
+        int q = QueryCount; QueryCount += 2;
+        Vk.CmdWriteTimestamp2(Cmd, AllCommands, QueryPool, (uint)q);
+        Zones[ZoneCount] = (marker.Id, (ushort)(_openCount + 1), q);
+        _open[_openCount++] = ZoneCount++;
+    }
+
+    protected override void EndZone()
+    {
+        if (_openCount == 0) return;
+        int zone = _open[--_openCount];
+        if (zone >= 0 && Timing) Vk.CmdWriteTimestamp2(Cmd, AllCommands, QueryPool, (uint)Zones[zone].Query + 1);
+    }
+
+    /// <summary>Read a finished frame's timestamps and hand them to the profiler.</summary>
+    internal void Collect(nint device, float period, ulong validMask)
+    {
+        if (QueryCount == 0) return;
+        int count = QueryCount;
+        QueryCount = 0;
+        var data = stackalloc ulong[count];
+        if (Vk.GetQueryPoolResults(device, QueryPool, 0, (uint)count, (nuint)(count * 8), data, 8, 1 /* 64-bit */) != VkResult.Success) return;
+        ulong t0 = data[0] & validMask;
+        long Ns(int q) => (long)(((data[q] & validMask) - t0) * (double)period);
+        var zones = stackalloc GpuZone[ZoneCount];
+        zones[0] = new GpuZone { Marker = Zones[0].Marker, StartNs = 0, EndNs = Ns(1) };
+        for (int i = 1; i < ZoneCount; i++)
+            zones[i] = new GpuZone { Marker = Zones[i].Marker, Depth = Zones[i].Depth, StartNs = Ns(Zones[i].Query), EndNs = Ns(Zones[i].Query + 1) };
+        Profiler.SubmitGpu(TimedFrame, new ReadOnlySpan<GpuZone>(zones, ZoneCount), zones[0].EndNs);
+    }
+
 }
 
 /// <summary>Image layout transitions with stage and access masks derived from the layouts.</summary>

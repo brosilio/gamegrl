@@ -30,6 +30,8 @@ public sealed unsafe class JobScheduler : IDisposable
     private int _active;      // 1 while a loop runs
 
     [ThreadStatic] private static bool _isWorker;
+    private static readonly ProfileMarker Dispatch = ProfileMarker.Get("Jobs.ParallelFor", ProfileCategory.Engine);
+    private static readonly ProfileMarker Batches = ProfileMarker.Get("Jobs.Batches", ProfileCategory.Engine);
 
     /// <param name="workerCount">Worker threads besides the caller; default: logical cores − 1.</param>
     public JobScheduler(int workerCount = -1)
@@ -59,6 +61,7 @@ public sealed unsafe class JobScheduler : IDisposable
             return;
         }
 
+        using var zone = Dispatch.Scope();
         _invoke = &Invoke<T>;
         _job = Unsafe.AsPointer(ref job);
         _count = count;
@@ -100,7 +103,7 @@ public sealed unsafe class JobScheduler : IDisposable
         {
             _wake.Wait();
             if (_stopping) return;
-            RunBatches();
+            using (Batches.Scope()) RunBatches();
             Interlocked.Decrement(ref _pending);
         }
     }

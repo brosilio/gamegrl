@@ -33,6 +33,11 @@ internal sealed partial class EditorHost
         Registry.AddPanel("inspector", "Inspector", DockRegion.Right, (_, r) => Inspector(r));
         Registry.AddPanel("console", "Console", DockRegion.Bottom, (_, r) => ConsolePanel(r));
         Registry.AddPanel("tasks", "Tasks", DockRegion.Bottom, (_, r) => Tasks(r));
+        Registry.AddPanel("profiler", "Profiler", DockRegion.Bottom, (_, r) => ProfilerPanel(r));
+        Registry.AddCommand("profiler.show", "Profiler: Show", _ => { Docks.Sync(Registry.Panels); Docks.Show("profiler"); });
+        Registry.AddCommand("profiler.pause", "Profiler: Pause or resume recording", _ => ToggleProfilerPause(), "F9");
+        Registry.AddCommand("profiler.export", "Profiler: Export trace (Perfetto)", _ => ExportProfile());
+        Registry.AddCommand("profiler.enable", "Profiler: Turn on or off", _ => Profiler.Enabled = !Profiler.Enabled);
         Registry.AddCommand("file.new", "File: New scene", _ => Files.RequestNew(), "Ctrl+N");
         Registry.AddCommand("file.save", "File: Save", _ => Files.Save(), "Ctrl+S");
         Registry.AddCommand("file.saveAs", "File: Save as…", _ => Files.SaveAs(), "Ctrl+Shift+S");
@@ -136,7 +141,7 @@ internal sealed partial class EditorHost
         var strip = new Rect(area.X + 1, area.Y, Math.Max(0, area.W - 2), 1);
         var tabs = Docks.Tabs(region);
         float total = 0;
-        foreach (string id in tabs) total += TabWidth(id) + 1;
+        for (int i = 0; i < tabs.Count; i++) total += TabWidth(tabs[i]) + 1;
         _ui.PushId((int)region);
         uint scrollId = _ui.Id("dock-scroll");
         float scroll = _ui.GetFloat(scrollId);
@@ -145,8 +150,9 @@ internal sealed partial class EditorHost
         _ui.SetFloat(scrollId, scroll);
         float x = strip.X - scroll;
         _ui.Draw.PushClip(strip);
-        foreach (string id in tabs)
+        for (int i = 0; i < tabs.Count; i++)
         {
+            string id = tabs[i];
             var panel = Registry.FindPanel(id)!;
             var tab = new Rect(x, strip.Y, TabWidth(id), 1);
             _tabRects[id] = tab;
@@ -200,7 +206,7 @@ internal sealed partial class EditorHost
             return;
         }
         int open = 0;
-        foreach (string id in tabs) if (!_collapsed.Contains(id)) open++;
+        for (int i = 0; i < tabs.Count; i++) if (!_collapsed.Contains(tabs[i])) open++;
         float free = Math.Max(0, area.H - tabs.Count * 2 + 1);
         float share = open > 0 ? MathF.Floor(free / open) : 0, extra = free - share * open;
         float y0 = area.Y;
@@ -295,7 +301,7 @@ internal sealed partial class EditorHost
     {
         var checkpoint = _ui.Save();
         _ui.Draw.PushClip(content with { W = content.W + 1 });
-        try { panel.Draw(_context, content); }
+        try { using (panel.Marker.Scope()) panel.Draw(_context, content); }
         catch (Exception e)
         {
             _ui.Rewind(checkpoint);

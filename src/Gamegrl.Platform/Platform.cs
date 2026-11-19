@@ -70,6 +70,7 @@ public sealed class PlatformContext(IPlatform platform, IWindow mainWindow)
 /// </summary>
 public static class DesktopHost
 {
+    private static readonly ProfileMarker PumpMarker = ProfileMarker.Get("Host.PumpEvents", ProfileCategory.Engine);
     public static void Run(App app)
     {
         var ctx = app.World.Resource<PlatformContext>();
@@ -77,7 +78,7 @@ public static class DesktopHost
         while (!app.QuitRequested)
         {
             input.BeginFrame();
-            ctx.Platform.PumpEvents(input);
+            using (PumpMarker.Scope()) ctx.Platform.PumpEvents(input);
             if (ctx.Platform.QuitRequested || ctx.MainWindow.CloseRequested) break;
             if (ctx.MainWindow.Minimized)
             {
@@ -85,6 +86,13 @@ public static class DesktopHost
                 continue;
             }
             app.Tick();
+        }
+        // GAMEGRL_PROFILE=1 GAMEGRL_PROFILE_OUT=trace.json profiles a player run (NativeAOT included) for Perfetto.
+        if (Profiler.Enabled && Environment.GetEnvironmentVariable("GAMEGRL_PROFILE_OUT") is { Length: > 0 } path)
+        {
+            long oldest = Profiler.OldestFrame;
+            using (var writer = new StreamWriter(path)) ProfileTree.WriteChromeTrace(writer, oldest, (int)(Profiler.FrameCount - oldest));
+            Console.WriteLine($"gamegrl: profile of the last {Profiler.FrameCount - oldest} frames written to {path}");
         }
     }
 }

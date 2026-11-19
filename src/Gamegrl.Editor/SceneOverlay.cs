@@ -41,8 +41,11 @@ internal sealed partial class EditorHost
 
     private static Vector3 Axis(int axis) => axis == 0 ? Vector3.UnitX : axis == 1 ? Vector3.UnitY : Vector3.UnitZ;
 
+    private static readonly ProfileMarker OverlayMarker = ProfileMarker.Get("Editor.SceneOverlay", ProfileCategory.Editor);
+
     private void SceneInteraction(Input input)
     {
+        using var zone = OverlayMarker.Scope();
         if (_sceneArea.W < 1 || _sceneArea.H < 1 || _sceneColor is null) return;
         var world = _app.World;
         var selected = Document.Selected;

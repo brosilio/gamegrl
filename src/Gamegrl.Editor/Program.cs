@@ -12,7 +12,7 @@ using Gamegrl.Rhi.Vulkan;
 using Key = Gamegrl.Platform.Key;
 
 // Positional arguments are whatever isn't an option or an option's value.
-string[] valued = ["--columns", "--rows", "--colors", "--seconds", "--title", "--extension"];
+string[] valued = ["--columns", "--rows", "--colors", "--seconds", "--title", "--extension", "--command"];
 var positional = new List<string>();
 for (int i = 0; i < args.Length; i++)
 {
@@ -28,9 +28,11 @@ bool terminalMode = args.Contains("--terminal") || args.Contains("--stdio");
 string font = Environment.GetEnvironmentVariable("GAMEGRL_FONT") ?? "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
 if (!File.Exists(project) || !terminalMode && !File.Exists(font))
 {
-    Console.Error.WriteLine("Usage: Gamegrl.Editor [project-root] [game.csproj] [--terminal|--stdio] [--columns N --rows N] [--colors truecolor|256|16|none] [--ascii] [--seconds N]. GAMEGRL_FONT selects the desktop monospace font.");
+    Console.Error.WriteLine("Usage: Gamegrl.Editor [project-root] [game.csproj] [--terminal|--stdio] [--command ID] [--columns N --rows N] [--colors truecolor|256|16|none] [--ascii] [--seconds N]. GAMEGRL_FONT selects the desktop monospace font.");
     return 1;
 }
+// The editor always profiles: the Profiler panel reads the history, and a zone costs tens of nanoseconds.
+Profiler.Enabled = true;
 var assets = new EditorAssets();
 Terminal? terminal = null;
 TerminalDisplay? display = null;
@@ -82,12 +84,17 @@ int terminalHangup = 0;
 using var hangup = terminalMode && (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsFreeBSD())
     ? PosixSignalRegistration.Create(PosixSignal.SIGHUP, signal => { signal.Cancel = true; Interlocked.Exchange(ref terminalHangup, 1); })
     : null;
+// --command ID (repeatable) runs palette commands once the editor is idle after startup, e.g. --command profiler.show.
+var startupCommands = new Queue<string>();
+for (int i = 0; i + 1 < args.Length; i++) if (args[i] == "--command") startupCommands.Enqueue(args[i + 1]);
+var pumpMarker = ProfileMarker.Get("Host.PumpEvents", ProfileCategory.Engine);
+var editorPumpMarker = ProfileMarker.Get("Editor.Pump", ProfileCategory.Editor);
 var elapsed = Stopwatch.StartNew();
 bool closePending = false, recovering = false, disconnected = false;
 while (!editor.Files.ExitRequested && (seconds <= 0 || elapsed.Elapsed.TotalSeconds < seconds))
 {
     input.BeginFrame();
-    platform.Platform.PumpEvents(input);
+    using (pumpMarker.Scope()) platform.Platform.PumpEvents(input);
     if (terminalPlatform?.Disconnected == true || Volatile.Read(ref terminalHangup) != 0)
     {
         if (!recovering) { recovering = true; editor.RecoverOnDisconnect(() => disconnected = true); }
@@ -106,7 +113,12 @@ while (!editor.Files.ExitRequested && (seconds <= 0 || elapsed.Elapsed.TotalSeco
         closePending = false;
         editor.RequestClose();
     }
-    editor.Pump();
+    using (editorPumpMarker.Scope()) editor.Pump();
+    if (startupCommands.Count > 0 && app.World.Resource<Time>().Frame > 2 && !editor.Jobs.Busy && app.World.EntityCount > 0)
+    {
+        string command = startupCommands.Dequeue();
+        if (!editor.RunCommand(command)) Log.Warn("Unknown command: " + command);
+    }
     long changed = Interlocked.Read(ref assetChanged);
     if (changed != 0 && Stopwatch.GetElapsedTime(changed).TotalMilliseconds > 350)
     { Interlocked.CompareExchange(ref assetChanged, 0, changed); editor.Import(); }

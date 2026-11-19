@@ -34,8 +34,10 @@ public enum MemoryKind
 {
     /// <summary>GPU-local; written through uploads.</summary>
     GpuOnly,
-    /// <summary>CPU-writable and persistently mapped; for per-frame data.</summary>
+    /// <summary>CPU-writable and persistently mapped; for per-frame data. May live in GPU memory the CPU reads slowly.</summary>
     Upload,
+    /// <summary>GPU-writable, CPU-readable and persistently mapped, in cached system memory: for downloads.</summary>
+    Readback,
 }
 
 [Flags]
@@ -160,7 +162,7 @@ public abstract unsafe class GpuBuffer : GpuResource
     public BufferUsage Usage { get; protected init; }
     public MemoryKind Memory { get; protected init; }
 
-    /// <summary>The persistent CPU mapping of an <see cref="MemoryKind.Upload"/> buffer; null otherwise.</summary>
+    /// <summary>The persistent CPU mapping of an <see cref="MemoryKind.Upload"/> or <see cref="MemoryKind.Readback"/> buffer; null otherwise.</summary>
     public byte* Mapped { get; protected init; }
 
     /// <summary>Write into an Upload buffer at <paramref name="offset"/>.</summary>
@@ -218,6 +220,25 @@ public abstract class CommandList
     public abstract void CopyToReadback(GpuTexture texture, GpuReadback readback);
     public abstract void Draw(int vertexCount, int instanceCount = 1, int firstVertex = 0, int firstInstance = 0);
     public abstract void DrawIndexed(int indexCount, int instanceCount = 1, int firstIndex = 0, int vertexOffset = 0, int firstInstance = 0);
+
+    /// <summary>
+    /// Time the GPU work recorded inside the <c>using</c> block; results reach the <see cref="Profiler"/> once the
+    /// GPU finishes the frame. Free when profiling is off or the backend has no timestamps.
+    /// </summary>
+    public GpuProfileScope Zone(ProfileMarker marker)
+    {
+        BeginZone(marker);
+        return new GpuProfileScope(this);
+    }
+
+    protected virtual void BeginZone(ProfileMarker marker) { }
+    protected internal virtual void EndZone() { }
+}
+
+/// <summary>An open GPU zone (see <see cref="CommandList.Zone"/>).</summary>
+public readonly ref struct GpuProfileScope(CommandList list)
+{
+    public void Dispose() => list.EndZone();
 }
 
 /// <summary>What <see cref="GpuDevice.BeginFrame"/> hands out: the commands to record and the image to draw into.</summary>

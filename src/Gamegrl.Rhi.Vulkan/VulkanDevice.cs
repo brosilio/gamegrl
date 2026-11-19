@@ -37,6 +37,12 @@ public sealed unsafe class VulkanDevice : GpuDevice
     private readonly ulong _uploadFence;
 
     private readonly PerFrame[] _frames = new PerFrame[FramesInFlight];
+    private readonly float _timestampPeriod;
+    private readonly ulong _timestampMask;
+    private static readonly ProfileMarker WaitFence = ProfileMarker.Get("GPU.WaitForFrame", ProfileCategory.Wait);
+    private static readonly ProfileMarker Acquire = ProfileMarker.Get("GPU.Acquire", ProfileCategory.Wait);
+    private static readonly ProfileMarker Present = ProfileMarker.Get("GPU.Present", ProfileCategory.Wait);
+    private static readonly ProfileMarker Submit = ProfileMarker.Get("GPU.Submit", ProfileCategory.Engine);
     private ulong _frameNumber;
     private VulkanSwapchain? _currentSwapchain;
     private uint _currentImage;
@@ -127,6 +133,16 @@ public sealed unsafe class VulkanDevice : GpuDevice
                 (int)*(ulong*)(p + VkPhysicalDevicePropertiesLayout.MinUniformBufferOffsetAlignment),
                 (int)*(ulong*)(p + VkPhysicalDevicePropertiesLayout.MinStorageBufferOffsetAlignment),
                 *(uint*)(p + VkPhysicalDevicePropertiesLayout.MaxUniformBufferRange));
+            _timestampPeriod = *(float*)(p + VkPhysicalDevicePropertiesLayout.TimestampPeriod);
+        }
+        {
+            uint familyCount;
+            Vk.GetPhysicalDeviceQueueFamilyProperties(_physical, &familyCount, null);
+            var families = stackalloc VkQueueFamilyProperties[(int)familyCount];
+            Vk.GetPhysicalDeviceQueueFamilyProperties(_physical, &familyCount, families);
+            uint bits = families[_queueFamily].TimestampValidBits;
+            // No timestamps (bits 0) or no period: GPU zones stay off.
+            _timestampMask = bits == 0 || _timestampPeriod <= 0 ? 0 : bits >= 64 ? ulong.MaxValue : (1UL << (int)bits) - 1;
         }
         VkPhysicalDeviceMemoryProperties mem;
         Vk.GetPhysicalDeviceMemoryProperties(_physical, &mem);
@@ -174,6 +190,13 @@ public sealed unsafe class VulkanDevice : GpuDevice
             f.List.Cmd = f.Cmd; f.List.Device = this;
             f.Fence = CreateFence(signaled: true);
             f.ImageAcquired = CreateSemaphore();
+            if (_timestampMask != 0)
+            {
+                var queries = new VkQueryPoolCreateInfo { SType = VkStructureType.QueryPoolCreateInfo, QueryType = 2 /* timestamp */, QueryCount = VulkanCommandList.MaxQueries };
+                ulong qp;
+                Vk.Check(Vk.CreateQueryPool(_device, &queries, null, &qp), "vkCreateQueryPool");
+                f.List.QueryPool = qp;
+            }
         }
 
         _uploadPool = CreateCommandPool(VkConst.CommandPoolResetCommandBuffer);
@@ -250,12 +273,16 @@ public sealed unsafe class VulkanDevice : GpuDevice
         Vk.Check(Vk.CreateBuffer(_device, &bci, null, &buffer), "vkCreateBuffer");
         VkMemoryRequirements req;
         Vk.GetBufferMemoryRequirements(_device, buffer, &req);
-        ulong memory = desc.Memory == MemoryKind.Upload
-            ? Allocate(req, VkConst.MemoryHostVisible | VkConst.MemoryHostCoherent, VkConst.MemoryDeviceLocal)
-            : Allocate(req, VkConst.MemoryDeviceLocal, 0);
+        // Readbacks avoid device-local memory: with resizable BAR it's host-visible, but CPU reads cross PCIe uncached.
+        ulong memory = desc.Memory switch
+        {
+            MemoryKind.Upload => Allocate(req, VkConst.MemoryHostVisible | VkConst.MemoryHostCoherent, VkConst.MemoryDeviceLocal),
+            MemoryKind.Readback => Allocate(req, VkConst.MemoryHostVisible | VkConst.MemoryHostCoherent, VkConst.MemoryHostCached, avoid: VkConst.MemoryDeviceLocal),
+            _ => Allocate(req, VkConst.MemoryDeviceLocal, 0),
+        };
         Vk.Check(Vk.BindBufferMemory(_device, buffer, memory, 0), "vkBindBufferMemory");
         void* mapped = null;
-        if (desc.Memory == MemoryKind.Upload) Vk.Check(Vk.MapMemory(_device, memory, 0, VkConst.WholeSize, 0, &mapped), "vkMapMemory");
+        if (desc.Memory != MemoryKind.GpuOnly) Vk.Check(Vk.MapMemory(_device, memory, 0, VkConst.WholeSize, 0, &mapped), "vkMapMemory");
         return new VulkanBuffer(this, desc, buffer, memory, (byte*)mapped);
     }
 
@@ -479,10 +506,12 @@ public sealed unsafe class VulkanDevice : GpuDevice
             if (status == VkResult.Timeout) return false;
             Vk.Check(status, "vkWaitForFences");
             FlushDeletes(slot);
+            slot.List.Collect(_device, _timestampPeriod, _timestampMask);
             Vk.Check(Vk.ResetFences(_device, 1, &ready), "vkResetFences");
             Vk.Check(Vk.ResetCommandPool(_device, slot.Pool, 0), "vkResetCommandPool");
             var start = new VkCommandBufferBeginInfo { SType = VkStructureType.CommandBufferBeginInfo, Flags = VkConst.CommandBufferOneTimeSubmit };
             Vk.Check(Vk.BeginCommandBuffer(slot.Cmd, &start), "vkBeginCommandBuffer");
+            StartTiming(slot);
             _offscreenFrame = true;
             frame = new Frame(slot.List, offscreen.Texture, (int)(_frameNumber % FramesInFlight), _frameNumber);
             return true;
@@ -491,13 +520,15 @@ public sealed unsafe class VulkanDevice : GpuDevice
         var f = _frames[_frameNumber % FramesInFlight];
 
         ulong fence = f.Fence;
-        Vk.Check(Vk.WaitForFences(_device, 1, &fence, 1, ulong.MaxValue), "vkWaitForFences");
+        using (WaitFence.Scope()) Vk.Check(Vk.WaitForFences(_device, 1, &fence, 1, ulong.MaxValue), "vkWaitForFences");
         FlushDeletes(f);
+        f.List.Collect(_device, _timestampPeriod, _timestampMask);
 
         if (!sc.EnsureCurrent()) return false;
 
         uint image;
-        var r = Vk.AcquireNextImageKHR(_device, sc.Handle, ulong.MaxValue, f.ImageAcquired, 0, &image);
+        VkResult r;
+        using (Acquire.Scope()) r = Vk.AcquireNextImageKHR(_device, sc.Handle, ulong.MaxValue, f.ImageAcquired, 0, &image);
         if (r == VkResult.ErrorOutOfDateKhr)
         {
             sc.Invalidate();
@@ -510,6 +541,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
         Vk.Check(Vk.ResetCommandPool(_device, f.Pool, 0), "vkResetCommandPool");
         var begin = new VkCommandBufferBeginInfo { SType = VkStructureType.CommandBufferBeginInfo, Flags = VkConst.CommandBufferOneTimeSubmit };
         Vk.Check(Vk.BeginCommandBuffer(f.Cmd, &begin), "vkBeginCommandBuffer");
+        StartTiming(f);
 
         var backbuffer = sc.Images[image];
         backbuffer.Layout = VkConst.ImageLayoutUndefined; // contents from the last present are discarded
@@ -524,6 +556,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
         if (_offscreenFrame)
         {
             var slot = _frames[_frameNumber % FramesInFlight];
+            slot.List.FinishTiming();
             Vk.Check(Vk.EndCommandBuffer(slot.Cmd), "vkEndCommandBuffer");
             var buffer = new VkCommandBufferSubmitInfo { SType = VkStructureType.CommandBufferSubmitInfo, CommandBuffer = slot.Cmd };
             var submission = new VkSubmitInfo2 { SType = VkStructureType.SubmitInfo2, CommandBufferInfoCount = 1, CommandBufferInfos = &buffer };
@@ -534,6 +567,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
         var f = _frames[_frameNumber % FramesInFlight];
         var backbuffer = sc.Images[_currentImage];
         Barriers.Transition(f.Cmd, backbuffer, VkConst.ImageLayoutPresentSrc);
+        f.List.FinishTiming();
         Vk.Check(Vk.EndCommandBuffer(f.Cmd), "vkEndCommandBuffer");
 
         var wait = new VkSemaphoreSubmitInfo { SType = VkStructureType.SemaphoreSubmitInfo, Semaphore = f.ImageAcquired, StageMask = VkConst.StageColorAttachmentOutput };
@@ -549,7 +583,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
             SignalSemaphoreInfoCount = 1,
             SignalSemaphoreInfos = &signal,
         };
-        Vk.Check(Vk.QueueSubmit2(_queue, 1, &submit, f.Fence), "vkQueueSubmit2");
+        using (Submit.Scope()) Vk.Check(Vk.QueueSubmit2(_queue, 1, &submit, f.Fence), "vkQueueSubmit2");
 
         ulong swapchain = sc.Handle;
         ulong renderFinished = sc.RenderFinished[_currentImage];
@@ -563,13 +597,21 @@ public sealed unsafe class VulkanDevice : GpuDevice
             Swapchains = &swapchain,
             ImageIndices = &image,
         };
-        var r = Vk.QueuePresentKHR(_queue, &present);
+        VkResult r;
+        using (Present.Scope()) r = Vk.QueuePresentKHR(_queue, &present);
         if (r is VkResult.ErrorOutOfDateKhr or VkResult.SuboptimalKhr) sc.Invalidate();
         else Vk.Check(r, "vkQueuePresentKHR");
 
         f.Submitted = _frameNumber;
         _currentSwapchain = null;
         _frameNumber++;
+    }
+
+    private void StartTiming(PerFrame f)
+    {
+        if (_timestampMask == 0 || !Profiler.Enabled) return;
+        f.List.StartTiming(_frameNumber);
+        Profiler.MarkGpuFrame(_frameNumber);
     }
 
     internal bool IsComplete(ulong number)
@@ -665,9 +707,10 @@ public sealed unsafe class VulkanDevice : GpuDevice
         return cmd;
     }
 
-    private ulong Allocate(in VkMemoryRequirements req, uint required, uint preferred)
+    private ulong Allocate(in VkMemoryRequirements req, uint required, uint preferred, uint avoid = 0)
     {
-        int type = FindMemoryType(req.MemoryTypeBits, required | preferred);
+        int type = FindMemoryType(req.MemoryTypeBits, required | preferred, avoid);
+        if (type < 0) type = FindMemoryType(req.MemoryTypeBits, required, avoid);
         if (type < 0) type = FindMemoryType(req.MemoryTypeBits, required);
         if (type < 0) throw new InvalidOperationException("No suitable Vulkan memory type.");
         var ai = new VkMemoryAllocateInfo { SType = VkStructureType.MemoryAllocateInfo, AllocationSize = req.Size, MemoryTypeIndex = (uint)type };
@@ -676,11 +719,11 @@ public sealed unsafe class VulkanDevice : GpuDevice
         return memory;
     }
 
-    private int FindMemoryType(uint bits, uint flags)
+    private int FindMemoryType(uint bits, uint flags, uint avoid = 0)
     {
         var mem = _memory;
         for (int i = 0; i < mem.MemoryTypeCount; i++)
-            if ((bits & (1u << i)) != 0 && (mem.Type(i).PropertyFlags & flags) == flags) return i;
+            if ((bits & (1u << i)) != 0 && (mem.Type(i).PropertyFlags & flags) == flags && (mem.Type(i).PropertyFlags & avoid) == 0) return i;
         return -1;
     }
 
@@ -806,6 +849,7 @@ public sealed unsafe class VulkanDevice : GpuDevice
             Vk.DestroyFence(_device, f.Fence, null);
             Vk.DestroySemaphore(_device, f.ImageAcquired, null);
             Vk.DestroyCommandPool(_device, f.Pool, null);
+            if (f.List.QueryPool != 0) Vk.DestroyQueryPool(_device, f.List.QueryPool, null);
         }
         Vk.DestroyFence(_device, _uploadFence, null);
         Vk.DestroyCommandPool(_device, _uploadPool, null);

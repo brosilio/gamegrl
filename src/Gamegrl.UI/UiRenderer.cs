@@ -68,8 +68,11 @@ public sealed class UiRenderer : IDisposable
     /// <paramref name="height"/> pixels. <paramref name="scale"/> is pixels per UI unit: 2 on a HiDPI window, 1/8 when
     /// a host shows the game at a reduced preview size. Several lists may be drawn in one frame.
     /// </summary>
+    private static readonly ProfileMarker GpuMarker = ProfileMarker.Get("GPU.UI", ProfileCategory.Gpu);
+
     public void Render(Frame frame, DrawList list, int width, int height, float scale = 1)
     {
+        using var gpu = frame.Commands.Zone(GpuMarker);
         if (_frame != frame.Number)
         {
             _frame = frame.Number;

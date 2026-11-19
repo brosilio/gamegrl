@@ -48,7 +48,8 @@ public sealed unsafe class World : IDisposable
 
     public int EntityCount => _alive;
 
-    public IReadOnlyList<Archetype> Archetypes => _archetypes;
+    /// <summary>Every archetype. A span, so iterating allocates nothing; don't hold it across structural changes.</summary>
+    public ReadOnlySpan<Archetype> Archetypes => System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_archetypes);
 
     // ------------------------------------------------------------------ entities
 

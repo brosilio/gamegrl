@@ -3,7 +3,11 @@ using Gamegrl.UI;
 namespace Gamegrl.Editor;
 
 public enum DockRegion { Left, Center, Right, Bottom }
-public sealed record EditorPanel(string Id, string Title, DockRegion Region, Action<EditorContext, Rect> Draw);
+public sealed record EditorPanel(string Id, string Title, DockRegion Region, Action<EditorContext, Rect> Draw)
+{
+    /// <summary>The panel's zone in the profiler.</summary>
+    public ProfileMarker Marker { get; } = ProfileMarker.Get("Editor.Panel." + Id, ProfileCategory.Editor);
+}
 /// <summary>A command palette entry. <paramref name="Shortcut"/> is display text only, such as "Ctrl+S".</summary>
 public sealed record EditorCommand(string Id, string Label, Action<EditorContext> Execute, string? Shortcut = null);
 public interface IEditorExtension { void Register(EditorRegistry registry); }
@@ -124,6 +128,15 @@ public sealed class DockLayout
             _tabs[region].Add(panel.Id);
             _selected[region] ??= panel.Id;
         }
+    }
+
+    /// <summary>Select a panel's tab wherever it is docked; false if no such tab.</summary>
+    public bool Show(string id)
+    {
+        int region = Find(id);
+        if (region < 0) return false;
+        _selected[region] = id;
+        return true;
     }
 
     public void Select(DockRegion region, string id)

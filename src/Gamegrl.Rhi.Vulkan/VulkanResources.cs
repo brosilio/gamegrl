@@ -162,7 +162,7 @@ internal sealed unsafe class VulkanReadback : GpuReadback
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width); ArgumentOutOfRangeException.ThrowIfNegativeOrZero(height);
         _device = device; Width = width; Height = height;
-        Buffer = (VulkanBuffer)device.CreateBuffer(new BufferDesc(checked(width * height * 4), BufferUsage.CopyDst, MemoryKind.Upload));
+        Buffer = (VulkanBuffer)device.CreateBuffer(new BufferDesc(checked(width * height * 4), BufferUsage.CopyDst, MemoryKind.Readback));
     }
     public override bool Pending => Frame is not null;
     public override bool TryRead(Span<byte> destination)

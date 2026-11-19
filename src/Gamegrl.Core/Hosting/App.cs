@@ -182,20 +182,28 @@ public sealed class App : IDisposable
     }
 
     /// <summary>Advance one frame by <paramref name="deltaSeconds"/> (a host with its own clock passes it in).</summary>
+    private static readonly ProfileMarker[] PhaseMarkers = Enum.GetValues<Phase>().Select(p => ProfileMarker.Get("Phase." + p, ProfileCategory.Engine)).ToArray();
+
+    private void RunPhase(Phase phase)
+    {
+        using (PhaseMarkers[(int)phase].Scope()) Schedule.Run(phase, World);
+    }
+
     public void Tick(double deltaSeconds)
     {
+        Profiler.BeginFrame();
         ref var time = ref World.Resource<Time>();
         time.Delta = (float)deltaSeconds;
         time.Elapsed += deltaSeconds;
         time.Frame++;
 
-        Schedule.Run(Phase.First, World);
+        RunPhase(Phase.First);
 
         _accumulatorNs += (long)Math.Round(deltaSeconds * 1e9);
         int steps = 0;
         while (_accumulatorNs >= _fixedStepNs && steps < MaxFixedStepsPerFrame)
         {
-            Schedule.Run(Phase.FixedUpdate, World);
+            RunPhase(Phase.FixedUpdate);
             World.Resource<Time>().Tick++;
             _accumulatorNs -= _fixedStepNs;
             steps++;
@@ -203,10 +211,11 @@ public sealed class App : IDisposable
         if (steps == MaxFixedStepsPerFrame && _accumulatorNs > _fixedStepNs) _accumulatorNs = _fixedStepNs;
         World.Resource<Time>().FixedAlpha = (float)((double)_accumulatorNs / _fixedStepNs);
 
-        Schedule.Run(Phase.Update, World);
-        Schedule.Run(Phase.PostUpdate, World);
-        Schedule.Run(Phase.Render, World);
-        Schedule.Run(Phase.Last, World);
+        RunPhase(Phase.Update);
+        RunPhase(Phase.PostUpdate);
+        RunPhase(Phase.Render);
+        RunPhase(Phase.Last);
+        Profiler.EndFrame();
     }
 
     /// <summary>Preserve fractional fixed-step time across editor play sessions.</summary>

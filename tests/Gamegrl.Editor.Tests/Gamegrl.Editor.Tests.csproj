@@ -7,4 +7,8 @@
     <ProjectReference Include="../Gamegrl.Editor.PluginFixture/Gamegrl.Editor.PluginFixture.csproj" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../src/Gamegrl.Editor/Gamegrl.Editor.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- The bench's measuring and baseline code, for the editor scenarios (the bench flag). -->
+    <Compile Include="../Gamegrl.Bench/BenchReport.cs" Link="BenchReport.cs" />
+  </ItemGroup>
 </Project>

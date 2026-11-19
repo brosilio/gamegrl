@@ -57,6 +57,8 @@ public interface ISystem
     string Name { get; }
     Phase Phase { get; }
     int Order { get; }
+    /// <summary>Whose time the system's zone counts as. Generated systems outside the engine's assemblies say Game.</summary>
+    ProfileCategory Category => ProfileCategory.Engine;
     void Initialize(World world);
     void Run(World world);
 }
@@ -65,13 +67,16 @@ public interface ISystem
 public sealed class Schedule
 {
     private readonly List<ISystem>[] _phases;
+    private readonly List<ProfileMarker>[] _markers;
+    private static readonly ProfileMarker Playback = ProfileMarker.Get("Commands.Playback", ProfileCategory.Engine);
     private bool _initialized;
     private World? _world;
 
     public Schedule()
     {
         _phases = new List<ISystem>[Enum.GetValues<Phase>().Length];
-        for (int i = 0; i < _phases.Length; i++) _phases[i] = new List<ISystem>();
+        _markers = new List<ProfileMarker>[_phases.Length];
+        for (int i = 0; i < _phases.Length; i++) { _phases[i] = new List<ISystem>(); _markers[i] = new List<ProfileMarker>(); }
     }
 
     /// <summary>Add a system; after the app is built it's initialized immediately (the editor adds game systems this way).</summary>
@@ -81,10 +86,19 @@ public sealed class Schedule
         int at = list.Count;
         while (at > 0 && list[at - 1].Order > system.Order) at--;
         list.Insert(at, system);
+        _markers[(int)system.Phase].Insert(at, ProfileMarker.Get(system.Name, system.Category));
         if (_initialized) system.Initialize(_world!);
     }
 
-    public bool Remove(ISystem system) => _phases[(int)system.Phase].Remove(system);
+    public bool Remove(ISystem system)
+    {
+        var list = _phases[(int)system.Phase];
+        int at = list.IndexOf(system);
+        if (at < 0) return false;
+        list.RemoveAt(at);
+        _markers[(int)system.Phase].RemoveAt(at);
+        return true;
+    }
 
     public IReadOnlyList<ISystem> SystemsIn(Phase phase) => _phases[(int)phase];
 
@@ -99,11 +113,12 @@ public sealed class Schedule
     public void Run(Phase phase, World world)
     {
         var list = _phases[(int)phase];
+        var markers = _markers[(int)phase];
         for (int i = 0; i < list.Count; i++)
         {
-            var s = list[i];
-            s.Run(world);
-            if (!world.Commands.IsEmpty) world.Commands.Playback();
+            using (markers[i].Scope()) list[i].Run(world);
+            if (!world.Commands.IsEmpty)
+                using (Playback.Scope()) world.Commands.Playback();
         }
     }
 }

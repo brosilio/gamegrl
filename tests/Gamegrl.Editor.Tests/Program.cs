@@ -6,6 +6,7 @@ using Gamegrl.UI;
 using Gamegrl.UI.Fonts;
 
 if (args.Contains("--graphics") || args.Contains("--terminal-smoke")) return Gamegrl.Tests.GraphicsSmoke.Run(args.Contains("--terminal-smoke"));
+if (args.Contains("--bench")) return Gamegrl.Tests.EditorBench.Run(args);
 
 int failed = 0, total = 0;
 void Check(bool condition, string message = "Assertion failed") { if (!condition) throw new Exception(message); }
@@ -81,7 +82,7 @@ Test("Play restores entities and time without adding history", () =>
     Check(!doc.Playing && doc.Text == edit && doc.CanUndo);
     Check(world.Resource<Time>().Elapsed == 10);
     doc.Undo();
-    Check(world.Get<LocalTransform>(world.Archetypes.First(a => a.Has<LocalTransform>() && a.Count > 0).Entities[0]).Position.Z == 0);
+    Check(world.Get<LocalTransform>(world.Archetypes.ToArray().First(a => a.Has<LocalTransform>() && a.Count > 0).Entities[0]).Position.Z == 0);
 });
 Test("A held scene survives failed code loads verbatim, blocks edits and returns on restore", () =>
 {
