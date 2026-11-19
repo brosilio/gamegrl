@@ -69,9 +69,11 @@ public sealed partial class PhysicsWorld2D
         if (_wide.Length < w) { _wide = new AlignedArray<WideConstraint>(w * 2); _wideCold = new AlignedArray<WideCold>(w * 2); }
         // Padding lanes read some body (never written: they have no mass).
         _paddingBody = _constraintCount > 0 ? Contacts[_order[0]].BodyA : 0;
+        _padContact = new Contact { BodyA = _paddingBody, BodyB = _paddingBody };
     }
 
     private int _paddingBody;
+    private Contact _padContact; // what empty lanes read: no points, on the padding body
 
     /// <summary>Pack batch <paramref name="w"/> from its four prepared constraints (padding lanes get no mass, so they do nothing).</summary>
     private unsafe void PackBatch(int w)
@@ -82,14 +84,6 @@ public sealed partial class PhysicsWorld2D
         int n = Math.Min(4, _colorStart[color + 1] - i);
         ref var wc = ref _wide[w];
         ref var cold = ref _wideCold[w];
-        // Each contact is prepared straight into its lane (as Box2D does); empty lanes stay zero: no mass, no impulse.
-        if (n < 4)
-        {
-            wc = default;
-            wc.A0 = wc.A1 = wc.A2 = wc.A3 = wc.B0 = wc.B1 = wc.B2 = wc.B3 = _paddingBody;
-            cold = default;
-            cold.C0 = cold.C1 = cold.C2 = cold.C3 = -1;
-        }
         // The next batch's contacts are scattered through the contact array: start fetching them now.
         if (Sse.IsSupported)
         {
@@ -100,84 +94,88 @@ public sealed partial class PhysicsWorld2D
                 Sse.Prefetch0(contact); Sse.Prefetch0(contact + 64);
             }
         }
-        for (int lane = 0; lane < n; lane++) PrepareLane(ref wc, ref cold, lane, i + lane);
-        Derive(ref wc);
-    }
+        // The four contacts; empty lanes read a zeroed contact on the padding body and get zero masses below.
+        int k0 = _order[i], k1 = n > 1 ? _order[i + 1] : -1, k2 = n > 2 ? _order[i + 2] : -1, k3 = n > 3 ? _order[i + 3] : -1;
+        ref readonly var c0 = ref Contacts[k0];
+        ref readonly var c1 = ref k1 >= 0 ? ref Contacts[k1] : ref _padContact;
+        ref readonly var c2 = ref k2 >= 0 ? ref Contacts[k2] : ref _padContact;
+        ref readonly var c3 = ref k3 >= 0 ? ref Contacts[k3] : ref _padContact;
+        cold.C0 = k0; cold.C1 = k1; cold.C2 = k2; cold.C3 = k3;
+        wc.A0 = c0.BodyA; wc.A1 = c1.BodyA; wc.A2 = c2.BodyA; wc.A3 = c3.BodyA;
+        wc.B0 = c0.BodyB; wc.B1 = c1.BodyB; wc.B2 = c2.BodyB; wc.B3 = c3.BodyB;
 
-    /// <summary>The batch's step constants, in lanes.</summary>
-    private static void Derive(ref WideConstraint c)
-    {
-        var nx = c.NormalX; var ny = c.NormalY;
+        // Fields come in as 16-byte rows per contact and are transposed into lanes (like the body gathers), so every
+        // lane value is built in registers and stored once: scalar lane stores read back as vectors would stall on
+        // store forwarding.
+        Transpose(Row(c0.Normal.X), Row(c1.Normal.X), Row(c2.Normal.X), Row(c3.Normal.X), out var nx, out var ny, out var friction, out var restitution);
+        var valid = Vector128.LessThan(Vector128.Create(0, 1, 2, 3), Vector128.Create(n)).AsSingle();
+        var masses = (double*)_stepMass.Pointer; // (inverse mass, inverse inertia) per body
+        Transpose(Vector128.Create(masses[wc.A0], masses[wc.B0]).AsSingle(), Vector128.Create(masses[wc.A1], masses[wc.B1]).AsSingle(),
+            Vector128.Create(masses[wc.A2], masses[wc.B2]).AsSingle(), Vector128.Create(masses[wc.A3], masses[wc.B3]).AsSingle(),
+            out var mA, out var iA, out var mB, out var iB);
+        mA &= valid; iA &= valid; mB &= valid; iB &= valid;
+        wc.NormalX = nx; wc.NormalY = ny; wc.Friction = friction; cold.Restitution = restitution;
+        wc.MassA = mA; wc.MassB = mB; wc.InertiaA = iA; wc.InertiaB = iB;
+
+        var states = States.Pointer;
+        GatherRow(states, wc.A0, wc.A1, wc.A2, wc.A3, 0, out var vxA, out var vyA, out var wA, out _);
+        GatherRow(states, wc.B0, wc.B1, wc.B2, wc.B3, 0, out var vxB, out var vyB, out var wB, out _);
         var tx = ny; var ty = -nx; // right perpendicular
-        ref var p1 = ref c.P0; ref var p2 = ref c.P1;
-        p1.RnA = p1.AnchorAX * ny - p1.AnchorAY * nx; p1.RnB = p1.AnchorBX * ny - p1.AnchorBY * nx;
-        p2.RnA = p2.AnchorAX * ny - p2.AnchorAY * nx; p2.RnB = p2.AnchorBX * ny - p2.AnchorBY * nx;
-        p1.RtA = p1.AnchorAX * ty - p1.AnchorAY * tx; p1.RtB = p1.AnchorBX * ty - p1.AnchorBY * tx;
-        p2.RtA = p2.AnchorAX * ty - p2.AnchorAY * tx; p2.RtB = p2.AnchorBX * ty - p2.AnchorBY * tx;
-        var iA = c.InertiaA; var iB = c.InertiaB;
+        var invMass = mA + mB;
+        // A missing second point keeps zero masses, so every impulse on it is zero.
+        int second = (c0.Count > 1 ? 1 : 0) | (c1.Count > 1 ? 2 : 0) | (c2.Count > 1 ? 4 : 0) | (c3.Count > 1 ? 8 : 0);
+        var hasSecond = Vector128.Equals(Vector128.Create(second) & Vector128.Create(1, 2, 4, 8), Vector128.Create(1, 2, 4, 8)).AsSingle();
+        cold.RelativeVelocity0 = PackPoint(ref wc.P0, Row(c0.P0.AnchorA.X), Row(c1.P0.AnchorA.X), Row(c2.P0.AnchorA.X), Row(c3.P0.AnchorA.X),
+            Row(c0.P0.Separation), Row(c1.P0.Separation), Row(c2.P0.Separation), Row(c3.P0.Separation),
+            nx, ny, tx, ty, invMass, iA, iB, vxA, vyA, wA, vxB, vyB, wB, valid);
+        cold.RelativeVelocity1 = PackPoint(ref wc.P1, Row(c0.P1.AnchorA.X), Row(c1.P1.AnchorA.X), Row(c2.P1.AnchorA.X), Row(c3.P1.AnchorA.X),
+            Row(c0.P1.Separation), Row(c1.P1.Separation), Row(c2.P1.Separation), Row(c3.P1.Separation),
+            nx, ny, tx, ty, invMass, iA, iB, vxA, vyA, wA, vxB, vyB, wB, hasSecond & valid);
+
+        // How each row's impulse changes the later rows' velocities.
+        ref var p1 = ref wc.P0; ref var p2 = ref wc.P1;
         var wnA1 = iA * p1.RnA; var wnB1 = iB * p1.RnB;
         var wnA2 = iA * p2.RnA; var wnB2 = iB * p2.RnB;
         var wtA1 = iA * p1.RtA; var wtB1 = iB * p1.RtB;
-        var invMass = c.MassA + c.MassB;
-        c.K21 = invMass + (wnA1 * p2.RnA + wnB1 * p2.RnB);
-        c.K31 = wnA1 * p1.RtA + wnB1 * p1.RtB;
-        c.K32 = wnA2 * p1.RtA + wnB2 * p1.RtB;
-        c.K41 = wnA1 * p2.RtA + wnB1 * p2.RtB;
-        c.K42 = wnA2 * p2.RtA + wnB2 * p2.RtB;
-        c.K43 = invMass + (wtA1 * p2.RtA + wtB1 * p2.RtB);
+        wc.K21 = invMass + (wnA1 * p2.RnA + wnB1 * p2.RnB);
+        wc.K31 = wnA1 * p1.RtA + wnB1 * p1.RtB;
+        wc.K32 = wnA2 * p1.RtA + wnB2 * p1.RtB;
+        wc.K41 = wnA1 * p2.RtA + wnB1 * p2.RtB;
+        wc.K42 = wnA2 * p2.RtA + wnB2 * p2.RtB;
+        wc.K43 = invMass + (wtA1 * p2.RtA + wtB1 * p2.RtB);
     }
 
-    private void PrepareLane(ref WideConstraint wc, ref WideCold cold, int lane, int constraint)
-    {
-        int contact = _order[constraint];
-        ref readonly var c = ref Contacts[contact];
-        int a = c.BodyA, b = c.BodyB;
-        Unsafe.Add(ref cold.C0, lane) = contact;
-        Unsafe.Add(ref wc.A0, lane) = a;
-        Unsafe.Add(ref wc.B0, lane) = b;
-        var massA = _stepMass[a]; var massB = _stepMass[b];
-        float mA = massA.X, mB = massB.X, iA = massA.Y, iB = massB.Y;
-        var n = c.Normal;
-        Lane(ref wc.NormalX, lane) = n.X; Lane(ref wc.NormalY, lane) = n.Y;
-        Lane(ref wc.Friction, lane) = c.Friction; Lane(ref cold.Restitution, lane) = c.Restitution;
-        Lane(ref wc.MassA, lane) = mA; Lane(ref wc.MassB, lane) = mB;
-        Lane(ref wc.InertiaA, lane) = iA; Lane(ref wc.InertiaB, lane) = iB;
-        ref readonly var sa = ref States[a]; ref readonly var sb = ref States[b];
-        Lane(ref cold.RelativeVelocity0, lane) = PreparePointLane(ref wc.P0, lane, c.P0, n, mA + mB, iA, iB, sa, sb);
-        if (c.Count > 1) Lane(ref cold.RelativeVelocity1, lane) = PreparePointLane(ref wc.P1, lane, c.P1, n, mA + mB, iA, iB, sa, sb);
-        else { ClearLane(ref wc.P1, lane); Lane(ref cold.RelativeVelocity1, lane) = 0; } // no second point: zero masses and impulses make it inert
-    }
-
+    /// <summary>Sixteen bytes of a contact starting at <paramref name="first"/> (fields laid out in order).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float PreparePointLane(ref WidePoint w, int lane, in ContactPoint src, Vector2 n, float m, float iA, float iB, in BodyState sa, in BodyState sb)
+    private static F4 Row(in float first) => Vector128.LoadUnsafe(ref Unsafe.AsRef(in first));
+
+    /// <summary>
+    /// One contact point in lanes, from per-contact rows (anchors: rAx rAy rBx rBy; then separation, base separation,
+    /// normal and tangent impulse), with its step constants.
+    /// </summary>
+    /// <returns>The approach speed along the normal (for restitution).</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static F4 PackPoint(ref WidePoint p, F4 a0, F4 a1, F4 a2, F4 a3, F4 s0, F4 s1, F4 s2, F4 s3,
+        F4 nx, F4 ny, F4 tx, F4 ty, F4 invMass, F4 iA, F4 iB, F4 vxA, F4 vyA, F4 wA, F4 vxB, F4 vyB, F4 wB, F4 exists)
     {
-        var rA = src.AnchorA; var rB = src.AnchorB;
-        Lane(ref w.AnchorAX, lane) = rA.X; Lane(ref w.AnchorAY, lane) = rA.Y;
-        Lane(ref w.AnchorBX, lane) = rB.X; Lane(ref w.AnchorBY, lane) = rB.Y;
-        Lane(ref w.NormalImpulse, lane) = src.NormalImpulse; Lane(ref w.TangentImpulse, lane) = src.TangentImpulse; Lane(ref w.MaxNormalImpulse, lane) = 0;
-        float rnA = rA.X * n.Y - rA.Y * n.X, rnB = rB.X * n.Y - rB.Y * n.X;
-        float k = m + iA * rnA * rnA + iB * rnB * rnB;
-        Lane(ref w.NormalMass, lane) = k > 0 ? 1 / k : 0;
-        // Tangent t = (n.Y, −n.X): cross(r, t) = −(r·n).
-        float rtA = -(rA.X * n.X + rA.Y * n.Y), rtB = -(rB.X * n.X + rB.Y * n.Y);
-        k = m + iA * rtA * rtA + iB * rtB * rtB;
-        Lane(ref w.TangentMass, lane) = k > 0 ? 1 / k : 0;
+        Transpose(a0, a1, a2, a3, out var rax, out var ray, out var rbx, out var rby);
+        Transpose(s0, s1, s2, s3, out var separation, out _, out var normalImpulse, out var tangentImpulse);
+        p.AnchorAX = rax; p.AnchorAY = ray; p.AnchorBX = rbx; p.AnchorBY = rby;
+        p.NormalImpulse = normalImpulse; p.TangentImpulse = tangentImpulse; p.MaxNormalImpulse = F4.Zero;
+        var rnA = rax * ny - ray * nx; var rnB = rbx * ny - rby * nx;
+        var rtA = rax * ty - ray * tx; var rtB = rbx * ty - rby * tx;
+        p.RnA = rnA; p.RnB = rnB; p.RtA = rtA; p.RtB = rtB;
+        var kn = invMass + iA * rnA * rnA + iB * rnB * rnB;
+        var kt = invMass + iA * rtA * rtA + iB * rtB * rtB;
+        p.NormalMass = Vector128.ConditionalSelect(Vector128.GreaterThan(kn, F4.Zero) & exists, Vector128<float>.One / kn, F4.Zero);
+        p.TangentMass = Vector128.ConditionalSelect(Vector128.GreaterThan(kt, F4.Zero) & exists, Vector128<float>.One / kt, F4.Zero);
         // Separation later = Δ(cB + rB) − Δ(cA + rA) along n, plus this constant.
-        Lane(ref w.AdjustedSeparation, lane) = src.Separation - ((rB.X - rA.X) * n.X + (rB.Y - rA.Y) * n.Y);
-        float vx = sb.V.X - sb.W * rB.Y - sa.V.X + sa.W * rA.Y;
-        float vy = sb.V.Y + sb.W * rB.X - sa.V.Y - sa.W * rA.X;
-        return n.X * vx + n.Y * vy; // relative normal velocity, for restitution
+        p.AdjustedSeparation = separation - ((rbx - rax) * nx + (rby - ray) * ny);
+        var vx = (vxB - wB * rby) - (vxA - wA * ray);
+        var vy = (vyB + wB * rbx) - (vyA + wA * rax);
+        return vx * nx + vy * ny;
     }
 
-    private static void ClearLane(ref WidePoint w, int lane)
-    {
-        Lane(ref w.AnchorAX, lane) = 0; Lane(ref w.AnchorAY, lane) = 0; Lane(ref w.AnchorBX, lane) = 0; Lane(ref w.AnchorBY, lane) = 0;
-        Lane(ref w.AdjustedSeparation, lane) = 0; Lane(ref w.NormalImpulse, lane) = 0; Lane(ref w.TangentImpulse, lane) = 0;
-        Lane(ref w.NormalMass, lane) = 0; Lane(ref w.TangentMass, lane) = 0; Lane(ref w.MaxNormalImpulse, lane) = 0;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ref float Lane(ref F4 v, int lane) => ref Unsafe.Add(ref Unsafe.As<F4, float>(ref v), lane);
 
 
     /// <summary>Four bodies' solver state in lanes.</summary>
@@ -235,14 +233,28 @@ public sealed partial class PhysicsWorld2D
         }
     }
 
-    private void WarmStartWide(ref WideConstraint c)
+    private unsafe void WarmStartRange(int start, int end)
     {
-        var a = Gather(c.A0, c.A1, c.A2, c.A3); var b = Gather(c.B0, c.B1, c.B2, c.B3);
-        var tx = c.NormalY; var ty = -c.NormalX; // right perpendicular
-        ApplyWide(ref a, ref b, c, c.P0, c.P0.NormalImpulse * c.NormalX + c.P0.TangentImpulse * tx, c.P0.NormalImpulse * c.NormalY + c.P0.TangentImpulse * ty);
-        ApplyWide(ref a, ref b, c, c.P1, c.P1.NormalImpulse * c.NormalX + c.P1.TangentImpulse * tx, c.P1.NormalImpulse * c.NormalY + c.P1.TangentImpulse * ty);
-        Scatter(a.VX, a.VY, a.W, c.MassA, c.InertiaA, c.A0, c.A1, c.A2, c.A3);
-        Scatter(b.VX, b.VY, b.W, c.MassB, c.InertiaB, c.B0, c.B1, c.B2, c.B3);
+        var wide = _wide.Pointer; var states = States.Pointer;
+        for (int w = start; w < end; w++) WarmStartWide(ref wide[w], states);
+    }
+
+    /// <summary>Last step's impulses, applied again: velocities only, with the cross products prepared in Pack.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe void WarmStartWide(ref WideConstraint c, BodyState* states)
+    {
+        GatherRow(states, c.A0, c.A1, c.A2, c.A3, 0, out var vxA, out var vyA, out var wA, out _);
+        GatherRow(states, c.B0, c.B1, c.B2, c.B3, 0, out var vxB, out var vyB, out var wB, out _);
+        var nx = c.NormalX; var ny = c.NormalY;
+        ref readonly var p1 = ref c.P0; ref readonly var p2 = ref c.P1;
+        // P = Nn + Tt for each point (t = (ny, −nx)); r × P = N (r × n) + T (r × t).
+        var normal = p1.NormalImpulse + p2.NormalImpulse; var tangent = p1.TangentImpulse + p2.TangentImpulse;
+        var px = normal * nx + tangent * ny; var py = normal * ny - tangent * nx;
+        var angularA = (p1.NormalImpulse * p1.RnA + p2.NormalImpulse * p2.RnA) + (p1.TangentImpulse * p1.RtA + p2.TangentImpulse * p2.RtA);
+        var angularB = (p1.NormalImpulse * p1.RnB + p2.NormalImpulse * p2.RnB) + (p1.TangentImpulse * p1.RtB + p2.TangentImpulse * p2.RtB);
+        var mA = c.MassA; var mB = c.MassB; var iA = c.InertiaA; var iB = c.InertiaB;
+        Scatter(states, vxA - mA * px, vyA - mA * py, wA - iA * angularA, mA, iA, c.A0, c.A1, c.A2, c.A3);
+        Scatter(states, vxB + mB * px, vyB + mB * py, wB + iB * angularB, mB, iB, c.B0, c.B1, c.B2, c.B3);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -262,46 +274,77 @@ public sealed partial class PhysicsWorld2D
     /// solved once per substep, in the relax pass, as Box2D does; the second point sees the first's impulse through the
     /// coupling k21, and the bodies' velocities change once.
     /// </summary>
-    private void PushWide(ref WideConstraint c, float invH, float maxPushout)
+    /// <summary>Per-pass constants, made once per range rather than once per batch.</summary>
+    private struct PushConstants
     {
-        // Plain vector locals rather than a body struct, gathered as needed: the JIT keeps them in registers.
-        GatherRow(c.A0, c.A1, c.A2, c.A3, 1, out var dpxA, out var dpyA, out var qcA, out var qsA);
-        GatherRow(c.B0, c.B1, c.B2, c.B3, 1, out var dpxB, out var dpyB, out var qcB, out var qsB);
-        var nx = c.NormalX; var ny = c.NormalY;
-        var dpx = dpxB - dpxA; var dpy = dpyB - dpyA;
-        var inv = Vector128.Create(invH);
-        ref var p1 = ref c.P0; ref var p2 = ref c.P1;
-        var s1 = Separation(qcA, qsA, qcB, qsB, nx, ny, p1, dpx, dpy);
-        var s2 = Separation(qcA, qsA, qcB, qsB, nx, ny, p2, dpx, dpy);
-        // Contacts with an immovable body are stiffer (Box2D's static softness); chosen per lane from the masses.
-        var anchored = (Vector128.Equals(c.MassA, F4.Zero) & Vector128.Equals(c.InertiaA, F4.Zero)) | (Vector128.Equals(c.MassB, F4.Zero) & Vector128.Equals(c.InertiaB, F4.Zero));
-        var biasRate = Vector128.ConditionalSelect(anchored, Vector128.Create(_staticSoft.BiasRate), Vector128.Create(_contactSoft.BiasRate));
-        var softMass = Vector128.ConditionalSelect(anchored, Vector128.Create(_staticSoft.MassScale), Vector128.Create(_contactSoft.MassScale));
-        var softImpulse = Vector128.ConditionalSelect(anchored, Vector128.Create(_staticSoft.ImpulseScale), Vector128.Create(_contactSoft.ImpulseScale));
-        SoftBias(biasRate, softMass, softImpulse, s1, inv, maxPushout, out var bias1, out var massScale1, out var impulseScale1);
-        SoftBias(biasRate, softMass, softImpulse, s2, inv, maxPushout, out var bias2, out var massScale2, out var impulseScale2);
+        public F4 InvH, Pushout, BiasRate, MassScale, ImpulseScale, StaticBiasRate, StaticMassScale, StaticImpulseScale;
+    }
 
-        GatherRow(c.A0, c.A1, c.A2, c.A3, 0, out var vxA, out var vyA, out var wA, out _);
-        GatherRow(c.B0, c.B1, c.B2, c.B3, 0, out var vxB, out var vyB, out var wB, out _);
-        var rnA1 = p1.RnA; var rnB1 = p1.RnB; var rnA2 = p2.RnA; var rnB2 = p2.RnB;
-        var mA = c.MassA; var mB = c.MassB; var iA = c.InertiaA; var iB = c.InertiaB;
-        var k21 = c.K21;
-        var dn = (vxB - vxA) * nx + (vyB - vyA) * ny;
-        var vn1 = dn + (wB * rnB1 - wA * rnA1);
-        var vn2 = dn + (wB * rnB2 - wA * rnA2);
-        var impulse1 = Max(-(p1.NormalMass * massScale1 * (vn1 + bias1)) - impulseScale1 * p1.NormalImpulse, -p1.NormalImpulse);
-        p1.NormalImpulse += impulse1;
-        p1.MaxNormalImpulse = Max(p1.MaxNormalImpulse, impulse1);
-        vn2 += k21 * impulse1;
-        var impulse2 = Max(-(p2.NormalMass * massScale2 * (vn2 + bias2)) - impulseScale2 * p2.NormalImpulse, -p2.NormalImpulse);
-        p2.NormalImpulse += impulse2;
-        p2.MaxNormalImpulse = Max(p2.MaxNormalImpulse, impulse2);
-        var impulse = impulse1 + impulse2;
-        var px = impulse * nx; var py = impulse * ny;
-        var angularA = impulse1 * rnA1 + impulse2 * rnA2;
-        var angularB = impulse1 * rnB1 + impulse2 * rnB2;
-        Scatter(vxA - mA * px, vyA - mA * py, wA - iA * angularA, mA, iA, c.A0, c.A1, c.A2, c.A3);
-        Scatter(vxB + mB * px, vyB + mB * py, wB + iB * angularB, mB, iB, c.B0, c.B1, c.B2, c.B3);
+    // The passes loop inside one function each: the per-batch work inlines into the loop, and the prologue, the
+    // constants and the array pointers are set up once per range instead of once per batch.
+
+    private unsafe void PushRange(int start, int end)
+    {
+        var k = new PushConstants
+        {
+            InvH = Vector128.Create(_invH), Pushout = Vector128.Create(-Settings.MaxPushout),
+            BiasRate = Vector128.Create(_contactSoft.BiasRate), MassScale = Vector128.Create(_contactSoft.MassScale), ImpulseScale = Vector128.Create(_contactSoft.ImpulseScale),
+            StaticBiasRate = Vector128.Create(_staticSoft.BiasRate), StaticMassScale = Vector128.Create(_staticSoft.MassScale), StaticImpulseScale = Vector128.Create(_staticSoft.ImpulseScale),
+        };
+        var wide = _wide.Pointer; var states = States.Pointer;
+        PushBatches(wide, start, end, states, k);
+    }
+
+    private unsafe void RelaxRange(int start, int end)
+    {
+        var inv = Vector128.Create(_invH);
+        var wide = _wide.Pointer; var states = States.Pointer;
+        RelaxBatches(wide, start, end, states, inv);
+    }
+
+    private static unsafe void PushBatches(WideConstraint* wide, int start, int end, BodyState* states, in PushConstants k)
+    {
+        for (int w = start; w < end; w++)
+        {
+            ref var c = ref wide[w];
+            // Plain vector locals rather than a body struct, gathered as needed: the JIT keeps them in registers.
+            GatherRow(states, c.A0, c.A1, c.A2, c.A3, 1, out var dpxA, out var dpyA, out var qcA, out var qsA);
+            GatherRow(states, c.B0, c.B1, c.B2, c.B3, 1, out var dpxB, out var dpyB, out var qcB, out var qsB);
+            var nx = c.NormalX; var ny = c.NormalY;
+            var dpx = dpxB - dpxA; var dpy = dpyB - dpyA;
+            ref var p1 = ref c.P0; ref var p2 = ref c.P1;
+            var s1 = Separation(qcA, qsA, qcB, qsB, nx, ny, p1, dpx, dpy);
+            var s2 = Separation(qcA, qsA, qcB, qsB, nx, ny, p2, dpx, dpy);
+            // Contacts with an immovable body are stiffer (Box2D's static softness); chosen per lane from the masses.
+            var anchored = (Vector128.Equals(c.MassA, F4.Zero) & Vector128.Equals(c.InertiaA, F4.Zero)) | (Vector128.Equals(c.MassB, F4.Zero) & Vector128.Equals(c.InertiaB, F4.Zero));
+            var biasRate = Vector128.ConditionalSelect(anchored, k.StaticBiasRate, k.BiasRate);
+            var softMass = Vector128.ConditionalSelect(anchored, k.StaticMassScale, k.MassScale);
+            var softImpulse = Vector128.ConditionalSelect(anchored, k.StaticImpulseScale, k.ImpulseScale);
+            SoftBias(biasRate, softMass, softImpulse, s1, k.InvH, k.Pushout, out var bias1, out var massScale1, out var impulseScale1);
+            SoftBias(biasRate, softMass, softImpulse, s2, k.InvH, k.Pushout, out var bias2, out var massScale2, out var impulseScale2);
+
+            GatherRow(states, c.A0, c.A1, c.A2, c.A3, 0, out var vxA, out var vyA, out var wA, out _);
+            GatherRow(states, c.B0, c.B1, c.B2, c.B3, 0, out var vxB, out var vyB, out var wB, out _);
+            var rnA1 = p1.RnA; var rnB1 = p1.RnB; var rnA2 = p2.RnA; var rnB2 = p2.RnB;
+            var mA = c.MassA; var mB = c.MassB; var iA = c.InertiaA; var iB = c.InertiaB;
+            var k21 = c.K21;
+            var dn = (vxB - vxA) * nx + (vyB - vyA) * ny;
+            var vn1 = dn + (wB * rnB1 - wA * rnA1);
+            var vn2 = dn + (wB * rnB2 - wA * rnA2);
+            var impulse1 = Max(-(p1.NormalMass * massScale1 * (vn1 + bias1)) - impulseScale1 * p1.NormalImpulse, -p1.NormalImpulse);
+            p1.NormalImpulse += impulse1;
+            p1.MaxNormalImpulse = Max(p1.MaxNormalImpulse, impulse1);
+            vn2 += k21 * impulse1;
+            var impulse2 = Max(-(p2.NormalMass * massScale2 * (vn2 + bias2)) - impulseScale2 * p2.NormalImpulse, -p2.NormalImpulse);
+            p2.NormalImpulse += impulse2;
+            p2.MaxNormalImpulse = Max(p2.MaxNormalImpulse, impulse2);
+            var impulse = impulse1 + impulse2;
+            var px = impulse * nx; var py = impulse * ny;
+            var angularA = impulse1 * rnA1 + impulse2 * rnA2;
+            var angularB = impulse1 * rnB1 + impulse2 * rnB2;
+            Scatter(states, vxA - mA * px, vyA - mA * py, wA - iA * angularA, mA, iA, c.A0, c.A1, c.A2, c.A3);
+            Scatter(states, vxB + mB * px, vyB + mB * py, wB + iB * angularB, mB, iB, c.B0, c.B1, c.B2, c.B3);
+        }
     }
 
     /// <summary>
@@ -309,60 +352,63 @@ public sealed partial class PhysicsWorld2D
     /// sequential impulses whose effects on later rows come from precomputed couplings (k21…k43, as in Box2D's wide
     /// solver), so the bodies' velocities change once, at the end.
     /// </summary>
-    private void RelaxWide(ref WideConstraint c, float invH)
+    private static unsafe void RelaxBatches(WideConstraint* wide, int start, int end, BodyState* states, F4 inv)
     {
-        GatherRow(c.A0, c.A1, c.A2, c.A3, 1, out var dpxA, out var dpyA, out var qcA, out var qsA);
-        GatherRow(c.B0, c.B1, c.B2, c.B3, 1, out var dpxB, out var dpyB, out var qcB, out var qsB);
-        var nx = c.NormalX; var ny = c.NormalY;
-        var dpx = dpxB - dpxA; var dpy = dpyB - dpyA;
-        var inv = Vector128.Create(invH);
-        ref var p1 = ref c.P0; ref var p2 = ref c.P1;
-        // Speculative bias only: close a gap this substep, never push.
-        var bias1 = Max(Separation(qcA, qsA, qcB, qsB, nx, ny, p1, dpx, dpy) * inv, F4.Zero);
-        var bias2 = Max(Separation(qcA, qsA, qcB, qsB, nx, ny, p2, dpx, dpy) * inv, F4.Zero);
+        for (int w = start; w < end; w++)
+        {
+            ref var c = ref wide[w];
+            GatherRow(states, c.A0, c.A1, c.A2, c.A3, 1, out var dpxA, out var dpyA, out var qcA, out var qsA);
+            GatherRow(states, c.B0, c.B1, c.B2, c.B3, 1, out var dpxB, out var dpyB, out var qcB, out var qsB);
+            var nx = c.NormalX; var ny = c.NormalY;
+            var dpx = dpxB - dpxA; var dpy = dpyB - dpyA;
+            ref var p1 = ref c.P0; ref var p2 = ref c.P1;
+            // Speculative bias only: close a gap this substep, never push.
+            var bias1 = Max(Separation(qcA, qsA, qcB, qsB, nx, ny, p1, dpx, dpy) * inv, F4.Zero);
+            var bias2 = Max(Separation(qcA, qsA, qcB, qsB, nx, ny, p2, dpx, dpy) * inv, F4.Zero);
 
-        GatherRow(c.A0, c.A1, c.A2, c.A3, 0, out var vxA, out var vyA, out var wA, out _);
-        GatherRow(c.B0, c.B1, c.B2, c.B3, 0, out var vxB, out var vyB, out var wB, out _);
-        var tx = ny; var ty = -nx; // right perpendicular
-        var rnA1 = p1.RnA; var rnB1 = p1.RnB; var rnA2 = p2.RnA; var rnB2 = p2.RnB;
-        var rtA1 = p1.RtA; var rtB1 = p1.RtB; var rtA2 = p2.RtA; var rtB2 = p2.RtB;
-        var iA = c.InertiaA; var iB = c.InertiaB;
+            GatherRow(states, c.A0, c.A1, c.A2, c.A3, 0, out var vxA, out var vyA, out var wA, out _);
+            GatherRow(states, c.B0, c.B1, c.B2, c.B3, 0, out var vxB, out var vyB, out var wB, out _);
+            var tx = ny; var ty = -nx; // right perpendicular
+            var rnA1 = p1.RnA; var rnB1 = p1.RnB; var rnA2 = p2.RnA; var rnB2 = p2.RnB;
+            var rtA1 = p1.RtA; var rtB1 = p1.RtB; var rtA2 = p2.RtA; var rtB2 = p2.RtB;
+            var iA = c.InertiaA; var iB = c.InertiaB;
 
-        var dvx = vxB - vxA; var dvy = vyB - vyA;
-        var dn = dvx * nx + dvy * ny;
-        var dt = dvx * tx + dvy * ty;
-        var vn1 = dn + (wB * rnB1 - wA * rnA1);
-        var vn2 = dn + (wB * rnB2 - wA * rnA2);
-        var vt1 = dt + (wB * rtB1 - wA * rtA1);
-        var vt2 = dt + (wB * rtB2 - wA * rtA2);
+            var dvx = vxB - vxA; var dvy = vyB - vyA;
+            var dn = dvx * nx + dvy * ny;
+            var dt = dvx * tx + dvy * ty;
+            var vn1 = dn + (wB * rnB1 - wA * rnA1);
+            var vn2 = dn + (wB * rnB2 - wA * rnA2);
+            var vt1 = dt + (wB * rtB1 - wA * rtA1);
+            var vt2 = dt + (wB * rtB2 - wA * rtA2);
 
-        var impulse1 = Max(-(p1.NormalMass * (vn1 + bias1)), -p1.NormalImpulse);
-        p1.NormalImpulse += impulse1;
-        p1.MaxNormalImpulse = Max(p1.MaxNormalImpulse, impulse1);
-        vn2 += c.K21 * impulse1;
-        var impulse2 = Max(-(p2.NormalMass * (vn2 + bias2)), -p2.NormalImpulse);
-        p2.NormalImpulse += impulse2;
-        p2.MaxNormalImpulse = Max(p2.MaxNormalImpulse, impulse2);
+            var impulse1 = Max(-(p1.NormalMass * (vn1 + bias1)), -p1.NormalImpulse);
+            p1.NormalImpulse += impulse1;
+            p1.MaxNormalImpulse = Max(p1.MaxNormalImpulse, impulse1);
+            vn2 += c.K21 * impulse1;
+            var impulse2 = Max(-(p2.NormalMass * (vn2 + bias2)), -p2.NormalImpulse);
+            p2.NormalImpulse += impulse2;
+            p2.MaxNormalImpulse = Max(p2.MaxNormalImpulse, impulse2);
 
-        vt1 += c.K31 * impulse1 + c.K32 * impulse2;
-        vt2 += c.K41 * impulse1 + c.K42 * impulse2;
+            vt1 += c.K31 * impulse1 + c.K32 * impulse2;
+            vt2 += c.K41 * impulse1 + c.K42 * impulse2;
 
-        var friction = c.Friction;
-        var limit1 = friction * p1.NormalImpulse;
-        var tangent1 = Min(Max(p1.TangentImpulse - p1.TangentMass * vt1, -limit1), limit1) - p1.TangentImpulse;
-        p1.TangentImpulse += tangent1;
-        vt2 += c.K43 * tangent1;
-        var limit2 = friction * p2.NormalImpulse;
-        var tangent2 = Min(Max(p2.TangentImpulse - p2.TangentMass * vt2, -limit2), limit2) - p2.TangentImpulse;
-        p2.TangentImpulse += tangent2;
+            var friction = c.Friction;
+            var limit1 = friction * p1.NormalImpulse;
+            var tangent1 = Min(Max(p1.TangentImpulse - p1.TangentMass * vt1, -limit1), limit1) - p1.TangentImpulse;
+            p1.TangentImpulse += tangent1;
+            vt2 += c.K43 * tangent1;
+            var limit2 = friction * p2.NormalImpulse;
+            var tangent2 = Min(Max(p2.TangentImpulse - p2.TangentMass * vt2, -limit2), limit2) - p2.TangentImpulse;
+            p2.TangentImpulse += tangent2;
 
-        var normal = impulse1 + impulse2; var tangent = tangent1 + tangent2;
-        var px = normal * nx + tangent * tx; var py = normal * ny + tangent * ty;
-        var angularA = (impulse1 * rnA1 + impulse2 * rnA2) + (tangent1 * rtA1 + tangent2 * rtA2);
-        var angularB = (impulse1 * rnB1 + impulse2 * rnB2) + (tangent1 * rtB1 + tangent2 * rtB2);
-        var mA = c.MassA; var mB = c.MassB;
-        Scatter(vxA - mA * px, vyA - mA * py, wA - iA * angularA, mA, iA, c.A0, c.A1, c.A2, c.A3);
-        Scatter(vxB + mB * px, vyB + mB * py, wB + iB * angularB, mB, iB, c.B0, c.B1, c.B2, c.B3);
+            var normal = impulse1 + impulse2; var tangent = tangent1 + tangent2;
+            var px = normal * nx + tangent * tx; var py = normal * ny + tangent * ty;
+            var angularA = (impulse1 * rnA1 + impulse2 * rnA2) + (tangent1 * rtA1 + tangent2 * rtA2);
+            var angularB = (impulse1 * rnB1 + impulse2 * rnB2) + (tangent1 * rtB1 + tangent2 * rtB2);
+            var mA = c.MassA; var mB = c.MassB;
+            Scatter(states, vxA - mA * px, vyA - mA * py, wA - iA * angularA, mA, iA, c.A0, c.A1, c.A2, c.A3);
+            Scatter(states, vxB + mB * px, vyB + mB * py, wB + iB * angularB, mB, iB, c.B0, c.B1, c.B2, c.B3);
+        }
     }
 
     /// <summary>A point's separation now, from the anchors turned by each body's rotation this step.</summary>
@@ -376,10 +422,10 @@ public sealed partial class PhysicsWorld2D
 
     /// <summary>Speculative bias when separated; otherwise the soft constraint's bias and scales.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void SoftBias(F4 biasRate, F4 softMass, F4 softImpulse, F4 separation, F4 invH, float maxPushout, out F4 bias, out F4 massScale, out F4 impulseScale)
+    private static void SoftBias(F4 biasRate, F4 softMass, F4 softImpulse, F4 separation, F4 invH, F4 pushout, out F4 bias, out F4 massScale, out F4 impulseScale)
     {
         var speculative = Vector128.GreaterThan(separation, F4.Zero);
-        var soft = Max(biasRate * separation, Vector128.Create(-maxPushout));
+        var soft = Max(biasRate * separation, pushout);
         bias = Vector128.ConditionalSelect(speculative, separation * invH, soft);
         massScale = Vector128.ConditionalSelect(speculative, Vector128<float>.One, softMass);
         impulseScale = Vector128.ConditionalSelect(speculative, F4.Zero, softImpulse);
@@ -387,21 +433,28 @@ public sealed partial class PhysicsWorld2D
 
     /// <summary>One 16-byte row (0: velocity, 1: position delta) of four bodies' states, as columns.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private unsafe void GatherRow(int i0, int i1, int i2, int i3, int row, out F4 c0, out F4 c1, out F4 c2, out F4 c3)
+    private unsafe void GatherRow(int i0, int i1, int i2, int i3, int row, out F4 c0, out F4 c1, out F4 c2, out F4 c3) =>
+        GatherRow(States.Pointer, i0, i1, i2, i3, row, out c0, out c1, out c2, out c3);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe void GatherRow(BodyState* states, int i0, int i1, int i2, int i3, int row, out F4 c0, out F4 c1, out F4 c2, out F4 c3)
     {
-        var states = (float*)States.Pointer + row * 4;
-        Transpose(Vector128.LoadAligned(states + i0 * 8), Vector128.LoadAligned(states + i1 * 8), Vector128.LoadAligned(states + i2 * 8), Vector128.LoadAligned(states + i3 * 8),
+        var rows = (float*)states + row * 4;
+        Transpose(Vector128.LoadAligned(rows + i0 * 8), Vector128.LoadAligned(rows + i1 * 8), Vector128.LoadAligned(rows + i2 * 8), Vector128.LoadAligned(rows + i3 * 8),
             out c0, out c1, out c2, out c3);
     }
 
     /// <summary>Write back velocities of the lanes whose body has mass (static and kinematic bodies are only read).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private unsafe void Scatter(F4 vx, F4 vy, F4 w, F4 mass, F4 inertia, int i0, int i1, int i2, int i3)
+    private unsafe void Scatter(F4 vx, F4 vy, F4 w, F4 mass, F4 inertia, int i0, int i1, int i2, int i3) =>
+        Scatter(States.Pointer, vx, vy, w, mass, inertia, i0, i1, i2, i3);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe void Scatter(BodyState* states, F4 vx, F4 vy, F4 w, F4 mass, F4 inertia, int i0, int i1, int i2, int i3)
     {
         var moves = Vector128.ExtractMostSignificantBits(Vector128.GreaterThan(mass, F4.Zero) | Vector128.GreaterThan(inertia, F4.Zero));
         if (moves == 0) return;
         Transpose(vx, vy, w, F4.Zero, out var r0, out var r1, out var r2, out var r3);
-        var states = States.Pointer;
         if ((moves & 1) != 0) r0.StoreAligned((float*)(states + i0));
         if ((moves & 2) != 0) r1.StoreAligned((float*)(states + i1));
         if ((moves & 4) != 0) r2.StoreAligned((float*)(states + i2));

@@ -61,6 +61,7 @@ public struct Rot
 public struct Aabb
 {
     public Vector2 Min, Max;
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly bool Overlaps(in Aabb o) => Min.X <= o.Max.X && o.Min.X <= Max.X && Min.Y <= o.Max.Y && o.Min.Y <= Max.Y;
 }
 

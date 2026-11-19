@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Gamegrl.Physics2D;
@@ -155,8 +156,12 @@ public sealed partial class PhysicsWorld2D
     {
         public Vector2 Center;
         public Rot Rotation;
+        public float Slack; // the fat box's clearance around the shape's tight box at this pose
     }
 
+    // Sequential layout matters: the solver loads AnchorA..AnchorB, Separation..TangentImpulse and Normal..Restitution
+    // as 16-byte rows (SolverWide.PackBatch).
+    [StructLayout(LayoutKind.Sequential)]
     internal struct ContactPoint
     {
         public Vector2 AnchorA, AnchorB; // relative to each body's center of mass
@@ -164,6 +169,7 @@ public sealed partial class PhysicsWorld2D
         public ushort Id;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
     internal struct Contact
     {
         public int ShapeA, ShapeB, BodyA, BodyB;
@@ -437,7 +443,7 @@ public sealed partial class PhysicsWorld2D
         var box = ShapeBox(s);
         box.Min -= new Vector2(AabbMargin); box.Max += new Vector2(AabbMargin);
         Fat[s] = box;
-        FatPoses[s] = new FatPose { Center = Center[b], Rotation = Rotation[b] };
+        FatPoses[s] = new FatPose { Center = Center[b], Rotation = Rotation[b], Slack = AabbMargin };
         InStaticTree[s] = Types[b] == BodyType.Static;
         Proxy[s] = (InStaticTree[s] ? _staticTree : _movingTree).Create(box, s);
         QueueMove(s);
@@ -460,24 +466,33 @@ public sealed partial class PhysicsWorld2D
     /// <summary>The swept box of a shape, and whether it left its fat box (no tree changes: safe in parallel).</summary>
     private bool Sweep(int s, float dt)
     {
-        // Every point of the shape has moved at most |Δc| + extent·|Δq| since its fat box was fitted (|Δq| being the
-        // chord between the two rotations), and the swept box adds this step's motion: while all that stays well
-        // inside the margin the box is certainly still contained, and the shape's geometry is never touched.
-        // Conservative (L1 norms, a quarter of the margin to spare for rounding), so the outcome is the exact test's.
+        // Every point of the shape has moved at most |Δc| + extent·|Δq| since the reference pose (|Δq| being the chord
+        // between the two rotations), and the swept box adds this step's motion: while all that stays well inside the
+        // fat box's clearance at that pose, the box is certainly still contained and the shape's geometry is never
+        // touched. Conservative (L1 norms, a quarter of the clearance to spare), so the outcome is the exact test's.
         int b = ShapeBody[s];
-        ref readonly var pose = ref FatPoses[s];
+        ref var pose = ref FatPoses[s];
         var dc = Center[b] - pose.Center; var q = Rotation[b]; var v = Velocity[b] * dt;
         float moved = MathF.Abs(dc.X) + MathF.Abs(dc.Y) + MaxExtent[b] * (MathF.Abs(q.C - pose.Rotation.C) + MathF.Abs(q.S - pose.Rotation.S))
             + MathF.Abs(v.X) + MathF.Abs(v.Y);
-        if (moved < 0.75f * AabbMargin) { _needsMove[s] = false; return false; }
-        var box = ShapeBox(s);
-        var reach = Velocity[ShapeBody[s]] * dt;
-        box.Min = SimMath.Min(box.Min, box.Min + reach);
-        box.Max = SimMath.Max(box.Max, box.Max + reach);
+        if (moved < 0.75f * pose.Slack) { _needsMove[s] = false; return false; }
+        var tight = ShapeBox(s);
+        var box = tight;
+        box.Min = SimMath.Min(box.Min, box.Min + v);
+        box.Max = SimMath.Max(box.Max, box.Max + v);
         ref readonly var fat = ref Fat[s];
         _swept[s] = box;
         // An invalidated pose (NaN) refits once, so the shortcut above works again.
-        return _needsMove[s] = !(fat.Min.X <= box.Min.X && fat.Min.Y <= box.Min.Y && fat.Max.X >= box.Max.X && fat.Max.Y >= box.Max.Y) || float.IsNaN(pose.Rotation.C);
+        bool leaves = !(fat.Min.X <= box.Min.X && fat.Min.Y <= box.Min.Y && fat.Max.X >= box.Max.X && fat.Max.Y >= box.Max.Y) || float.IsNaN(pose.Rotation.C);
+        if (!leaves)
+        {
+            // Still inside: measure from here, so a body that drifts slowly within its box keeps taking the shortcut.
+            // (Less a few ulps of the coordinates, for the rounding in the exact boxes.)
+            float slack = F.Min(F.Min(tight.Min.X - fat.Min.X, tight.Min.Y - fat.Min.Y), F.Min(fat.Max.X - tight.Max.X, fat.Max.Y - tight.Max.Y));
+            slack -= 1e-6f * (MathF.Abs(tight.Max.X) + MathF.Abs(tight.Max.Y) + 1);
+            pose = new FatPose { Center = Center[b], Rotation = q, Slack = slack };
+        }
+        return _needsMove[s] = leaves;
     }
 
     private struct SweepJob : IJobFor
@@ -515,7 +530,7 @@ public sealed partial class PhysicsWorld2D
         box.Min -= new Vector2(AabbMargin);
         box.Max += new Vector2(AabbMargin);
         fat = box;
-        FatPoses[s] = new FatPose { Center = Center[ShapeBody[s]], Rotation = Rotation[ShapeBody[s]] };
+        FatPoses[s] = new FatPose { Center = Center[ShapeBody[s]], Rotation = Rotation[ShapeBody[s]], Slack = AabbMargin };
         (InStaticTree[s] ? _staticTree : _movingTree).Move(Proxy[s], box);
         QueueMove(s);
     }
@@ -599,7 +614,7 @@ public sealed partial class PhysicsWorld2D
                     box.Min = SimMath.Min(box.Min, box.Min + ahead) - new Vector2(AabbMargin);
                     box.Max = SimMath.Max(box.Max, box.Max + ahead) + new Vector2(AabbMargin);
                     Fat[s] = box;
-                    FatPoses[s] = new FatPose { Center = Center[b], Rotation = Rotation[b] };
+                    FatPoses[s] = new FatPose { Center = Center[b], Rotation = Rotation[b], Slack = AabbMargin };
                     (InStaticTree[s] ? _staticTree : _movingTree).Move(Proxy[s], box);
                     QueueMove(s);
                 }
@@ -794,6 +809,16 @@ public sealed partial class PhysicsWorld2D
         bool sensor = (contact.Flags & ContactFlags.Sensor) != 0;
         bool was = (contact.Flags & ContactFlags.Touching) != 0;
         if (!sensor && TryRecycle(ref contact, a, b, was)) return;
+        UpdateManifold(ref contact, a, b, dt, sensor, was);
+    }
+
+    /// <summary>
+    /// The slow path, kept out of <see cref="UpdateContact"/> so the common recycled case doesn't pay for its frame
+    /// (a manifold on the stack, zeroed on every call).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void UpdateManifold(ref Contact contact, int a, int b, float dt, bool sensor, bool was)
+    {
         var pa = GetPosition(a); var pb = GetPosition(b);
         float margin = sensor ? 0 : Speculative + SimMath.Length(Velocity[a] - Velocity[b]) * dt;
         // Bounding circles first: about a third of contacts are fat boxes overlapping with the shapes apart.

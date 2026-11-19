@@ -264,9 +264,9 @@ public sealed partial class PhysicsWorld2D
             case Stage.Pack: for (int w = start; w < end; w++) PackBatch(w); break;
             case Stage.BeginBodies: for (int b = start; b < end; b++) BeginBody(b); break;
             case Stage.Finalize: for (int k = start; k < end; k++) FinalizeBody(_awake[k]); break;
-            case Stage.WideWarmStart: for (int w = start; w < end; w++) WarmStartWide(ref wide[w]); break;
-            case Stage.WideSolve: for (int w = start; w < end; w++) PushWide(ref wide[w], invH, pushout); break;
-            case Stage.WideRelax: for (int w = start; w < end; w++) RelaxWide(ref wide[w], invH); break;
+            case Stage.WideWarmStart: WarmStartRange(start, end); break;
+            case Stage.WideSolve: PushRange(start, end); break;
+            case Stage.WideRelax: RelaxRange(start, end); break;
             case Stage.WideRestitution: for (int w = start; w < end; w++) RestitutionWide(ref wide[w], ref _wideCold.Pointer[w], Settings.RestitutionThreshold); break;
             case Stage.WideStore: for (int w = start; w < end; w++) StoreWide(ref wide[w], _wideCold.Pointer[w]); break;
         }
