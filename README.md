@@ -8,7 +8,7 @@ APIs. Design and decisions: [docs/DESIGN.md](docs/DESIGN.md).
 Needs the .NET 10 SDK, Vulkan 1.3 (hardware or software), and `glslc` (shaderc). The editor references the sibling `../ansidotnet` repository. SDL3 and a TrueType monospace font are needed for desktop mode; terminal mode needs neither.
 
 ```sh
-./scripts/ci.sh                                   # build, test (JIT + NativeAOT), publish the sample
+./scripts/ci.sh                                   # build, test (JIT + NativeAOT), benchmarks, publish the sample
 dotnet run --project src/Gamegrl.Editor -- samples/Spinners # desktop cell editor
 dotnet run --project src/Gamegrl.Editor -- samples/Spinners --terminal # real TTY / SSH PTY
 dotnet run --project samples/Spinners/Build -- run      # dev: run from the asset database, edits hot-reload
@@ -39,11 +39,33 @@ Add component uses a component's public static `Default` (field or property) whe
 dotnet run --project tests/Gamegrl.Editor.Tests -- --graphics # optional desktop smoke test, uses temporary assets
 ```
 
+### Profiling
+
+The editor always profiles. Open the Profiler tab (or "Profiler: Show" in the palette) for a frame graph, the split of
+each frame between game, engine, editor, waiting and GPU, and the call tree with time, self time and calls per frame.
+Click a frame in the graph to pause on it; F9 pauses and resumes; "Profiler: Export trace" writes a Chrome trace to
+`Library/Profiles` for [Perfetto](https://ui.perfetto.dev). Time your own code with a marker:
+
+```csharp
+static readonly ProfileMarker Pathing = ProfileMarker.Get("AI.Pathing");
+using (Pathing.Scope()) { /* ... */ }
+```
+
+Players record with `GAMEGRL_PROFILE=1` and write a trace on exit with `GAMEGRL_PROFILE_OUT=trace.json`.
+
+Benchmarks gate CI against this machine's baseline in `perf/baselines/`:
+
+```sh
+./artifacts/bench-aot/Gamegrl.Bench --tree          # engine scenarios (NativeAOT, built by ci.sh)
+dotnet run --project tests/Gamegrl.Editor.Tests -c Release -- --bench --tree # editor scenarios
+# add --update to record a new baseline after an intended change, --quick for a short run
+```
+
 ## Layout
 
 | Path | What |
 | --- | --- |
-| `src/Gamegrl.Core` | Entities, systems, jobs, the app loop, transforms |
+| `src/Gamegrl.Core` | Entities, systems, jobs, the app loop, transforms, the profiler |
 | `src/Gamegrl.Generators` | Roslyn source generators: `[System]` loops and registration, component serializers |
 | `src/Gamegrl.Platform`, `.Sdl3` | Windows and input behind `IPlatform`; the SDL3 backend |
 | `src/Gamegrl.Rhi`, `.Vulkan` | The render hardware interface; the Vulkan 1.3 backend |
@@ -53,7 +75,8 @@ dotnet run --project tests/Gamegrl.Editor.Tests -- --graphics # optional desktop
 | `src/Gamegrl.Assets` | Runtime asset formats, the `.ggpak` archive, `IAssetSource` |
 | `src/Gamegrl.AssetPipeline` | Editor-only: `.meta` files, importers (PNG, glTF, scenes, prefabs), cache, packing, watching |
 | `tests/Gamegrl.Tests` | Dependency-free tests, also run as a NativeAOT binary |
-| `tests/Gamegrl.Editor.Tests` | Headless editor tests and optional SDL/Vulkan interaction smoke |
+| `tests/Gamegrl.Editor.Tests` | Headless editor tests, optional SDL/Vulkan interaction smoke, editor benchmarks (`--bench`) |
+| `tests/Gamegrl.Bench` | Engine benchmark scenarios under the profiler (NativeAOT); baselines in `perf/baselines` |
 | `samples/Spinners` | `Game` (library), `Player` (NativeAOT), `Build` (dev tool), `Assets/` |
 
 Editor-only extensions implement `IEditorExtension.Register(EditorRegistry)`. Register panels with
