@@ -19,8 +19,10 @@ public sealed partial class PhysicsWorld2D
 {
     private struct WidePoint
     {
-        public F4 AnchorAX, AnchorAY, AnchorBX, AnchorBY, AdjustedSeparation, NormalImpulse, TangentImpulse, MaxNormalImpulse, NormalMass, TangentMass;
-        public F4 RnA, RnB, RtA, RtB; // anchors crossed with the normal and the tangent (fixed for the step)
+        public F4 AdjustedSeparation, NormalImpulse, TangentImpulse, MaxNormalImpulse, NormalMass, TangentMass;
+        // The anchors crossed with the normal and the tangent, fixed for the step. They stand in for the anchors
+        // themselves (rn = r·t, rt = −r·n), which keeps 64 bytes per point out of the stream the passes read.
+        public F4 RnA, RnB, RtA, RtB;
     }
 
     private struct WideConstraint
@@ -160,7 +162,6 @@ public sealed partial class PhysicsWorld2D
     {
         Transpose(a0, a1, a2, a3, out var rax, out var ray, out var rbx, out var rby);
         Transpose(s0, s1, s2, s3, out var separation, out _, out var normalImpulse, out var tangentImpulse);
-        p.AnchorAX = rax; p.AnchorAY = ray; p.AnchorBX = rbx; p.AnchorBY = rby;
         p.NormalImpulse = normalImpulse; p.TangentImpulse = tangentImpulse; p.MaxNormalImpulse = F4.Zero;
         var rnA = rax * ny - ray * nx; var rnB = rbx * ny - rby * nx;
         var rtA = rax * ty - ray * tx; var rtB = rbx * ty - rby * tx;
@@ -257,17 +258,6 @@ public sealed partial class PhysicsWorld2D
         Scatter(states, vxB + mB * px, vyB + mB * py, wB + iB * angularB, mB, iB, c.B0, c.B1, c.B2, c.B3);
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void ApplyWide(ref WideBody a, ref WideBody b, in WideConstraint c, in WidePoint p, F4 px, F4 py)
-    {
-        a.VX -= c.MassA * px; a.VY -= c.MassA * py; a.W -= c.InertiaA * (p.AnchorAX * py - p.AnchorAY * px);
-        b.VX += c.MassB * px; b.VY += c.MassB * py; b.W += c.InertiaB * (p.AnchorBX * py - p.AnchorBY * px);
-    }
-
-    /// <summary>Relative velocity at a point: vB + ωB × rB − vA − ωA × rA.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static (F4 X, F4 Y) RelativeVelocity(in WideBody a, in WideBody b, in WidePoint p) =>
-        ((b.VX - b.W * p.AnchorBY) - (a.VX - a.W * p.AnchorAY), (b.VY + b.W * p.AnchorBX) - (a.VY + a.W * p.AnchorAX));
 
     /// <summary>
     /// The biased pass of a substep (Box2D's "push"): only the two normal points, with the soft overlap bias. Friction is
@@ -411,14 +401,13 @@ public sealed partial class PhysicsWorld2D
         }
     }
 
-    /// <summary>A point's separation now, from the anchors turned by each body's rotation this step.</summary>
+    /// <summary>
+    /// A point's separation now: (Δp + dqB·rB − dqA·rA)·n plus the step constant. A turn (c, s) moves an anchor's
+    /// projection on n to c(r·n) + s(r×n) = s·rn − c·rt, so the anchors themselves aren't needed.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static F4 Separation(F4 qcA, F4 qsA, F4 qcB, F4 qsB, F4 nx, F4 ny, in WidePoint p, F4 dpx, F4 dpy)
-    {
-        var rax = qcA * p.AnchorAX - qsA * p.AnchorAY; var ray = qsA * p.AnchorAX + qcA * p.AnchorAY;
-        var rbx = qcB * p.AnchorBX - qsB * p.AnchorBY; var rby = qsB * p.AnchorBX + qcB * p.AnchorBY;
-        return ((dpx + (rbx - rax)) * nx + (dpy + (rby - ray)) * ny) + p.AdjustedSeparation;
-    }
+    private static F4 Separation(F4 qcA, F4 qsA, F4 qcB, F4 qsB, F4 nx, F4 ny, in WidePoint p, F4 dpx, F4 dpy) =>
+        ((dpx * nx + dpy * ny) + ((qsB * p.RnB - qcB * p.RtB) - (qsA * p.RnA - qcA * p.RtA))) + p.AdjustedSeparation;
 
     /// <summary>Speculative bias when separated; otherwise the soft constraint's bias and scales.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -478,13 +467,14 @@ public sealed partial class PhysicsWorld2D
         // Only lanes that approached fast enough and pushed this step bounce.
         var active = Vector128.LessThan(relativeVelocity, threshold) & Vector128.GreaterThan(p.MaxNormalImpulse, F4.Zero) & Vector128.GreaterThan(restitution, F4.Zero);
         if (active == F4.Zero) return;
-        var (dvx, dvy) = RelativeVelocity(a, b, p);
-        var vn = dvx * c.NormalX + dvy * c.NormalY;
+        var vn = ((b.VX - a.VX) * c.NormalX + (b.VY - a.VY) * c.NormalY) + (b.W * p.RnB - a.W * p.RnA);
         var impulse = -(p.NormalMass * (vn + restitution * relativeVelocity));
         var total = Max(p.NormalImpulse + impulse, F4.Zero);
         impulse = Vector128.ConditionalSelect(active, total - p.NormalImpulse, F4.Zero);
         p.NormalImpulse += impulse;
-        ApplyWide(ref a, ref b, c, p, impulse * c.NormalX, impulse * c.NormalY);
+        var px = impulse * c.NormalX; var py = impulse * c.NormalY;
+        a.VX -= c.MassA * px; a.VY -= c.MassA * py; a.W -= c.InertiaA * (impulse * p.RnA);
+        b.VX += c.MassB * px; b.VY += c.MassB * py; b.W += c.InertiaB * (impulse * p.RnB);
     }
 
     /// <summary>Lanes' impulses back into the persistent contacts, for warm starting next step.</summary>
