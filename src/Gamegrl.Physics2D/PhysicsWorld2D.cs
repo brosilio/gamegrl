@@ -70,7 +70,7 @@ public struct Filter2D
 /// </summary>
 public sealed partial class PhysicsWorld2D
 {
-    internal const float LinearSlop = 0.005f, Speculative = 4 * LinearSlop, AabbMargin = 0.1f;
+    internal const float LinearSlop = 0.005f, Speculative = 4 * LinearSlop, AabbMargin = 0.1f, AabbPrediction = 4;
 
     // ---------------------------------------------------------------- bodies (struct of arrays)
     private int _bodyCapacity, _bodyHigh;
@@ -87,6 +87,7 @@ public sealed partial class PhysicsWorld2D
     internal Vector2[] Written = [];
     internal Rot[] WrittenRotation = [];
     internal bool[] MassDirty = [];
+    internal bool[] _justSlept = [];
 
     // ---------------------------------------------------------------- shapes
     private int _shapeCapacity, _shapeHigh;
@@ -100,6 +101,7 @@ public sealed partial class PhysicsWorld2D
     internal Entity[] ShapeEntity = [];
     internal Aabb[] Fat = [];
     internal ShapeSource[] Sources = [];
+    internal float[] Bound = []; // radius of a circle about the shape's center that holds it
 
     private DynamicTree _staticTree = new(), _movingTree = new();
     private int[] _moveBuffer = new int[64];
@@ -198,6 +200,8 @@ public sealed partial class PhysicsWorld2D
     public BodyType TypeOf(int b) => Types[b];
     public bool IsImplicit(int b) => Implicit[b];
     public bool IsAwake(int b) => Awake[b];
+    /// <summary>Asleep since before the last step (its pose and velocity haven't changed since they were last written).</summary>
+    public bool SleptBefore(int b) => !Awake[b] && !_justSlept[b];
 
     /// <summary>The body's origin (where its shapes are defined), not its center of mass.</summary>
     public Vector2 GetPosition(int b) => Center[b] - Rotation[b].Rotate(LocalCenter[b]);
@@ -299,7 +303,7 @@ public sealed partial class PhysicsWorld2D
         Array.Resize(ref Center, capacity); Array.Resize(ref LocalCenter, capacity); Array.Resize(ref Velocity, capacity); Array.Resize(ref Rotation, capacity);
         Array.Resize(ref AngularVelocityOf, capacity); Array.Resize(ref InvMass, capacity); Array.Resize(ref InvInertia, capacity); Array.Resize(ref Mass, capacity);
         Array.Resize(ref GravityScale, capacity); Array.Resize(ref LinearDamping, capacity); Array.Resize(ref AngularDamping, capacity); Array.Resize(ref FirstShape, capacity);
-        Array.Resize(ref Written, capacity); Array.Resize(ref WrittenRotation, capacity); Array.Resize(ref MassDirty, capacity);
+        Array.Resize(ref Written, capacity); Array.Resize(ref WrittenRotation, capacity); Array.Resize(ref MassDirty, capacity); Array.Resize(ref _justSlept, capacity);
         GrowSolver(capacity);
         _bodyCapacity = capacity;
     }
@@ -317,6 +321,7 @@ public sealed partial class PhysicsWorld2D
         }
         ShapeBody[s] = body; ShapeEntity[s] = entity; Geometry[s] = shape; Density[s] = density; Friction[s] = friction; Restitution[s] = restitution;
         Sensor[s] = sensor; Filters[s] = filter ?? Filter2D.Default; ShapeAlive[s] = true; Moved[s] = false;
+        Bound[s] = BoundOf(shape);
         NextShape[s] = FirstShape[body];
         FirstShape[body] = s;
         CreateProxy(s);
@@ -352,6 +357,7 @@ public sealed partial class PhysicsWorld2D
     public void UpdateShape(int s, in Shape shape, float density, float friction, float restitution, bool sensor, Filter2D filter)
     {
         Geometry[s] = shape; Density[s] = density; Friction[s] = friction; Restitution[s] = restitution; Filters[s] = filter;
+        Bound[s] = BoundOf(shape);
         if (Sensor[s] != sensor)
         {
             Sensor[s] = sensor;
@@ -363,12 +369,19 @@ public sealed partial class PhysicsWorld2D
         Wake(ShapeBody[s]);
     }
 
+    private static float BoundOf(in Shape shape)
+    {
+        float r = 0;
+        for (int i = 0; i < shape.Count; i++) r = Math.Max(r, SimMath.Length(shape.Vertex(i) - shape.Center));
+        return r + shape.Radius;
+    }
+
     private void GrowShapes(int capacity)
     {
         Array.Resize(ref ShapeBody, capacity); Array.Resize(ref NextShape, capacity); Array.Resize(ref Proxy, capacity); Array.Resize(ref Geometry, capacity);
         Array.Resize(ref Density, capacity); Array.Resize(ref Friction, capacity); Array.Resize(ref Restitution, capacity); Array.Resize(ref Sensor, capacity);
         Array.Resize(ref ShapeAlive, capacity); Array.Resize(ref InStaticTree, capacity); Array.Resize(ref Moved, capacity); Array.Resize(ref Filters, capacity);
-        Array.Resize(ref ShapeEntity, capacity); Array.Resize(ref Fat, capacity); Array.Resize(ref Sources, capacity);
+        Array.Resize(ref ShapeEntity, capacity); Array.Resize(ref Fat, capacity); Array.Resize(ref Sources, capacity); Array.Resize(ref Bound, capacity);
         _shapeCapacity = capacity;
     }
 
@@ -469,8 +482,32 @@ public sealed partial class PhysicsWorld2D
     private struct PairQuery : ITreeQuery
     {
         public PhysicsWorld2D World;
-        public int Shape;
-        public bool Hit(int proxy, int other) { World.ConsiderPair(Shape, other); return true; }
+        public int Shape, Thread;
+        public bool Hit(int proxy, int other) { World.ConsiderPair(Shape, other, Thread); return true; }
+    }
+
+    // Candidate pairs per query thread, merged and sorted after.
+    private ulong[][] _threadPairs = [new ulong[64]];
+    private int[] _threadPairCount = new int[1];
+
+    private struct QueryJob : IJobThreads
+    {
+        public PhysicsWorld2D World;
+        public readonly void Execute(int thread, int threadCount)
+        {
+            var w = World;
+            int start = (int)((long)w._moveCount * thread / threadCount), end = (int)((long)w._moveCount * (thread + 1) / threadCount);
+            var query = new PairQuery { World = w, Thread = thread };
+            w._threadPairCount[thread] = 0;
+            for (int k = start; k < end; k++)
+            {
+                int s = w._moveBuffer[k];
+                if (!w.ShapeAlive[s]) continue;
+                query.Shape = s;
+                if (!w.InStaticTree[s]) w._staticTree.Query(w.Fat[s], ref query);
+                w._movingTree.Query(w.Fat[s], ref query);
+            }
+        }
     }
 
     /// <summary>Fat boxes of moving shapes, then new pairs for every moved shape, created in sorted order.</summary>
@@ -486,9 +523,12 @@ public sealed partial class PhysicsWorld2D
             for (int s = FirstShape[b]; s >= 0; s = NextShape[s])
             {
                 if (!_needsMove[s]) continue;
+                // Predict a few steps of motion ahead (Box2D v2's multiplier), so a moving body leaves its fat box every
+                // few steps instead of every step: each exit costs a tree move and a query.
                 var box = _swept[s];
-                box.Min -= new Vector2(AabbMargin);
-                box.Max += new Vector2(AabbMargin);
+                var ahead = Velocity[b] * (dt * (AabbPrediction - 1));
+                box.Min = Vector2.Min(box.Min, box.Min + ahead) - new Vector2(AabbMargin);
+                box.Max = Vector2.Max(box.Max, box.Max + ahead) + new Vector2(AabbMargin);
                 Fat[s] = box;
                 (InStaticTree[s] ? _staticTree : _movingTree).Move(Proxy[s], box);
                 QueueMove(s);
@@ -497,15 +537,24 @@ public sealed partial class PhysicsWorld2D
         MovedProxies = _moveCount;
         // Queries in shape order, so pairs are found and created the same way every run.
         Sort.Heap(_moveBuffer.AsSpan(0, _moveCount));
-        _newPairCount = 0;
-        var query = new PairQuery { World = this };
-        for (int k = 0; k < _moveCount; k++)
+        // Tree queries in parallel (the trees and pair table are only read), each thread into its own list.
+        int threads = Jobs is { } jobs2 ? Math.Clamp(_moveCount / 64, 1, jobs2.WorkerCount + 1) : 1;
+        if (_threadPairs.Length < threads)
         {
-            int s = _moveBuffer[k];
-            if (!ShapeAlive[s]) continue;
-            query.Shape = s;
-            if (!InStaticTree[s]) _staticTree.Query(Fat[s], ref query);
-            _movingTree.Query(Fat[s], ref query);
+            var grown = new ulong[threads][];
+            for (int t = 0; t < threads; t++) grown[t] = t < _threadPairs.Length ? _threadPairs[t] : new ulong[64];
+            _threadPairs = grown;
+            _threadPairCount = new int[threads];
+        }
+        var queries = new QueryJob { World = this };
+        if (threads > 1) Jobs!.RunOnThreads(threads, ref queries); else queries.Execute(0, 1);
+        _newPairCount = 0;
+        for (int t = 0; t < threads; t++)
+        {
+            int n = _threadPairCount[t];
+            if (_newPairCount + n > _newPairs.Length) Array.Resize(ref _newPairs, Math.Max(_newPairs.Length * 2, _newPairCount + n));
+            Array.Copy(_threadPairs[t], 0, _newPairs, _newPairCount, n);
+            _newPairCount += n;
         }
         for (int k = 0; k < _moveCount; k++) Moved[_moveBuffer[k]] = false;
         _moveCount = 0;
@@ -517,11 +566,11 @@ public sealed partial class PhysicsWorld2D
         {
             if (key == last) continue;
             last = key;
-            if (!_pairs.ContainsKey(key)) AddContact((int)(key >> 32), (int)(uint)key);
+            AddContact((int)(key >> 32), (int)(uint)key);
         }
     }
 
-    private void ConsiderPair(int s, int other)
+    private void ConsiderPair(int s, int other, int thread)
     {
         if (other == s) return;
         // Both moved: the lower shape's query reports the pair.
@@ -532,8 +581,11 @@ public sealed partial class PhysicsWorld2D
         if (!Filters[s].Accepts(Filters[other])) return;
         if (_noCollide.Count > 0 && _noCollide.Contains(BodyPairKey(a, b))) return;
         ulong key = s < other ? (ulong)(uint)s << 32 | (uint)other : (ulong)(uint)other << 32 | (uint)s;
-        if (_newPairCount == _newPairs.Length) Array.Resize(ref _newPairs, _newPairs.Length * 2);
-        _newPairs[_newPairCount++] = key;
+        if (_pairs.ContainsKey(key)) return; // already a contact
+        ref var list = ref _threadPairs[thread];
+        ref int count = ref _threadPairCount[thread];
+        if (count == list.Length) Array.Resize(ref list, list.Length * 2);
+        list[count++] = key;
     }
 
     internal static ulong BodyPairKey(int a, int b) => a < b ? (ulong)(uint)a << 32 | (uint)b : (ulong)(uint)b << 32 | (uint)a;
@@ -623,7 +675,13 @@ public sealed partial class PhysicsWorld2D
         var pa = GetPosition(a); var pb = GetPosition(b);
         bool sensor = (contact.Flags & ContactFlags.Sensor) != 0;
         float margin = sensor ? 0 : Speculative + SimMath.Length(Velocity[a] - Velocity[b]) * dt;
-        Collision.Collide(Geometry[contact.ShapeA], pa, Rotation[a], Geometry[contact.ShapeB], pb, Rotation[b], margin, out var m);
+        // Bounding circles first: about a third of contacts are fat boxes overlapping with the shapes apart.
+        Manifold m = default;
+        ref readonly var ga = ref Geometry[contact.ShapeA]; ref readonly var gb = ref Geometry[contact.ShapeB];
+        var gap = (pb + Rotation[b].Rotate(gb.Center)) - (pa + Rotation[a].Rotate(ga.Center));
+        float reach = Bound[contact.ShapeA] + Bound[contact.ShapeB] + margin;
+        if (V.Dot(gap, gap) <= reach * reach)
+            Collision.Collide(ga, pa, Rotation[a], gb, pb, Rotation[b], margin, out m);
         bool touching;
         if (sensor)
         {
@@ -753,11 +811,13 @@ public sealed partial class PhysicsWorld2D
         w.AllowSleep = C(AllowSleep); w.FixedRotationOf = C(FixedRotationOf); w.Implicit = C(Implicit); w.SleepTime = C(SleepTime);
         w.Center = C(Center); w.LocalCenter = C(LocalCenter); w.Velocity = C(Velocity); w.Rotation = C(Rotation); w.AngularVelocityOf = C(AngularVelocityOf);
         w.InvMass = C(InvMass); w.InvInertia = C(InvInertia); w.Mass = C(Mass); w.GravityScale = C(GravityScale); w.LinearDamping = C(LinearDamping);
-        w.AngularDamping = C(AngularDamping); w.FirstShape = C(FirstShape); w.Written = C(Written); w.WrittenRotation = C(WrittenRotation); w.MassDirty = C(MassDirty);
+        w.AngularDamping = C(AngularDamping); w.FirstShape = C(FirstShape); w.Written = C(Written); w.WrittenRotation = C(WrittenRotation); w.MassDirty = C(MassDirty); w._justSlept = C(_justSlept);
         w._freeShapes = C(_freeShapes); w.ShapeBody = C(ShapeBody); w.NextShape = C(NextShape); w.Proxy = C(Proxy); w.Geometry = C(Geometry);
         w.Density = C(Density); w.Friction = C(Friction); w.Restitution = C(Restitution); w.Sensor = C(Sensor); w.ShapeAlive = C(ShapeAlive);
-        w.InStaticTree = C(InStaticTree); w.Moved = C(Moved); w.Filters = C(Filters); w.ShapeEntity = C(ShapeEntity); w.Fat = C(Fat); w.Sources = C(Sources); w._needsMove = new bool[_needsMove.Length]; w._swept = new Aabb[_swept.Length];
+        w.InStaticTree = C(InStaticTree); w.Moved = C(Moved); w.Filters = C(Filters); w.ShapeEntity = C(ShapeEntity); w.Fat = C(Fat); w.Sources = C(Sources); w.Bound = C(Bound); w._needsMove = new bool[_needsMove.Length]; w._swept = new Aabb[_swept.Length];
         w._staticTree = _staticTree.Clone(); w._movingTree = _movingTree.Clone(); w._moveBuffer = C(_moveBuffer); w._newPairs = C(_newPairs);
+        w._threadPairs = new ulong[_threadPairs.Length][]; for (int t = 0; t < _threadPairs.Length; t++) w._threadPairs[t] = new ulong[_threadPairs[t].Length];
+        w._threadPairCount = new int[_threadPairCount.Length];
         w.Contacts = C(Contacts); w._pairs = new Dictionary<ulong, int>(_pairs, PairComparer.Instance); w._noCollide = new HashSet<ulong>(_noCollide, PairComparer.Instance);
         w._begins = C(_begins); w._ends = C(_ends); w._sensorBegins = C(_sensorBegins); w._sensorEnds = C(_sensorEnds); w._boxResults = new Entity[_boxResults.Length];
         CloneSolver(w);

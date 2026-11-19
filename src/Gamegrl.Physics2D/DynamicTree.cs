@@ -203,11 +203,13 @@ internal sealed class DynamicTree
     public void Query<T>(in Aabb box, ref T callback) where T : struct, ITreeQuery
     {
         if (_root < 0) return;
+        // A stack per call (not shared), so several threads can query at once.
+        Span<int> stack = stackalloc int[256];
         int top = 0;
-        _stack[top++] = _root;
+        stack[top++] = _root;
         while (top > 0)
         {
-            int n = _stack[--top];
+            int n = stack[--top];
             ref readonly var node = ref _nodes[n];
             if (!node.Box.Overlaps(box)) continue;
             if (node.IsLeaf)
@@ -215,9 +217,9 @@ internal sealed class DynamicTree
                 if (!callback.Hit(n, node.Item)) return;
                 continue;
             }
-            if (top + 2 > _stack.Length) Array.Resize(ref _stack, _stack.Length * 2);
-            _stack[top++] = node.Child2;
-            _stack[top++] = node.Child1;
+            if (top + 2 > stack.Length) { var bigger = new int[stack.Length * 2]; stack.CopyTo(bigger); stack = bigger; }
+            stack[top++] = node.Child2;
+            stack[top++] = node.Child1;
         }
     }
 

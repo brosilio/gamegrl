@@ -96,12 +96,9 @@ internal static class Collision
         m.P0 = new ManifoldPoint { AnchorA = point - pa, AnchorB = point - pb, Separation = separation, Id = (ushort)face };
     }
 
-    /// <summary>The face of <paramref name="a"/> that separates the polygons most, and by how much (SAT).</summary>
-    private static float MaxSeparation(in Shape a, Vector2 pa, Rot qa, in Shape b, Vector2 pb, Rot qb, out int edge)
+    /// <summary>The face of <paramref name="a"/> that separates the polygons most, and by how much (SAT). Both in one frame.</summary>
+    private static float MaxSeparation(in Shape a, in Shape b, out int edge)
     {
-        // B in A's frame.
-        var q = Rot.InvMul(qa, qb);
-        var p = qa.InvRotate(pb - pa);
         edge = 0;
         float best = float.MinValue;
         for (int i = 0; i < a.Count; i++)
@@ -110,7 +107,7 @@ internal static class Collision
             float s = float.MaxValue;
             for (int j = 0; j < b.Count; j++)
             {
-                float d = V.Dot(n, p + q.Rotate(b.Vertex(j)) - v);
+                float d = V.Dot(n, b.Vertex(j) - v);
                 if (d < s) s = d;
             }
             if (s > best) { best = s; edge = i; }
@@ -118,64 +115,117 @@ internal static class Collision
         return best;
     }
 
+    /// <summary>
+    /// Polygon against polygon, worked in A's frame: B is moved into it once, so SAT, corner contacts and clipping all
+    /// run on plain vertices (before, B's corners were turned again for every face tested).
+    /// </summary>
     private static void Polygons(in Shape a, Vector2 pa, Rot qa, in Shape b, Vector2 pb, Rot qb, float margin, ref Manifold m)
     {
+        var local = b.Transformed(qa.InvRotate(pb - pa), Rot.InvMul(qa, qb));
         float radius = a.Radius + b.Radius;
-        float sa = MaxSeparation(a, pa, qa, b, pb, qb, out int edgeA);
+        float sa = MaxSeparation(a, local, out int edgeA);
         if (sa - radius > margin) return;
-        float sb = MaxSeparation(b, pb, qb, a, pa, qa, out int edgeB);
+        float sb = MaxSeparation(local, a, out int edgeB);
         if (sb - radius > margin) return;
         // Prefer A's face unless B's is clearly better, so the choice doesn't flicker between steps.
         bool flip = sb > sa + 0.1f * 0.005f;
         float coreSeparation = Math.Max(sa, sb);
+        bool done = false;
         if (coreSeparation > 0.1f * 0.005f)
         {
             // The cores are apart: if their closest features are two corners, contact is corner to corner, along the
             // line between them (a face normal there would catch on the corner). Rounded shapes need this most.
-            if (flip ? CornerContact(b, pb, qb, edgeB, a, pa, qa, radius, margin, true, ref m)
-                     : CornerContact(a, pa, qa, edgeA, b, pb, qb, radius, margin, false, ref m)) return;
+            done = flip ? CornerContact(local, edgeB, a, radius, margin, true, ref m) : CornerContact(a, edgeA, local, radius, margin, false, ref m);
         }
-        if (flip) Clip(b, pb, qb, edgeB, a, pa, qa, radius, margin, true, ref m);
-        else Clip(a, pa, qa, edgeA, b, pb, qb, radius, margin, false, ref m);
+        if (!done)
+        {
+            if (flip) Clip(local, edgeB, a, radius, margin, true, ref m);
+            else Clip(a, edgeA, local, radius, margin, false, ref m);
+        }
+        if (m.Count == 0) return;
+        // Back to world space: the normal, and anchors relative to each body's origin.
+        m.Normal = qa.Rotate(m.Normal);
+        ToWorld(ref m.P0, pa, qa, pb);
+        if (m.Count > 1) ToWorld(ref m.P1, pa, qa, pb);
+    }
+
+    private static void ToWorld(ref ManifoldPoint p, Vector2 pa, Rot qa, Vector2 pb)
+    {
+        var world = pa + qa.Rotate(p.AnchorA); // the point, in A's frame until now
+        p.AnchorA = world - pa;
+        p.AnchorB = world - pb;
+    }
+
+    private static int IncidentEdge(in Shape inc, Vector2 n)
+    {
+        int edge = 0;
+        float minDot = float.MaxValue;
+        for (int i = 0; i < inc.Count; i++)
+        {
+            float d = V.Dot(n, inc.Normal(i));
+            if (d < minDot) { minDot = d; edge = i; }
+        }
+        return edge;
     }
 
     /// <summary>
     /// The closest points between the reference edge and the incident edge; when both sit at segment ends, a single
-    /// corner-to-corner contact (true, done). Otherwise false: clipping handles edge contact.
+    /// corner-to-corner contact (true, done: with a point, or none when apart). Otherwise false: clipping handles it.
+    /// Points are left in the shared frame in <see cref="ManifoldPoint.AnchorA"/>, and the normal points from A to B.
     /// </summary>
-    private static bool CornerContact(in Shape refShape, Vector2 pr, Rot qr, int refEdge, in Shape inc, Vector2 pi, Rot qi, float radius, float margin, bool flip, ref Manifold m)
+    private static bool CornerContact(in Shape refShape, int refEdge, in Shape inc, float radius, float margin, bool flip, ref Manifold m)
     {
-        var q = Rot.InvMul(qr, qi);
-        var p = qr.InvRotate(pi - pr);
         var n = refShape.Normal(refEdge);
-        int incEdge = 0;
-        float minDot = float.MaxValue;
-        for (int i = 0; i < inc.Count; i++)
-        {
-            float d = V.Dot(n, q.Rotate(inc.Normal(i)));
-            if (d < minDot) { minDot = d; incEdge = i; }
-        }
+        int incEdge = IncidentEdge(inc, n);
         int r1 = refEdge, r2 = refEdge + 1 < refShape.Count ? refEdge + 1 : 0;
         int i1 = incEdge, i2 = incEdge + 1 < inc.Count ? incEdge + 1 : 0;
-        var a1 = refShape.Vertex(r1); var a2 = refShape.Vertex(r2);
-        var b1 = p + q.Rotate(inc.Vertex(i1)); var b2 = p + q.Rotate(inc.Vertex(i2));
-        SegmentDistance(a1, a2, b1, b2, out float f1, out float f2, out var c1, out var c2);
-        bool corner1 = f1 == 0 || f1 == 1, corner2 = f2 == 0 || f2 == 1;
-        if (!corner1 || !corner2) return false;
+        SegmentDistance(refShape.Vertex(r1), refShape.Vertex(r2), inc.Vertex(i1), inc.Vertex(i2), out float f1, out float f2, out var c1, out var c2);
+        if ((f1 != 0 && f1 != 1) || (f2 != 0 && f2 != 1)) return false;
         float distance = SimMath.Distance(c1, c2);
         if (distance - radius > margin) return true; // apart: no contact, and clipping wouldn't add one
         if (distance < 1e-6f) return false;
         var normal = (c2 - c1) / distance; // reference to incident
-        var point = pr + qr.Rotate(0.5f * ((c1 + normal * refShape.Radius) + (c2 - normal * inc.Radius)));
-        var worldNormal = qr.Rotate(normal);
-        m.Normal = flip ? -worldNormal : worldNormal;
+        m.Normal = flip ? -normal : normal;
         ushort id = (ushort)((f1 == 0 ? r1 : r2) << 8 | (f2 == 0 ? i1 : i2) | 0x2000 | (flip ? 0x4000 : 0));
-        var mp = new ManifoldPoint { Separation = distance - radius, Id = id };
-        if (flip) { mp.AnchorA = point - pi; mp.AnchorB = point - pr; }
-        else { mp.AnchorA = point - pr; mp.AnchorB = point - pi; }
-        m.P0 = mp;
+        m.P0 = new ManifoldPoint { AnchorA = 0.5f * ((c1 + normal * refShape.Radius) + (c2 - normal * inc.Radius)), Separation = distance - radius, Id = id };
         m.Count = 1;
         return true;
+    }
+
+    /// <summary>Clip the incident face against the reference face (both in the shared frame); points go in <see cref="ManifoldPoint.AnchorA"/>.</summary>
+    private static void Clip(in Shape refShape, int refEdge, in Shape inc, float radius, float margin, bool flip, ref Manifold m)
+    {
+        var n = refShape.Normal(refEdge);
+        var v1 = refShape.Vertex(refEdge); var v2 = refShape.Vertex(refEdge + 1 < refShape.Count ? refEdge + 1 : 0);
+        int incEdge = IncidentEdge(inc, n);
+        int i1 = incEdge, i2 = incEdge + 1 < inc.Count ? incEdge + 1 : 0;
+        var w1 = inc.Vertex(i1); var w2 = inc.Vertex(i2);
+        var tangent = SimMath.Normalize(v2 - v1);
+        float lower = 0, upper = V.Dot(v2 - v1, tangent);
+        float a1 = V.Dot(w1 - v1, tangent), a2 = V.Dot(w2 - v1, tangent);
+        Vector2 c1 = w1, c2 = w2;
+        if (a1 < lower && a2 > lower) c1 = w1 + (w2 - w1) * ((lower - a1) / (a2 - a1));
+        else if (a2 < lower && a1 > lower) c2 = w2 + (w1 - w2) * ((lower - a2) / (a1 - a2));
+        float b1 = V.Dot(c1 - v1, tangent), b2 = V.Dot(c2 - v1, tangent);
+        if (b1 > upper && b2 < upper) c1 = c2 + (c1 - c2) * ((upper - b2) / (b1 - b2));
+        else if (b2 > upper && b1 < upper) c2 = c1 + (c2 - c1) * ((upper - b1) / (b2 - b1));
+        m.Normal = flip ? -n : n;
+        AddPoint(ref m, c1, n, v1, refShape.Radius, inc.Radius, radius, margin, (ushort)(refEdge << 8 | i1 | (flip ? 0x4000 : 0)), lower, upper, tangent);
+        AddPoint(ref m, c2, n, v1, refShape.Radius, inc.Radius, radius, margin, (ushort)(refEdge << 8 | i2 | 0x80 | (flip ? 0x4000 : 0)), lower, upper, tangent);
+    }
+
+    private static void AddPoint(ref Manifold m, Vector2 c, Vector2 n, Vector2 v1, float refRadius, float incRadius, float radius, float margin, ushort id, float lower, float upper, Vector2 tangent)
+    {
+        float along = V.Dot(c - v1, tangent);
+        if (along < lower - 1e-4f || along > upper + 1e-4f) return; // the clip removed it
+        float depth = V.Dot(c - v1, n);
+        float separation = depth - radius;
+        if (separation > margin) return;
+        // Half way between the reference surface and the incident point's surface.
+        var point = 0.5f * ((c - n * (depth - refRadius)) + (c - n * incRadius));
+        var mp = new ManifoldPoint { AnchorA = point, Separation = separation, Id = id };
+        if (m.Count == 0) m.P0 = mp; else m.P1 = mp;
+        m.Count++;
     }
 
     /// <summary>Closest points between segments p1–q1 and p2–q2 (Ericson), with their parameters clamped to [0, 1].</summary>

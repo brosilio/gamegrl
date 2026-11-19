@@ -122,7 +122,7 @@ internal sealed class Physics2DStep : ISystem
         physics.Jobs = world.Jobs;
         using (SyncMarker.Scope()) Sync(world, physics);
         physics.Step(world.Resource<Time>().FixedDelta);
-        WriteBack(physics);
+        WriteBack(world, physics);
     }
 
     private static (Vector2 Position, Rot Rotation) Pose(in LocalTransform t) => (new Vector2(t.Position.X, t.Position.Y), Rot.FromQuaternion(t.Rotation));
@@ -133,13 +133,20 @@ internal sealed class Physics2DStep : ISystem
         // component, and goes at the end. No per-object lookups into the world.
         int stamp = ++_stamp;
 
-        // Bodies: create, settings, velocities set by gameplay, teleports.
+        // Stamps must cover every existing index before the parallel passes write them.
+        if (_bodyStamps.Length < physics.BodyCapacity) Array.Resize(ref _bodyStamps, physics.BodyCapacity * 2 + 64);
+        if (_shapeStamps.Length < physics.ShapeCapacity) Array.Resize(ref _shapeStamps, physics.ShapeCapacity * 2 + 64);
+
+        // Bodies: create, settings, velocities set by gameplay, teleports. The common row (body exists, not moved from
+        // outside, same type) only writes its own body, so those run in parallel; the rest run serially, in row order.
         foreach (var a in _bodies.Archetypes)
         {
             var bodies = a.GetSpan<RigidBody2D>(); var transforms = a.GetSpan<LocalTransform>();
             var entities = a.Entities;
+            FastBodies(world, physics, a, stamp);
             for (int r = 0; r < bodies.Length; r++)
             {
+                if (!_serialRows[r]) continue;
                 ref var rb = ref bodies[r];
                 var (position, rotation) = Pose(transforms[r]);
                 int b = rb.Handle - 1;
@@ -169,8 +176,10 @@ internal sealed class Physics2DStep : ISystem
             var entities = a.Entities;
             // Colliders beside their own body (the common case) read its handle from the same archetype.
             var ownBodies = a.Has<RigidBody2D>() ? a.GetSpan<RigidBody2D>() : default;
+            FastColliders(world, physics, a, stamp);
             for (int r = 0; r < colliders.Length; r++)
             {
+                if (!_serialRows[r]) continue;
                 ref var collider = ref colliders[r];
                 var e = entities[r];
                 int s = collider.Handle - 1;
@@ -263,6 +272,94 @@ internal sealed class Physics2DStep : ISystem
             if (physics.IsAlive(b) && Stamped(_bodyStamps, b) != stamp) physics.DestroyBody(b);
     }
 
+    private bool[] _serialRows = new bool[64];
+
+    private unsafe struct FastBodyJob : IJobFor
+    {
+        public PhysicsWorld2D Physics;
+        public RigidBody2D* Bodies;
+        public LocalTransform* Transforms;
+        public Entity* Entities;
+        public bool[] Serial;
+        public int[] Stamps;
+        public int Stamp;
+        public readonly void Execute(int start, int end)
+        {
+            var physics = Physics;
+            for (int r = start; r < end; r++)
+            {
+                ref var rb = ref Bodies[r];
+                int b = rb.Handle - 1;
+                Serial[r] = true;
+                if (!physics.IsAlive(b) || physics.EntityOf(b) != Entities[r] || physics.IsImplicit(b) || physics.TypeOf(b) != rb.Type) continue;
+                var (position, rotation) = Pose(Transforms[r]);
+                if (position != physics.Written[b] || rotation.C != physics.WrittenRotation[b].C || rotation.S != physics.WrittenRotation[b].S) continue;
+                Serial[r] = false;
+                Stamps[b] = Stamp;
+                physics.SetDamping(b, rb.LinearDamping, rb.AngularDamping, rb.GravityScale);
+                physics.SetFixedRotation(b, rb.FixedRotation);
+                if (physics.AllowSleep[b] == rb.NeverSleep) physics.SetAllowSleep(b, !rb.NeverSleep);
+                physics.SetVelocity(b, rb.LinearVelocity, rb.AngularVelocity);
+            }
+        }
+    }
+
+    private unsafe void FastBodies(World world, PhysicsWorld2D physics, Archetype a, int stamp)
+    {
+        if (_serialRows.Length < a.Count) _serialRows = new bool[a.Count * 2];
+        fixed (Entity* entities = a.Entities)
+        {
+            var job = new FastBodyJob
+            {
+                Physics = physics, Bodies = a.GetPointer<RigidBody2D>(), Transforms = a.GetPointer<LocalTransform>(), Entities = entities,
+                Serial = _serialRows, Stamps = _bodyStamps, Stamp = stamp,
+            };
+            if (world.Jobs is { } jobs) jobs.ParallelFor(a.Count, 512, ref job); else job.Execute(0, a.Count);
+        }
+    }
+
+    private unsafe struct FastColliderJob : IJobFor
+    {
+        public PhysicsWorld2D Physics;
+        public Collider2D* Colliders;
+        public RigidBody2D* Bodies; // the same entity's body
+        public Entity* Entities;
+        public bool[] Serial;
+        public int[] Stamps;
+        public int Stamp;
+        public readonly void Execute(int start, int end)
+        {
+            var physics = Physics;
+            for (int r = start; r < end; r++)
+            {
+                Serial[r] = true;
+                if (Bodies == null) continue; // child and scenery colliders take the full path
+                ref readonly var collider = ref Colliders[r];
+                int s = collider.Handle - 1, body = Bodies[r].Handle - 1;
+                var e = Entities[r];
+                if (!physics.IsAlive(body) || physics.EntityOf(body) != e || !physics.IsShapeAlive(s) || physics.EntityOfShape(s) != e || physics.BodyOfShape(s) != body) continue;
+                var source = new ShapeSource { Collider = collider with { Handle = 0 }, Offset = Vector2.Zero, Turn = Rot.Identity };
+                if (!source.Same(physics.Sources[s])) continue;
+                Serial[r] = false;
+                Stamps[s] = Stamp;
+            }
+        }
+    }
+
+    private unsafe void FastColliders(World world, PhysicsWorld2D physics, Archetype a, int stamp)
+    {
+        if (_serialRows.Length < a.Count) _serialRows = new bool[a.Count * 2];
+        fixed (Entity* entities = a.Entities)
+        {
+            var job = new FastColliderJob
+            {
+                Physics = physics, Colliders = a.GetPointer<Collider2D>(), Bodies = a.Has<RigidBody2D>() ? a.GetPointer<RigidBody2D>() : null,
+                Entities = entities, Serial = _serialRows, Stamps = _shapeStamps, Stamp = stamp,
+            };
+            if (world.Jobs is { } jobs) jobs.ParallelFor(a.Count, 512, ref job); else job.Execute(0, a.Count);
+        }
+    }
+
     private int _stamp;
     private int[] _bodyStamps = [], _shapeStamps = [], _jointStamps = [];
 
@@ -287,17 +384,20 @@ internal sealed class Physics2DStep : ISystem
         return source.Offset == default && source.Turn.C == 1 && source.Turn.S == 0 ? shape : shape.Transformed(source.Offset, source.Turn);
     }
 
-    private void WriteBack(PhysicsWorld2D physics)
+    private unsafe struct WriteBackJob : IJobFor
     {
-        foreach (var a in _bodies.Archetypes)
+        public PhysicsWorld2D Physics;
+        public RigidBody2D* Bodies;
+        public LocalTransform* Transforms;
+        public readonly void Execute(int start, int end)
         {
-            var bodies = a.GetSpan<RigidBody2D>(); var transforms = a.GetSpan<LocalTransform>();
-            for (int r = 0; r < bodies.Length; r++)
+            var physics = Physics;
+            for (int r = start; r < end; r++)
             {
-                ref var rb = ref bodies[r];
+                ref var rb = ref Bodies[r];
                 int b = rb.Handle - 1;
-                if (!physics.IsAlive(b) || physics.TypeOf(b) == BodyType.Static) continue;
-                ref var t = ref transforms[r];
+                if (!physics.IsAlive(b) || physics.TypeOf(b) == BodyType.Static || !physics.IsAwake(b) && physics.SleptBefore(b)) continue;
+                ref var t = ref Transforms[r];
                 var p = physics.GetPosition(b);
                 t.Position = new Vector3(p.X, p.Y, t.Position.Z);
                 t.Rotation = physics.GetRotation(b).ToQuaternion();
@@ -307,6 +407,17 @@ internal sealed class Physics2DStep : ISystem
                 physics.Written[b] = p;
                 physics.WrittenRotation[b] = Rot.FromQuaternion(t.Rotation);
             }
+        }
+    }
+
+    /// <summary>Poses and velocities back to the entities, in parallel (each row writes only its own entity and body).</summary>
+    private unsafe void WriteBack(World world, PhysicsWorld2D physics)
+    {
+        foreach (var a in _bodies.Archetypes)
+        {
+            if (a.Count == 0) continue;
+            var job = new WriteBackJob { Physics = physics, Bodies = a.GetPointer<RigidBody2D>(), Transforms = a.GetPointer<LocalTransform>() };
+            if (world.Jobs is { } jobs) jobs.ParallelFor(a.Count, 512, ref job); else job.Execute(0, a.Count);
         }
     }
 }

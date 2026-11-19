@@ -22,6 +22,8 @@ public sealed partial class PhysicsWorld2D
     private bool[] _islandAwake = [];
     private float[] _islandSleep = [];
     private int[] _awake = [];
+    private int[] _justSleptList = [];
+    private int _justSleptCount;
     private int _awakeCount;
     private ulong[] _colorBits = [];
     private int _colorWords;
@@ -65,6 +67,7 @@ public sealed partial class PhysicsWorld2D
         Array.Resize(ref _islandAwake, capacity);
         Array.Resize(ref _islandSleep, capacity);
         Array.Resize(ref _awake, capacity);
+        Array.Resize(ref _justSleptList, capacity);
         _colorWords = (capacity + 63) / 64;
         _colorBits = new ulong[Colors * _colorWords];
     }
@@ -72,7 +75,7 @@ public sealed partial class PhysicsWorld2D
     private void CloneSolver(PhysicsWorld2D w)
     {
         w.States = (BodyState[])States.Clone(); w._parent = (int[])_parent.Clone(); w._islandAwake = (bool[])_islandAwake.Clone();
-        w._islandSleep = (float[])_islandSleep.Clone(); w._awake = (int[])_awake.Clone(); w._colorBits = (ulong[])_colorBits.Clone();
+        w._islandSleep = (float[])_islandSleep.Clone(); w._awake = (int[])_awake.Clone(); w._justSleptList = (int[])_justSleptList.Clone(); w._colorBits = (ulong[])_colorBits.Clone();
         w._contactColor = (int[])_contactColor.Clone(); w._solvable = (int[])_solvable.Clone(); w._constraints = (ContactConstraint[])_constraints.Clone();
         w._wide = (WideConstraint[])_wide.Clone();
         w._segments = (Segment[])_segments.Clone(); w._claims = new int[_claims.Length]; w._barrier = new SpinBarrier();
@@ -97,6 +100,18 @@ public sealed partial class PhysicsWorld2D
     /// <summary>Islands of dynamic bodies joined by touching contacts and joints; anything touching the awake wakes.</summary>
     private void BuildIslands()
     {
+        // Islands decide who sleeps and who wakes: with sleep off and nothing asleep, only the awake list is needed.
+        if (!Settings.EnableSleep)
+        {
+            bool anyAsleep = false;
+            _awakeCount = 0;
+            for (int b = 0; b < _bodyHigh; b++)
+            {
+                if (!BodyAlive[b] || Types[b] == BodyType.Static) continue;
+                if (Awake[b]) _awake[_awakeCount++] = b; else anyAsleep = true;
+            }
+            if (!anyAsleep) return;
+        }
         for (int b = 0; b < _bodyHigh; b++) _parent[b] = b;
         for (int c = 0; c < ContactCount; c++)
         {
@@ -124,6 +139,8 @@ public sealed partial class PhysicsWorld2D
     private void UpdateSleep(float dt)
     {
         var s = Settings;
+        for (int k = 0; k < _justSleptCount; k++) _justSlept[_justSleptList[k]] = false;
+        _justSleptCount = 0;
         if (!s.EnableSleep) return;
         float linear2 = s.LinearSleepSpeed * s.LinearSleepSpeed;
         for (int b = 0; b < _bodyHigh; b++) _islandSleep[b] = float.MaxValue;
@@ -140,6 +157,9 @@ public sealed partial class PhysicsWorld2D
             float island = Types[b] == BodyType.Dynamic ? _islandSleep[Find(b)] : SleepTime[b];
             if (island < s.TimeToSleep) continue;
             Awake[b] = false;
+            // Written back once more (velocity now zero), then skipped while it sleeps.
+            _justSlept[b] = true;
+            _justSleptList[_justSleptCount++] = b;
             Velocity[b] = default;
             AngularVelocityOf[b] = 0;
         }
