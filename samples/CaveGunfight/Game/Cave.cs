@@ -357,7 +357,8 @@ public sealed class CaveHudModule(bool overlay = false) : IModule
             var r = audio.Reverb;
             Text(r.IsSilent ? "reverb: none" : SpanFormat.Write(line, $"reverb EDT {r.DecaySeconds.Low:0.00} / {r.DecaySeconds.Mid:0.00} / {r.DecaySeconds.High:0.00} s (late T30 {r.LateDecaySeconds.Mid:0.0} s)  ·  level {Db(r.Level):0} dB  ·  {r.Volume:0} m³  ·  enclosed {r.Enclosure * 100:0}%"), Dim);
             var remote = audio.RemoteReverb;
-            Text(remote.IsSilent ? "other room: none" : SpanFormat.Write(line, $"other room heard through an opening: EDT {remote.DecaySeconds.Mid:0.0} s"), Dim);
+            Text(audio.HiddenInThisRoom ? "hidden source in this room: it fills this room's reverb"
+                : remote.IsSilent ? "other room: none" : SpanFormat.Write(line, $"other room heard through an opening: EDT {remote.DecaySeconds.Mid:0.0} s"), Dim);
             Text(SpanFormat.Write(line, $"HDR top {audio.Hdr.TopDb:0} dB  ·  voices {audio.Engine.RealVoices} rendered of {audio.Engine.ActiveVoices}  ·  {1 / MathF.Max(time.Delta, 1e-4f):0} fps"), Dim);
             if (captures.Last is not null && time.Elapsed - captures.LastTime < 6) Text(SpanFormat.Write(line, $"captured to {captures.Last}"), Warn);
             var ctx = world.HasResource<RenderContext>() ? world.Resource<RenderContext>() : null;

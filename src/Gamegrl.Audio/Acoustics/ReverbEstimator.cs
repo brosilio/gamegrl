@@ -39,15 +39,16 @@ public struct ReverbParams
 /// <item>Heard: energy that comes back to the listener, against a source's direct fluence at 1 m. At each scattering
 /// bounce the scattered share goes straight to the listener when it can see the spot (next-event estimation, "diffuse
 /// rain": every bounce contributes a little, rather than a few lucky rays a lot); specular legs are collected by a
-/// receiver sphere round the listener (radius scaled to the space, 0.5 to 4 m, and at most half the way to the nearest
-/// surface), each crossing adding its energy times chord ÷ sphere volume, the fluence it carries. All-specular paths
-/// of the first two orders are left out (the image sources render those as discrete reflections), and so is the first
-/// order (it's local to where you stand, strong beside a wall, and arrives
-/// with the early sound): this is the late sound. Its total, divided by what a first bounce keeps on average, is the
-/// reverb's energy relative to the direct sound at 1 m (the level squared: 16π/R in a diffuse room of room constant R),
-/// and its backward-integrated
-/// decay (Schroeder's) gives the early decay time the reverb renders: the first 10 dB, times six. Out in the open
-/// little comes back and it dies at once, however long faint energy wanders in some cave nearby.</item>
+/// receiver sphere round the listener (radius scaled to the space, 0.5 to 4 m), each crossing adding its energy times
+/// chord ÷ sphere volume, the fluence it carries. All-specular paths of the first two orders are left out (the image
+/// sources render those as discrete reflections), and so is the first order, and so are returns off surfaces within a
+/// metre (or the receiver's radius) of the listener: they're local to where you stand, strong beside a wall or in a
+/// corner, and arrive with the early sound. The directions those near surfaces cover are put back by their share.
+/// What's left is the late sound: its total, divided by what a first bounce keeps on average, is the reverb's energy
+/// relative to the direct sound at 1 m (the level squared: 16π/R in a diffuse room of room constant R, measured within
+/// 2% of it in the middle of a room, 15% in a corner), and its backward-integrated decay (Schroeder's) gives the early
+/// decay time the reverb renders: the first 10 dB, times six, from the late sound's onset. Out in the open little comes
+/// back and it dies at once, however long faint energy wanders in some cave nearby.</item>
 /// <item>In the room: the total energy still travelling, over time, is the room's energy decay; its slope between −5
 /// and −35 dB is the late reverberation time T30 per band (by construction what Eyring's formula approximates).</item>
 /// <item>Size: first-hit distances give the volume visible from the point, V = (4π/N)·Σ r³/3; the mean free path
@@ -62,6 +63,8 @@ public static class ReverbEstimator
 
     /// <summary>Rays are traced in this many fixed chunks (in parallel when asked), each with its own random stream, and summed in order: the same result however the threads run.</summary>
     private const int Chunks = 16;
+    /// <summary>Bounces nearer the listener than this (or than the receiver) don't count toward the reverb: they're its surroundings' early sound.</summary>
+    private const float LocalMetres = 1;
 
     /// <summary>One chunk's tallies.</summary>
     private sealed class Tally(int bins)
@@ -95,18 +98,23 @@ public static class ReverbEstimator
             : default;
 
         // The receiver: big enough to be crossed often (a few times per ray in a big room), small next to the space.
-        // It stays within half the distance to the nearest surface, so it doesn't soak up one wall's return.
-        double sizing = 0;
-        float nearest = float.MaxValue;
         const int SizingRays = 256;
+        Span<float> firstHit = stackalloc float[SizingRays];
+        double sizing = 0;
         for (int r = 0; r < SizingRays; r++)
-            if (scene.Raycast(listener, Direction(r, SizingRays), 200, out var first))
-            {
-                sizing += first.Distance * first.Distance * first.Distance / 3;
-                nearest = MathF.Min(nearest, first.Distance);
-            }
-        float receiver = MathF.Min(Math.Clamp(0.15f * MathF.Cbrt((float)(4 * Math.PI / SizingRays * sizing)), 0.5f, 4), MathF.Max(0.2f, 0.5f * nearest));
+        {
+            firstHit[r] = scene.Raycast(listener, Direction(r, SizingRays), 200, out var first) ? first.Distance : float.MaxValue;
+            if (firstHit[r] < float.MaxValue) sizing += first.Distance * first.Distance * first.Distance / 3;
+        }
+        float receiver = Math.Clamp(0.15f * MathF.Cbrt((float)(4 * Math.PI / SizingRays * sizing)), 0.5f, 4);
         float r2 = receiver * receiver, fluence = 3 / (receiver * r2); // chord ÷ (4/3·π·R³), times 4π (direct fluence at 1 m is 1/4π)
+        // Returns whose last bounce is beside the listener (the wall at your shoulder, a corner) are local early sound,
+        // like the first order: left out, so the reverb is the room's wherever you stand in it. That also leaves out the
+        // room's sound arriving from those directions, put back by the share of directions they cover.
+        float local = MathF.Max(LocalMetres, receiver), local2 = local * local;
+        int near = 0;
+        foreach (float d in firstHit) if (d < local) near++;
+        float open = MathF.Max(0.25f, 1 - (float)near / SizingRays);
 
         float maxPath = MaxSeconds * c;
         int traceEvery = trace is null ? 0 : Math.Max(1, rays / ReverbTrace.Rays);
@@ -134,7 +142,7 @@ public static class ReverbEstimator
                     // A specular leg back past the listener: heard from the second order on (the first is local to where you
                     // stand, strong beside a wall, and arrives with the early sound), except all-specular paths of the first
                     // two orders (image sources' job). Scattered legs are counted at the bounce instead (below).
-                    if (b > 1 && specularLeg && (scattered || b > 2)) Receive(heard, origin - listener, dir, length, travelled, e, air, c, r2, fluence, bins);
+                    if (b > 1 && specularLeg && (scattered || b > 2) && Vector3.DistanceSquared(origin, listener) >= local2) Receive(heard, origin - listener, dir, length, travelled, e, air, c, r2, fluence, bins);
                     if (escaped) break; // through an opening (or out of time): its energy leaves the room
                     if (b == 0) { t.FirstHits++; t.Volume += hit.Distance * hit.Distance * hit.Distance / 3; }
                     else { t.PathSum += hit.Distance; t.Segments++; }
@@ -149,7 +157,8 @@ public static class ReverbEstimator
                     var normal = Vector3.Dot(hit.Normal, dir) > 0 ? -hit.Normal : hit.Normal; // facing the ray
                     origin = origin + dir * hit.Distance + normal * 1e-4f;
                     // The scattered share straight to the listener, if it can see the spot (from the second order on).
-                    if (b >= 1 && material.Scattering > 0) Rain(scene, heard, origin, normal, listener, travelled, e * material.Scattering, air, c, r2, bins);
+                    if (b >= 1 && material.Scattering > 0 && Vector3.DistanceSquared(origin, listener) >= local2)
+                        Rain(scene, heard, origin, normal, listener, travelled, e * material.Scattering, air, c, r2, bins);
                     if (Random() < material.Scattering) { dir = CosineDirection(normal, Random(), Random()); scattered = true; specularLeg = false; }
                     else { dir = Vector3.Reflect(dir, normal); specularLeg = true; }
                 }
@@ -184,7 +193,7 @@ public static class ReverbEstimator
         result.DecaySeconds = new Bands3(EarlyDecay(heard, 0, bins), EarlyDecay(heard, 1, bins), EarlyDecay(heard, 2, bins));
         // The first bounce's share, put back at the average a first bounce keeps (rather than what the nearest wall returns).
         double reflectance = firstHits > 0 ? firstKept / firstHits : 1;
-        result.Level = result.DecaySeconds.Mid > 0 ? (float)Math.Sqrt(heard[bins] / Math.Max(reflectance, 0.05)) : 0;
+        result.Level = result.DecaySeconds.Mid > 0 ? (float)Math.Sqrt(heard[bins] / Math.Max(reflectance, 0.05) / open) : 0;
         result.PreDelaySeconds = firstHits > 0 ? Math.Min(0.1f, meanFreePath / c) : 0;
         if (trace is not null)
         {

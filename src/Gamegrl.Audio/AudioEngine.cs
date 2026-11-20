@@ -363,6 +363,9 @@ public sealed class AudioEngine : IDisposable
 
     public bool IsPlaying(VoiceHandle voice) => TryGet(voice, out _);
 
+    /// <summary>Whether a voice loops (false when it has ended).</summary>
+    public bool Loops(VoiceHandle voice) => TryGet(voice, out int i) && _voices[i].Loop;
+
     /// <summary>The clip a voice plays (null when it has ended).</summary>
     public AudioClip? ClipOf(VoiceHandle voice) => TryGet(voice, out int i) ? _voices[i].Clip : null;
 

@@ -83,7 +83,7 @@ public sealed class AudioDiagnostics
         Reverb(sb, "reverb", audio.Reverb, ReverbSource.ToString().ToLowerInvariant());
         if (this.Reverb is { } trace)
             Line($"    estimated at {V(trace.Listener)}, {Vector3.Distance(trace.Listener, Listener.Translation):0.00} m from the listener now (receiver {trace.Receiver:0.00} m)");
-        Reverb(sb, "other room", audio.RemoteReverb, RemoteActive ? "heard from " + V(RemoteOpening) : "inactive");
+        Reverb(sb, "other room", audio.RemoteReverb, RemoteActive ? "heard from " + V(RemoteOpening) : audio.HiddenInThisRoom ? "the hidden source is in this room: not played" : "inactive");
         sb.AppendLine();
         Line($"positional voices ({Voices.Count}):");
         foreach (var r in Voices)

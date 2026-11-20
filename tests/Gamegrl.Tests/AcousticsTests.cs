@@ -202,6 +202,59 @@ internal static class AcousticsTests
             }
         });
 
+        Test("acoustics: HDR counts occlusion once — the loudest sound, though behind a wall, plays at the window's top; a quieter one in view keeps its distance below", () =>
+        {
+            var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));
+            using var app = b.Build();
+            var w = app.World;
+            var context = w.Resource<AudioContext>();
+            ref var env = ref w.Resource<AudioEnvironment>();
+            env.Hdr = true; env.HdrHeadroomDb = 0; env.Reverb = false; env.Reflections = false; env.Diffraction = false;
+            context.Diagnostics.Enabled = true;
+            var tone = new AssetRef<AudioAsset>(Guid.NewGuid());
+            context.Register(tone, AudioClip.Generate("tone", Rate, Rate, i => MathF.Sin(i * 0.05f)));
+            w.Spawn(LocalTransform.Identity, new LocalToWorld(), AudioListener.Default);
+            // A wall passing 10% of the mid band between the listener and a 120 dB source 6 m away; a 90 dB one 3 m away in view.
+            w.Spawn(new LocalTransform { Position = new Vector3(0, 0, -3), Rotation = Quaternion.Identity, Scale = new Vector3(10, 10, 0.3f) },
+                new LocalToWorld(), AcousticSurface.Box(new AcousticMaterial(Bands3.All(0.1f), 0, Bands3.All(0.1f))));
+            w.Spawn(LocalTransform.At(new Vector3(0, 0, -6)), new LocalToWorld(), AudioSource.At(tone, loop: true) with { Emitter = AudioEmitter.Default with { LoudnessDb = 120 } });
+            w.Spawn(LocalTransform.At(new Vector3(3, 0, 0)), new LocalToWorld(), AudioSource.At(tone, loop: true) with { Emitter = AudioEmitter.Default with { LoudnessDb = 90 } });
+            for (int f = 0; f < 5; f++) { app.Tick(1 / 60.0); context.Engine.Render(new float[Rate / 60 * 2]); }
+            VoiceReport loud = default, quiet = default;
+            foreach (var v in context.Diagnostics.Voices) if (Vector3.Distance(v.Position, new Vector3(0, 0, -6)) < 0.1f) loud = v; else quiet = v;
+            float heard = loud.Spatial.Gain * loud.Spatial.Mid;
+            float air = Gamegrl.Audio.Spatial.Propagation.AirBands(6, env.TemperatureC, env.HumidityPercent).Mid;
+            Assert.True(MathF.Abs(loud.Transmission - 0.1f) < 0.01f && MathF.Abs(heard - air) < 0.02f * air,
+                $"behind the wall (transmission {loud.Transmission:0.000}): mid band at {heard:0.000} of full scale, expected {air:0.000}");
+            // The window's top is the loud one's level at the listener: 120 − 20·lg 6 − 20 = 84.4 dB; the quiet one is
+            // 90 − 20·lg 3 = 80.5 dB there, 3.9 dB below.
+            float below = 20 * MathF.Log10(quiet.Spatial.Gain * quiet.Spatial.Mid / heard);
+            Assert.True(MathF.Abs(below - (80.46f - 84.44f)) < 0.3f, $"the one in view sits {below:0.0} dB below it, expected -4.0");
+        });
+
+        Test("acoustics: a source hidden behind a pillar in the listener's room fills that room's reverb, with no other room", () =>
+        {
+            var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));
+            using var app = b.Build();
+            var w = app.World;
+            var context = w.Resource<AudioContext>();
+            ref var env = ref w.Resource<AudioEnvironment>();
+            env.Hdr = false; env.Reflections = false;
+            context.Diagnostics.Enabled = true;
+            var tone = new AssetRef<AudioAsset>(Guid.NewGuid());
+            context.Register(tone, AudioClip.Generate("tone", Rate, Rate, i => MathF.Sin(i * 0.05f)));
+            // A concrete hall 30 × 8 × 30 m with a 4 × 8 × 2 m pillar between the listener and the source.
+            w.Spawn(new LocalTransform { Position = new Vector3(0, 3, 0), Rotation = Quaternion.Identity, Scale = new Vector3(30, 8, 30) }, new LocalToWorld(), AcousticSurface.Room(AcousticMaterial.Concrete));
+            w.Spawn(new LocalTransform { Position = new Vector3(0, 3, -4), Rotation = Quaternion.Identity, Scale = new Vector3(4, 8, 2) }, new LocalToWorld(), AcousticSurface.Box(AcousticMaterial.Concrete));
+            w.Spawn(LocalTransform.Identity, new LocalToWorld(), AudioListener.Default);
+            w.Spawn(LocalTransform.At(new Vector3(0, 0, -9)), new LocalToWorld(), AudioSource.At(tone, loop: true) with { Emitter = AudioEmitter.Default with { LoudnessDb = 120 } });
+            for (int f = 0; f < 6; f++) { app.Tick(1 / 60.0); context.Engine.Render(new float[Rate / 60 * 2]); }
+            var v = context.Diagnostics.Voices[0];
+            Assert.True(v.Transmission < 0.05f && v.Diffracted, $"hidden (transmission {v.Transmission:0.000}), heard round the pillar ({v.Diffracted})");
+            Assert.True(context.HiddenInThisRoom && !context.Diagnostics.RemoteActive, $"known to be in this room ({context.HiddenInThisRoom}), no other room playing ({context.Diagnostics.RemoteActive})");
+            Assert.True(v.Spatial.Reverb > 0.95f && v.Spatial.RemoteReverb == 0, $"its reverb send {v.Spatial.Reverb:0.000} (as if in view: 1), other room {v.Spatial.RemoteReverb:0.000}");
+        });
+
         Test("acoustics: a new room — what's ringing keeps the old room's decay, new sound gets the new room's", () =>
         {
             double TailAfter(bool newRoom)
@@ -703,7 +756,7 @@ internal static class AcousticsTests
             using var app = b.Build();
             var w = app.World;
             var context = w.Resource<AudioContext>();
-            var env = w.Resource<AudioEnvironment>();
+            ref var env = ref w.Resource<AudioEnvironment>();
             env.Hdr = false; env.Reverb = false; env.Diffraction = false;
             context.Diagnostics.Enabled = true;
             var tone = new AssetRef<AudioAsset>(Guid.NewGuid());

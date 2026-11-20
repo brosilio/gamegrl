@@ -15,6 +15,23 @@ public sealed class AudioClip
     public int Frames { get; }
     public double Duration => (double)Frames / SampleRate;
 
+    /// <summary>
+    /// How long the clip's energy lasts, in seconds: (Σx²)² ÷ Σx⁴ over its samples (its length for a steady sound, the
+    /// time constant of an exponential decay). A reverb fed a clip much shorter than its own decay spreads the clip's
+    /// energy over the decay, so its level stays below the steady-state level by about this over the decay's time constant.
+    /// </summary>
+    public float EnergySeconds
+    {
+        get
+        {
+            if (_energySeconds >= 0) return _energySeconds;
+            double e2 = 0, e4 = 0;
+            foreach (float x in Samples) { double p = x * x; e2 += p; e4 += p * p; }
+            return _energySeconds = e4 > 0 ? (float)(e2 * e2 / e4 / Channels / SampleRate) : 0;
+        }
+    }
+    private float _energySeconds = -1;
+
     public AudioClip(string name, int sampleRate, ChannelLayout layout, float[] samples)
     {
         if (sampleRate <= 0) throw new ArgumentOutOfRangeException(nameof(sampleRate));

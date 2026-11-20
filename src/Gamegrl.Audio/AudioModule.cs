@@ -194,6 +194,11 @@ public sealed class AudioContext : IDisposable
     public ReverbParams Reverb { get; internal set; } = ReverbParams.None;
     /// <summary>The other room's reverb (round a loud hidden source), as last estimated; silent when there's none.</summary>
     public ReverbParams RemoteReverb { get; internal set; } = ReverbParams.None;
+    /// <summary>
+    /// The loud hidden source is in the listener's own room (behind a pillar, say): <see cref="RemoteReverb"/> is that
+    /// room's estimate there, not played; the source sends to the listener's reverb as if in view.
+    /// </summary>
+    public bool HiddenInThisRoom { get; internal set; }
     internal AcousticSimulator Simulator;
     /// <summary>The listener's world transform as of the last audio update (identity before one is found).</summary>
     public Matrix4x4 Listener { get; internal set; } = Matrix4x4.Identity;
@@ -317,20 +322,20 @@ public sealed class AudioContext : IDisposable
         if (Environment.Hdr && spatial.Gain > 0)
         {
             if (starting) Hdr.Raise(loudness);
-            float hdr = HdrGain(loudness, volume);
-            spatial.Reverb *= hdr / spatial.Gain;
-            spatial.RemoteReverb *= hdr / spatial.Gain;
-            spatial.Gain = hdr;
+            float hdr = HdrFactor(loudness, emitter.LoudnessDb);
+            spatial.Gain *= hdr; spatial.Reverb *= hdr; spatial.RemoteReverb *= hdr;
         }
         return spatial;
     }
 
     /// <summary>
-    /// The spatial gain under HDR: the window's gain for the voice's loudness, less its volume (the voice's own gain
-    /// applies that), times the listener's gain, less the headroom.
+    /// HDR as one factor on everything a voice sends (direct, reverb, the other room): its emitter's level at 1 m against
+    /// the window's top, less the headroom; zero when its loudness at the listener is below the window. Distance,
+    /// volume, occlusion and air stay where they are (in the gain, the voice's volume and its bands), so each counts once:
+    /// the loudest sound lands at the top of the window, at full scale less the headroom.
     /// </summary>
-    internal float HdrGain(float loudness, float volume) =>
-        volume > 1e-6f ? Hdr.Gain(loudness) / volume * ListenerGain * MathF.Pow(10, -Environment.HdrHeadroomDb / 20) : 0;
+    internal float HdrFactor(float loudness, float emitterDb) =>
+        loudness < Hdr.TopDb - Hdr.RangeDb ? 0 : MathF.Pow(10, (emitterDb - Hdr.TopDb - Environment.HdrHeadroomDb) / 20);
 
     /// <summary>
     /// Direction, distance gain, air absorption, directivity and Doppler for a source as heard by the current listener.
@@ -707,10 +712,39 @@ internal sealed class AudioUpdate : ISystem
         }
 
         RemoteRoom(audio, env, dt);
+        // Hidden voices in the listener's own room send to its reverb as if in view (their remote send is that level).
+        if (_sameRoom)
+            for (int i = 0; i < _pendingCount; i++)
+            {
+                ref var p = ref _pendingParams[i];
+                if (_pendingBlocked[i] >= 0.999f || Vector3.DistanceSquared(_pendingPosition[i], _remoteAnchor) > _remoteRadius * _remoteRadius) continue;
+                p.Reverb = MathF.Max(p.Reverb, p.RemoteReverb);
+                p.RemoteReverb = 0;
+            }
 
         // HDR: the window follows the loudest audible positional voice; then every one gets its gain.
         if (env.Hdr)
         {
+            // Loudness is what's heard: the direct sound and both reverbs' returns, by energy. (A distant shot in a cave,
+            // heard from outside, is mostly the cave's reverb pouring out of the mouth, far above its shadowed crack.) A
+            // short sound's reverb spreads its energy over the decay: weighted by the clip's energy duration over the
+            // decay's time constant (T/13.8), up to 1 for long and looping sounds.
+            var room = audio.Reverb; var other = audio.RemoteReverb;
+            float local = room.IsSilent ? 0 : room.Level, tauLocal = room.DecaySeconds.Mid / 13.8f;
+            float remote = _remoteActive && !other.IsSilent ? other.Level * _remoteCoupling : 0, tauRemote = other.DecaySeconds.Mid / 13.8f;
+            for (int i = 0; i < _pendingCount; i++)
+            {
+                if (float.IsNegativeInfinity(_pendingLoudness[i])) continue;
+                ref readonly var p = ref _pendingParams[i];
+                float volume = _pendingVolume[i];
+                bool near = _remoteActive && Vector3.DistanceSquared(_pendingPosition[i], _remoteAnchor) <= _remoteRadius * _remoteRadius;
+                float direct = MathF.Pow(10, (_pendingLoudness[i] - _pendingEmitter[i].LoudnessDb) / 20);
+                float here = p.Reverb * volume * local, there = near ? p.RemoteReverb * volume * remote : 0;
+                if (here == 0 && there == 0) continue;
+                float lasts = engine.Loops(_pending[i]) ? float.MaxValue : engine.ClipOf(_pending[i])?.EnergySeconds ?? 0;
+                float wLocal = tauLocal > 0 ? MathF.Min(1, lasts / tauLocal) : 0, wRemote = tauRemote > 0 ? MathF.Min(1, lasts / tauRemote) : 0;
+                _pendingLoudness[i] = _pendingEmitter[i].LoudnessDb + 10 * MathF.Log10(direct * direct + wLocal * here * here + wRemote * there * there);
+            }
             float loudest = float.NegativeInfinity;
             for (int i = 0; i < _pendingCount; i++) loudest = MathF.Max(loudest, _pendingLoudness[i]);
             audio.Hdr.Update(loudest, dt);
@@ -720,10 +754,8 @@ internal sealed class AudioUpdate : ISystem
             var p = _pendingParams[i];
             if (env.Hdr && p.Gain > 0)
             {
-                float hdr = audio.HdrGain(_pendingLoudness[i], _pendingVolume[i]);
-                p.Reverb *= hdr / p.Gain;
-                p.RemoteReverb *= hdr / p.Gain;
-                p.Gain = hdr;
+                float hdr = audio.HdrFactor(_pendingLoudness[i], _pendingEmitter[i].LoudnessDb);
+                p.Gain *= hdr; p.Reverb *= hdr; p.RemoteReverb *= hdr;
             }
             // Only hidden voices around the remote room's anchor send to it.
             if (!_remoteActive || Vector3.DistanceSquared(_pendingPosition[i], _remoteAnchor) > _remoteRadius * _remoteRadius) p.RemoteReverb = 0;
@@ -774,7 +806,18 @@ internal sealed class AudioUpdate : ISystem
         _pendingCount++;
     }
 
-    private bool _remoteActive;
+    private bool _remoteActive, _sameRoom;
+
+    /// <summary>
+    /// Whether the estimate at a hidden source describes the listener's own space: both enclosed, volumes within a third
+    /// and decays within a third of each other (a pillar or a crate between them, not a wall with a doorway).
+    /// </summary>
+    internal static bool SameRoom(in ReverbParams here, in ReverbParams there)
+    {
+        if (here.IsSilent || there.IsSilent || here.Enclosure < 0.9f || there.Enclosure < 0.9f) return false;
+        float volume = there.Volume / MathF.Max(here.Volume, 1), decay = there.DecaySeconds.Mid / here.DecaySeconds.Mid;
+        return volume < 1.35f && volume > 1 / 1.35f && decay < 1.35f && decay > 1 / 1.35f;
+    }
     private Vector3 _remoteAnchor, _remoteOpening;
     private float _remoteRadius, _remoteCoupling, _remoteHold;
 
@@ -813,6 +856,11 @@ internal sealed class AudioUpdate : ISystem
         if (anchor >= 0) _remoteHold = 1.2f * MathF.Max(room.DecaySeconds.Low, room.DecaySeconds.Mid);
         else _remoteHold -= dt; // the room keeps ringing after its sources stop
         bool active = !room.IsSilent && (anchor >= 0 || _remoteHold > 0);
+        // A hidden source in the listener's own room (behind a pillar): there's no other room to hear; it fills this one.
+        _sameRoom = active && SameRoom(audio.Reverb, room);
+        if (active) _remoteRadius = MathF.Max(3, 0.6f * MathF.Cbrt(MathF.Max(room.Volume, 1)));
+        if (_sameRoom) active = false;
+        audio.HiddenInThisRoom = _sameRoom;
         if (_report is not null)
         {
             _report.RemoteActive = active; _report.RemoteOpening = _remoteOpening;
@@ -820,12 +868,12 @@ internal sealed class AudioUpdate : ISystem
         }
         if (!active)
         {
-            if (_remoteActive) { engine.SetRemoteReverb(ReverbParams.None, -Vector3.UnitZ, 0); audio.RemoteReverb = ReverbParams.None; }
+            if (_remoteActive) engine.SetRemoteReverb(ReverbParams.None, -Vector3.UnitZ, 0);
+            if (!_sameRoom) audio.RemoteReverb = ReverbParams.None; // kept while it's this room, to go on telling
             _remoteActive = false;
             return;
         }
         _remoteActive = true;
-        _remoteRadius = MathF.Max(3, 0.6f * MathF.Cbrt(MathF.Max(room.Volume, 1)));
         Matrix4x4.Invert(audio.Listener, out var toListener);
         var opening = Vector3.Transform(_remoteOpening, toListener);
         var direction = opening.LengthSquared() > 1e-8f ? Vector3.Normalize(opening) : -Vector3.UnitZ;
