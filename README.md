@@ -18,6 +18,22 @@ dotnet run --project samples/Spinners/Build -- author   # regenerate the sample'
 
 Escape quits the sample.
 
+### Bog Opera
+
+Baron Bullfrog, Madame Kazoo, and Pip Glassbell sing from three lily pads. Their bass, reed, and glass calls are
+synthesized at startup. The mixer places them across the pond, shifts their pitch through a four-bar phrase,
+and schedules them on an eighth-note grid at 112 BPM.
+
+```sh
+dotnet run --project samples/BogOpera/Player
+dotnet run --project samples/BogOpera/Player -- --wav bog-opera.wav
+```
+
+Click squares to rewrite the score while it plays. Click a frog or press **A**, **S**, or **D** to sing over it.
+**Space** hushes the choir or restarts the score. **E** switches the stone bridge's early reflections on or off
+for new calls. **Escape** closes the player. The WAV command records the opening four bars in stereo and runs
+without a display or audio device.
+
 The desktop editor uses DejaVu Sans Mono on Linux; set `GAMEGRL_FONT` to another TrueType font path if needed.
 Right-drag orbits the Scene camera, middle-drag pans, the wheel zooms, and F frames the selection.
 Click a mesh to select it; drag its colored axis handles to move it. Project prefab rows instantiate prefabs.
@@ -78,6 +94,7 @@ dotnet run --project tests/Gamegrl.Editor.Tests -c Release -- --bench --tree # e
 | `tests/Gamegrl.Tests` | Dependency-free tests, also run as a NativeAOT binary |
 | `tests/Gamegrl.Editor.Tests` | Headless editor tests, optional SDL/Vulkan interaction smoke, editor benchmarks (`--bench`) |
 | `tests/Gamegrl.Bench` | Engine benchmark scenarios under the profiler (NativeAOT); baselines in `perf/baselines` |
+| `samples/BogOpera` | Interactive frog choir, sample-timed sequencer, and offline WAV player |
 | `samples/Spinners` | `Game` (library), `Player` (NativeAOT), `Build` (dev tool), `Assets/` |
 
 Editor-only extensions implement `IEditorExtension.Register(EditorRegistry)`. Register panels with

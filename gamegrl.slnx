@@ -23,6 +23,8 @@
     <Project Path="tests/Gamegrl.Editor.Tests/Gamegrl.Editor.Tests.csproj" />
   </Folder>
   <Folder Name="/samples/">
+    <Project Path="samples/BogOpera/Game/BogOpera.Game.csproj" />
+    <Project Path="samples/BogOpera/Player/BogOpera.csproj" />
     <Project Path="samples/Spinners/Game/Spinners.Game.csproj" />
     <Project Path="samples/Spinners/Player/Spinners.csproj" />
     <Project Path="samples/Spinners/Build/Spinners.Build.csproj" />

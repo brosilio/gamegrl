@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Gamegrl.UI/Gamegrl.UI.csproj" />
+    <ProjectReference Include="../../../src/Gamegrl.Audio/Gamegrl.Audio.csproj" />
+  </ItemGroup>
+</Project>
