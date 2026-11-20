@@ -197,8 +197,13 @@ public sealed class RenderContext : IDisposable
         _depth = Device.CreateTexture(new TextureDesc(width, height, DepthFormat, TextureUsage.DepthStencil, Name: "depth"));
     }
 
+    private bool _disposed;
+
     public void Dispose()
     {
+        // The rendering module releases the context before the device. The world also owns this resource.
+        if (_disposed) return;
+        _disposed = true;
         if (_assets is not null) _assets.Changed -= OnAssetChanged;
         Device.WaitIdle();
         foreach (var m in _meshes)
