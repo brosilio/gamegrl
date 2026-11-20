@@ -71,6 +71,10 @@ public struct Aabb
 /// </summary>
 internal static class F
 {
+    /// <summary>C's FLT_EPSILON (the gap above 1), not <see cref="float.Epsilon"/> (the smallest subnormal).</summary>
+    public const float Epsilon = 1.1920929e-7f;
+    /// <summary>C's FLT_MIN: the smallest normal float.</summary>
+    public const float MinNormal = 1.17549435e-38f;
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Max(float a, float b) => a > b ? a : b;
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Min(float a, float b) => a < b ? a : b;
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Clamp(float v, float lo, float hi) => v < lo ? lo : v > hi ? hi : v;
@@ -85,7 +89,13 @@ internal static class V
     [MethodImpl(MethodImplOptions.AggressiveInlining)] public static float Dot(Vector2 a, Vector2 b) => a.X * b.X + a.Y * b.Y;
 }
 
-/// <summary>A convex collision shape in body space: a circle or a convex polygon of up to <see cref="MaxVertices"/> corners, with an optional rounding radius.</summary>
+/// <summary>
+/// A convex collision shape in body space: a circle, a convex polygon of up to <see cref="MaxVertices"/> corners with
+/// an optional rounding radius (two corners make a segment, or a capsule when rounded), or one segment of a chain.
+/// </summary>
+/// <remarks>A chain segment keeps its ends in vertices 0 and 1 and its neighbours' far ends (the ghost vertices that
+/// make collision smooth across the joins) in 2 and 3; it collides only on its right side, the outside of a
+/// counter-clockwise loop.</remarks>
 public unsafe struct Shape
 {
     public const int MaxVertices = 8;
@@ -100,6 +110,15 @@ public unsafe struct Shape
 
     public readonly Vector2 Vertex(int i) => new(Vx[i], Vy[i]);
     public readonly Vector2 Normal(int i) => new(Nx[i], Ny[i]);
+    /// <summary>A chain segment's ghost vertices: the previous segment's start and the next segment's end.</summary>
+    public readonly Vector2 Ghost1 => new(Vx[2], Vy[2]);
+    public readonly Vector2 Ghost2 => new(Vx[3], Vy[3]);
+    /// <summary>A segment: two corners and no radius (a capsule has a radius).</summary>
+    public readonly bool IsSegment => Kind == ShapeKind.Polygon && Count == 2 && Radius == 0;
+    public readonly bool IsCapsule => Kind == ShapeKind.Polygon && Count == 2 && Radius > 0;
+
+    private void SetVertex(int i, Vector2 v) { Vx[i] = v.X; Vy[i] = v.Y; }
+    private void SetNormal(int i, Vector2 n) { Nx[i] = n.X; Ny[i] = n.Y; }
 
     public static Shape Circle(float radius, Vector2 center) => new() { Kind = ShapeKind.Circle, Radius = radius, Center = center };
 
@@ -110,8 +129,28 @@ public unsafe struct Shape
         if (SimMath.LengthSquared(axis) < 1e-8f) return Circle(radius, a);
         var n = SimMath.Normalize(V.RightPerp(axis));
         var s = new Shape { Kind = ShapeKind.Polygon, Count = 2, Radius = radius, Center = 0.5f * (a + b) };
-        s.Vx[0] = a.X; s.Vy[0] = a.Y; s.Vx[1] = b.X; s.Vy[1] = b.Y;
-        s.Nx[0] = n.X; s.Ny[0] = n.Y; s.Nx[1] = -n.X; s.Ny[1] = -n.Y;
+        s.SetVertex(0, a); s.SetVertex(1, b); s.SetNormal(0, n); s.SetNormal(1, -n);
+        return s;
+    }
+
+    /// <summary>A two-sided line segment (no mass: for static and kinematic bodies, like Box2D's segments).</summary>
+    public static Shape Segment(Vector2 a, Vector2 b)
+    {
+        var s = Capsule(a, b, 0);
+        if (s.Kind != ShapeKind.Polygon) throw new ArgumentException("A segment needs two distinct points.");
+        return s;
+    }
+
+    /// <summary>
+    /// One segment of a chain, from <paramref name="a"/> to <paramref name="b"/>, colliding on its right side only, with
+    /// the neighbouring segments' far ends as ghost vertices so shapes slide across the joins without catching.
+    /// </summary>
+    public static Shape ChainSegment(Vector2 ghost1, Vector2 a, Vector2 b, Vector2 ghost2)
+    {
+        var s = new Shape { Kind = ShapeKind.ChainSegment, Count = 2, Center = 0.5f * (a + b) };
+        var n = SimMath.Normalize(V.RightPerp(b - a));
+        s.SetVertex(0, a); s.SetVertex(1, b); s.SetVertex(2, ghost1); s.SetVertex(3, ghost2);
+        s.SetNormal(0, n); s.SetNormal(1, -n);
         return s;
     }
 
@@ -122,44 +161,64 @@ public unsafe struct Shape
         s.Center = offset + rotation.Rotate(Center);
         for (int i = 0; i < Count; i++)
         {
-            var v = offset + rotation.Rotate(Vertex(i)); var n = rotation.Rotate(Normal(i));
-            s.Vx[i] = v.X; s.Vy[i] = v.Y; s.Nx[i] = n.X; s.Ny[i] = n.Y;
+            s.SetVertex(i, offset + rotation.Rotate(Vertex(i)));
+            s.SetNormal(i, rotation.Rotate(Normal(i)));
         }
+        if (Kind == ShapeKind.ChainSegment) { s.SetVertex(2, offset + rotation.Rotate(Ghost1)); s.SetVertex(3, offset + rotation.Rotate(Ghost2)); }
         return s;
     }
 
-    public static Shape Box(Vector2 halfExtents, Vector2 center, Rot rotation)
+    /// <summary>A box of half extents, centred and turned within the body, its corners optionally rounded (it then reaches <paramref name="radius"/> further).</summary>
+    public static Shape Box(Vector2 halfExtents, Vector2 center, Rot rotation, float radius = 0)
     {
         Span<Vector2> v = [new(-halfExtents.X, -halfExtents.Y), new(halfExtents.X, -halfExtents.Y), new(halfExtents.X, halfExtents.Y), new(-halfExtents.X, halfExtents.Y)];
         for (int i = 0; i < 4; i++) v[i] = center + rotation.Rotate(v[i]);
-        return Polygon(v);
+        return Polygon(v, radius);
     }
 
-    /// <summary>A convex polygon from counter-clockwise points (3 to 8).</summary>
-    public static Shape Polygon(ReadOnlySpan<Vector2> points)
+    /// <summary>A box about the body origin.</summary>
+    public static Shape Box(float halfWidth, float halfHeight, float radius = 0) => Box(new Vector2(halfWidth, halfHeight), Vector2.Zero, Rot.Identity, radius);
+
+    /// <summary>A convex polygon from counter-clockwise points (3 to 8) with an optional rounding radius.</summary>
+    public static Shape Polygon(ReadOnlySpan<Vector2> points, float radius = 0)
     {
         if (points.Length is < 3 or > MaxVertices) throw new ArgumentException($"A polygon needs 3 to {MaxVertices} points.");
-        var s = new Shape { Kind = ShapeKind.Polygon, Count = points.Length };
-        var centroid = Vector2.Zero;
+        var s = new Shape { Kind = ShapeKind.Polygon, Count = points.Length, Radius = radius };
+        // Area-weighted centroid of a fan about the first vertex (Box2D's way: less round-off than about the origin).
+        var origin = points[0];
+        var center = Vector2.Zero;
         float area = 0;
         for (int i = 0; i < points.Length; i++)
         {
             var a = points[i]; var b = points[(i + 1) % points.Length];
-            s.Vx[i] = a.X; s.Vy[i] = a.Y;
-            var n = SimMath.Normalize(V.RightPerp(b - a));
-            s.Nx[i] = n.X; s.Ny[i] = n.Y;
-            float cross = V.Cross(a, b);
-            area += cross;
-            centroid += (a + b) * cross;
+            s.SetVertex(i, a);
+            s.SetNormal(i, SimMath.Normalize(V.RightPerp(b - a)));
+            if (i >= 1 && i < points.Length - 1)
+            {
+                var e1 = a - origin; var e2 = b - origin;
+                float t = 0.5f * V.Cross(e1, e2);
+                center += (t * (1f / 3)) * (e1 + e2);
+                area += t;
+            }
         }
-        if (area <= 0) throw new ArgumentException("Polygon points must be counter-clockwise and not degenerate.");
-        s.Center = centroid / (3 * area);
+        if (area <= F.Epsilon) throw new ArgumentException("Polygon points must be counter-clockwise and not degenerate.");
+        s.Center = origin + center * (1 / area);
         return s;
+    }
+
+    /// <summary>The convex hull of 3 to 8 points in any order, as a polygon (see <see cref="Hull.Compute"/>).</summary>
+    public static Shape ConvexHull(ReadOnlySpan<Vector2> points, float radius = 0)
+    {
+        Span<Vector2> hull = stackalloc Vector2[MaxVertices];
+        int n = Hull.Compute(points, hull);
+        if (n == 0) throw new ArgumentException("The points have no usable convex hull (too few, too many, or collinear).");
+        return Polygon(hull[..n], radius);
     }
 
     /// <summary>Mass, rotational inertia about the body origin, and center of mass for a density.</summary>
     public readonly (float Mass, float Inertia, Vector2 Center) MassData(float density)
     {
+        if (Kind == ShapeKind.ChainSegment) return (0, 0, Center);
         if (Kind == ShapeKind.Circle)
         {
             float m = density * SimMath.Pi * Radius * Radius;
@@ -262,7 +321,7 @@ public unsafe struct Shape
         System.Runtime.Intrinsics.X86.Sse.IsSupported ? System.Runtime.Intrinsics.X86.Sse.Max(a, b) : Vector128.ConditionalSelect(Vector128.GreaterThan(a, b), a, b);
 }
 
-public enum ShapeKind : byte { Circle, Polygon }
+public enum ShapeKind : byte { Circle, Polygon, ChainSegment }
 
 internal static class ShapeRay
 {
@@ -275,6 +334,13 @@ internal static class ShapeRay
     {
         fraction = maxFraction; normal = default;
         if (s.Kind == ShapeKind.Circle) return Circle(s.Center, s.Radius, origin, d, ref fraction, ref normal);
+        if (s.Kind == ShapeKind.ChainSegment)
+        {
+            // One-sided: a ray starting on the left (inside) passes through.
+            if (V.Cross(origin - s.Vertex(0), s.Vertex(1) - s.Vertex(0)) < 0) return false;
+            return TwoSided(s.Vertex(0), s.Vertex(1), origin, d, ref fraction, ref normal);
+        }
+        if (s.IsSegment) return TwoSided(s.Vertex(0), s.Vertex(1), origin, d, ref fraction, ref normal);
         if (s.Radius > 0)
         {
             bool hit = false;
@@ -302,6 +368,25 @@ internal static class ShapeRay
         if (index < 0) return false;
         fraction = lower;
         normal = s.Normal(index);
+        return true;
+    }
+
+    /// <summary>A line segment hit from either side (the normal faces the ray).</summary>
+    private static bool TwoSided(Vector2 v1, Vector2 v2, Vector2 origin, Vector2 d, ref float fraction, ref Vector2 normal)
+    {
+        var e = v2 - v1;
+        float length = SimMath.Length(e);
+        if (length == 0) return false;
+        var unit = e / length;
+        var n = V.RightPerp(unit);
+        float numerator = V.Dot(n, v1 - origin), denominator = V.Dot(n, d);
+        if (denominator == 0) return false;
+        float t = numerator / denominator;
+        if (t < 0 || t > fraction) return false;
+        float along = V.Dot(origin + t * d - v1, unit);
+        if (along < 0 || along > length) return false;
+        fraction = t;
+        normal = numerator > 0 ? -n : n;
         return true;
     }
 

@@ -24,9 +24,6 @@ public sealed partial class PhysicsWorld2D
 
     internal AlignedArray<BodyState> States = new(0);
     private AlignedArray<Vector2> _stepMass = new(0); // inverse mass and inertia, zero unless awake (set each step)
-    private int[] _parent = [];
-    private bool[] _islandAwake = [];
-    private float[] _islandSleep = [];
     private int[] _awake = [];
     private int[] _justSleptList = [];
     private int _justSleptCount;
@@ -67,113 +64,25 @@ public sealed partial class PhysicsWorld2D
     private void GrowSolver(int capacity)
     {
         States = States.Resized(capacity); _stepMass = _stepMass.Resized(capacity);
-        Array.Resize(ref _parent, capacity);
-        Array.Resize(ref _islandAwake, capacity);
-        Array.Resize(ref _islandSleep, capacity);
         Array.Resize(ref _awake, capacity);
         Array.Resize(ref _justSleptList, capacity);
         Array.Resize(ref _bodyColors, capacity);
+        Array.Resize(ref _sleepVelocity, capacity);
     }
 
     private void CloneSolver(PhysicsWorld2D w)
     {
-        w.States = States.Clone(); w._stepMass = _stepMass.Clone(); w._parent = (int[])_parent.Clone(); w._islandAwake = (bool[])_islandAwake.Clone();
-        w._islandSleep = (float[])_islandSleep.Clone(); w._awake = (int[])_awake.Clone(); w._justSleptList = (int[])_justSleptList.Clone(); w._bodyColors = (uint[])_bodyColors.Clone();
+        w.States = States.Clone(); w._stepMass = _stepMass.Clone(); w._awake = (int[])_awake.Clone(); w._justSleptList = (int[])_justSleptList.Clone(); w._bodyColors = (uint[])_bodyColors.Clone(); w._sleepVelocity = (float[])_sleepVelocity.Clone(); w._bullets = new int[_bullets.Length];
         w._colorLists = new int[Colors + 1][]; for (int k = 0; k <= Colors; k++) w._colorLists[k] = (int[])_colorLists[k].Clone();
         w._colorCounts = (int[])_colorCounts.Clone(); w._colorStart = (int[])_colorStart.Clone(); w._colorBatchStart = (int[])_colorBatchStart.Clone(); w._order = (int[])_order.Clone(); w._constraints = (ContactConstraint[])_constraints.Clone();
         w._wide = _wide.Clone(); w._wideCold = _wideCold.Clone();
         w._segments = (Segment[])_segments.Clone(); w._claims = new int[_claims.Length]; w._barrier = new SpinBarrier();
     }
 
-    // ---------------------------------------------------------------- islands and sleep
-
-    private int Find(int b)
-    {
-        while (_parent[b] != b) { _parent[b] = _parent[_parent[b]]; b = _parent[b]; }
-        return b;
-    }
-
-    private void Union(int a, int b)
-    {
-        int ra = Find(a), rb = Find(b);
-        if (ra == rb) return;
-        // The lower index wins, so roots don't depend on the order of unions.
-        if (ra < rb) _parent[rb] = ra; else _parent[ra] = rb;
-    }
-
-    /// <summary>Islands of dynamic bodies joined by touching contacts and joints; anything touching the awake wakes.</summary>
-    private void BuildIslands()
-    {
-        // Islands decide who sleeps and who wakes: with sleep off and nothing asleep, only the awake list is needed.
-        if (!Settings.EnableSleep)
-        {
-            bool anyAsleep = false;
-            _awakeCount = 0;
-            for (int b = 0; b < _bodyHigh; b++)
-            {
-                if (!BodyAlive[b] || Types[b] == BodyType.Static) continue;
-                if (Awake[b]) _awake[_awakeCount++] = b; else anyAsleep = true;
-            }
-            if (!anyAsleep) return;
-        }
-        for (int b = 0; b < _bodyHigh; b++) _parent[b] = b;
-        for (int c = 0; c < ContactCount; c++)
-        {
-            ref readonly var contact = ref Contacts[c];
-            if ((contact.Flags & (ContactFlags.Touching | ContactFlags.Sensor)) != ContactFlags.Touching) continue;
-            int a = contact.BodyA, b = contact.BodyB;
-            if (Types[a] == BodyType.Dynamic && Types[b] == BodyType.Dynamic) Union(a, b);
-            // A moving kinematic body wakes what it touches.
-            else if (Types[a] == BodyType.Kinematic && Awake[a] && Types[b] == BodyType.Dynamic) Wake(b);
-            else if (Types[b] == BodyType.Kinematic && Awake[b] && Types[a] == BodyType.Dynamic) Wake(a);
-        }
-        UnionJoints();
-        for (int b = 0; b < _bodyHigh; b++) _islandAwake[b] = false;
-        for (int b = 0; b < _bodyHigh; b++)
-            if (BodyAlive[b] && Types[b] == BodyType.Dynamic && Awake[b]) _islandAwake[Find(b)] = true;
-        _awakeCount = 0;
-        for (int b = 0; b < _bodyHigh; b++)
-        {
-            if (!BodyAlive[b] || Types[b] == BodyType.Static) continue;
-            if (Types[b] == BodyType.Dynamic && !Awake[b] && _islandAwake[Find(b)]) Wake(b);
-            if (Awake[b]) _awake[_awakeCount++] = b;
-        }
-    }
-
-    private void UpdateSleep(float dt)
-    {
-        var s = Settings;
-        for (int k = 0; k < _justSleptCount; k++) _justSlept[_justSleptList[k]] = false;
-        _justSleptCount = 0;
-        if (!s.EnableSleep) return;
-        float linear2 = s.LinearSleepSpeed * s.LinearSleepSpeed;
-        for (int b = 0; b < _bodyHigh; b++) _islandSleep[b] = float.MaxValue;
-        for (int k = 0; k < _awakeCount; k++)
-        {
-            int b = _awake[k];
-            bool still = AllowSleep[b] && SimMath.LengthSquared(Velocity[b]) <= linear2 && MathF.Abs(AngularVelocityOf[b]) <= s.AngularSleepSpeed;
-            SleepTime[b] = still ? SleepTime[b] + dt : 0;
-            if (Types[b] == BodyType.Dynamic) { int r = Find(b); _islandSleep[r] = Math.Min(_islandSleep[r], SleepTime[b]); }
-        }
-        for (int k = 0; k < _awakeCount; k++)
-        {
-            int b = _awake[k];
-            float island = Types[b] == BodyType.Dynamic ? _islandSleep[Find(b)] : SleepTime[b];
-            if (island < s.TimeToSleep) continue;
-            Awake[b] = false;
-            _recolor = true;
-            // Written back once more (velocity now zero), then skipped while it sleeps.
-            _justSlept[b] = true;
-            _justSleptList[_justSleptCount++] = b;
-            Velocity[b] = default;
-            AngularVelocityOf[b] = 0;
-        }
-    }
-
     // ---------------------------------------------------------------- solve
 
     private enum Stage : byte { BeginBodies, Finalize, Prepare, IntegrateVelocities, WarmStart, Solve, IntegratePositions, Relax, Restitution, Store, Serial, Pack, WideWarmStart, WideSolve, WideRelax, WideRestitution, WideStore }
-    private enum SerialWork : byte { PrepareJoints, WarmStart, Solve, Relax, Restitution, Store }
+    private enum SerialWork : byte { PrepareJoints, WarmStart, Solve, Relax, Restitution, Store, Bullets }
 
     /// <summary>One step of the solver's schedule: a stage over a range (a colour's constraints, or the awake bodies), or serial work.</summary>
     private struct Segment
@@ -187,7 +96,8 @@ public sealed partial class PhysicsWorld2D
     private int _segmentCount;
     private int[] _claims = new int[256];
     private SpinBarrier _barrier = new();
-    private float _h, _invH;
+    private float _h, _invH, _invDt, _dt;
+    private float[] _sleepVelocity = [];
 
     private void AddSegment(Stage stage, int start, int count, int block, SerialWork serial = default)
     {
@@ -255,12 +165,13 @@ public sealed partial class PhysicsWorld2D
         {
             case Stage.IntegrateVelocities: for (int k = start; k < end; k++) IntegrateVelocity(_awake[k], h); break;
             case Stage.IntegratePositions: for (int k = start; k < end; k++) IntegratePosition(_awake[k], h); break;
-            case Stage.Prepare: for (int i = start; i < end; i++) { _constraints[i].Contact = _order[i]; Prepare(ref _constraints[i]); } break;
-            case Stage.WarmStart: for (int i = start; i < end; i++) WarmStart(ref _constraints[i]); break;
-            case Stage.Solve: for (int i = start; i < end; i++) SolveContact(ref _constraints[i], invH, true, pushout); break;
-            case Stage.Relax: for (int i = start; i < end; i++) SolveContact(ref _constraints[i], invH, false, pushout); break;
-            case Stage.Restitution: for (int i = start; i < end; i++) ApplyRestitution(ref _constraints[i], Settings.RestitutionThreshold); break;
-            case Stage.Store: for (int i = start; i < end; i++) StoreImpulses(ref _constraints[i]); break;
+            // The scalar stages run the overflow constraints, held from the overflow's first slot.
+            case Stage.Prepare: for (int i = start; i < end; i++) { ref var cc = ref _constraints[i - _colorStart[Overflow]]; cc.Contact = _order[i]; Prepare(ref cc); } break;
+            case Stage.WarmStart: for (int i = start; i < end; i++) WarmStart(ref _constraints[i - _colorStart[Overflow]]); break;
+            case Stage.Solve: for (int i = start; i < end; i++) SolveContact(ref _constraints[i - _colorStart[Overflow]], invH, true, pushout); break;
+            case Stage.Relax: for (int i = start; i < end; i++) SolveContact(ref _constraints[i - _colorStart[Overflow]], invH, false, pushout); break;
+            case Stage.Restitution: for (int i = start; i < end; i++) ApplyRestitution(ref _constraints[i - _colorStart[Overflow]], Settings.RestitutionThreshold); break;
+            case Stage.Store: for (int i = start; i < end; i++) StoreImpulses(ref _constraints[i - _colorStart[Overflow]]); break;
             case Stage.Pack: for (int w = start; w < end; w++) PackBatch(w); break;
             case Stage.BeginBodies: for (int b = start; b < end; b++) BeginBody(b); break;
             case Stage.Finalize: for (int k = start; k < end; k++) FinalizeBody(_awake[k]); break;
@@ -283,6 +194,7 @@ public sealed partial class PhysicsWorld2D
             case SerialWork.Relax: SolveJoints(_h, _invH, false); RunRange(Stage.Relax, start, end); break;
             case SerialWork.Restitution: RunRange(Stage.Restitution, start, end); break;
             case SerialWork.Store: RunRange(Stage.Store, start, end); break;
+            case SerialWork.Bullets: SolveBullets(); break;
         }
     }
 
@@ -291,7 +203,9 @@ public sealed partial class PhysicsWorld2D
         var s = Settings;
         int substeps = Math.Max(1, s.Substeps);
         float h = dt / substeps, invH = 1 / h;
-        _h = h; _invH = invH;
+        _h = h; _invH = invH; _invDt = 1 / dt; _dt = dt;
+        if (_bullets.Length < _awakeCount) _bullets = new int[_awakeCount * 2];
+        _bulletCount = 0;
         float contactHertz = Math.Min(s.ContactHertz, 0.25f * invH);
         _contactSoft = Softness.Make(contactHertz, s.ContactDampingRatio, h);
         _staticSoft = Softness.Make(2 * contactHertz, s.ContactDampingRatio, h);
@@ -317,6 +231,7 @@ public sealed partial class PhysicsWorld2D
         AddSegment(Stage.WideStore, 0, _wideCount, 16);
         AddSegment(Stage.Serial, 0, 0, 0, SerialWork.Store);
         AddSegment(Stage.Finalize, 0, _awakeCount, 256);
+        AddSegment(Stage.Serial, 0, 0, 0, SerialWork.Bullets);
         Array.Clear(_claims, 0, _segmentCount);
 
         // Threads for the work there is: a few hundred constraints per thread, or barriers cost more than they save.
@@ -347,12 +262,23 @@ public sealed partial class PhysicsWorld2D
     private void FinalizeBody(int b)
     {
         ref readonly var st = ref States[b];
+        // The fastest any point of the body moves, and the farthest any point moved this step.
+        float extent = MaxExtent[b];
+        float maxVelocity = SimMath.Length(st.V) + MathF.Abs(st.W) * extent;
+        float maxDelta = SimMath.Length(st.DP) + MathF.Abs(st.DQ.S) * extent;
+        // Box2D's sleep speed: that, or half the speed its correction moved it at (a body pushed out of an overlap each
+        // step isn't resting even when its velocity is small).
+        float sleepVelocity = F.Max(maxVelocity, 0.5f * _invDt * maxDelta);
+        _sleepVelocity[b] = sleepVelocity;
+        Center0[b] = Center[b]; Rotation0[b] = Rotation[b];
         Center[b] += st.DP;
         var q = Rot.Mul(st.DQ, Rotation[b]);
         float l = SimMath.Sqrt(q.C * q.C + q.S * q.S);
         Rotation[b] = l > 0 ? new Rot { C = q.C / l, S = q.S / l } : Rot.Identity;
         Velocity[b] = st.V;
         AngularVelocityOf[b] = st.W;
+        // A resting body can't have tunnelled (Box2D skips the sleepy).
+        if (!Settings.EnableSleep || !AllowSleep[b] || sleepVelocity > SleepThreshold[b]) Continuous(b, maxDelta, maxVelocity, _dt);
     }
 
     private Softness _contactSoft, _staticSoft, _jointSoft;
@@ -442,20 +368,15 @@ public sealed partial class PhysicsWorld2D
         contact.GraphColor = 0;
     }
 
-    /// <summary>A contact moved from <paramref name="from"/> to <paramref name="to"/> (swap removal): repoint its slot.</summary>
-    private void MovedInGraph(int from, int to)
-    {
-        ref readonly var contact = ref Contacts[to];
-        if (contact.GraphColor != 0 && !_recolor) _colorLists[contact.GraphColor - 1][contact.GraphSlot] = to;
-    }
-
     private void Recolor()
     {
         Array.Clear(_bodyColors, 0, _bodyHigh);
         Array.Clear(_colorCounts);
-        for (int c = 0; c < ContactCount; c++)
+        // Every contact leaves the graph (sleeping ones may still hold a stale colour); the solvable are awake.
+        for (int c = 0; c < _contactHigh; c++) Contacts[c].GraphColor = 0;
+        for (int k = 0; k < _awakeContactCount; k++)
         {
-            Contacts[c].GraphColor = 0;
+            int c = _awakeContacts[k];
             if (Solvable(Contacts[c])) AddToGraph(c);
         }
         _recolor = false;

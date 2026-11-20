@@ -16,6 +16,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Gamegrl.Tests/Gamegrl.Tests.csproj" />
     <Project Path="tests/Gamegrl.Bench/Gamegrl.Bench.csproj" />
+    <Project Path="tests/Gamegrl.PhysicsBench/Gamegrl.PhysicsBench.csproj" />
     <Project Path="tests/Gamegrl.Editor.PluginFixture/Gamegrl.Editor.PluginFixture.csproj" />
     <Project Path="tests/Gamegrl.Editor.Tests/Gamegrl.Editor.Tests.csproj" />
   </Folder>

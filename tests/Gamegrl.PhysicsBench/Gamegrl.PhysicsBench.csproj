@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Box2D v3's benchmark scenes, ported one to one, with its command line: scripts/box2d-compare.sh runs both. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Gamegrl.Core/Gamegrl.Core.csproj" />
+    <ProjectReference Include="../../src/Gamegrl.Physics2D/Gamegrl.Physics2D.csproj" />
+  </ItemGroup>
+</Project>

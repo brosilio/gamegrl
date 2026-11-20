@@ -44,13 +44,15 @@ public struct Collider2D : IComponent
     [Range(0, 1)] public float Restitution;
     public bool IsSensor;
     /// <summary>Collision filtering: collides with another collider when each one's category is in the other's mask.</summary>
-    public uint Category, Mask;
+    public ulong Category, Mask;
+    /// <summary>A shared non-zero group overrides the masks: positive always collides, negative never (a ragdoll's parts).</summary>
+    public int Group;
     [NoSerialize] public int Handle; // shape index + 1
 
     public static Collider2D Default => Box(Vector2.One);
-    public static Collider2D Box(Vector2 size, float density = 1) => new() { Shape = ColliderShape2D.Box, Size = size, Density = density, Friction = 0.6f, Category = 1, Mask = uint.MaxValue };
-    public static Collider2D Circle(float radius, float density = 1) => new() { Shape = ColliderShape2D.Circle, Size = new Vector2(radius), Density = density, Friction = 0.6f, Category = 1, Mask = uint.MaxValue };
-    public static Collider2D Capsule(float width, float height, float density = 1) => new() { Shape = ColliderShape2D.Capsule, Size = new Vector2(width, height), Density = density, Friction = 0.6f, Category = 1, Mask = uint.MaxValue };
+    public static Collider2D Box(Vector2 size, float density = 1) => new() { Shape = ColliderShape2D.Box, Size = size, Density = density, Friction = 0.6f, Category = 1, Mask = ulong.MaxValue };
+    public static Collider2D Circle(float radius, float density = 1) => new() { Shape = ColliderShape2D.Circle, Size = new Vector2(radius), Density = density, Friction = 0.6f, Category = 1, Mask = ulong.MaxValue };
+    public static Collider2D Capsule(float width, float height, float density = 1) => new() { Shape = ColliderShape2D.Capsule, Size = new Vector2(width, height), Density = density, Friction = 0.6f, Category = 1, Mask = ulong.MaxValue };
 
     /// <summary>The shape in its entity's frame.</summary>
     public readonly Shape ToShape()
@@ -68,7 +70,7 @@ public struct Collider2D : IComponent
         }
     }
 
-    internal readonly Filter2D Filter => new() { Category = Category, Mask = Mask };
+    internal readonly Filter2D Filter => new() { Category = Category, Mask = Mask, Group = Group };
 }
 
 /// <summary>
@@ -236,6 +238,7 @@ internal sealed class Physics2DStep : ISystem
                 if (physics.IsShapeAlive(s) && physics.EntityOfShape(s) == e) physics.DestroyShape(s); // moved to another body
                 s = physics.CreateShape(body, e, Build(source), collider.Density, collider.Friction, collider.Restitution, collider.IsSensor, collider.Filter);
                 physics.Sources[s] = source;
+                physics.Wake(body); // a new collider on a sleeping body wakes it
                 collider.Handle = s + 1;
                 Stamp(ref _shapeStamps, s, stamp);
             }
@@ -435,7 +438,7 @@ internal struct ShapeSource
         // Field by field: the collider has padding, whose bytes are arbitrary.
         ref readonly var c = ref a.Collider; ref readonly var d = ref b.Collider;
         return c.Shape == d.Shape && c.Size == d.Size && c.Offset == d.Offset && c.Angle == d.Angle && c.Density == d.Density && c.Friction == d.Friction
-            && c.Restitution == d.Restitution && c.IsSensor == d.IsSensor && c.Category == d.Category && c.Mask == d.Mask
+            && c.Restitution == d.Restitution && c.IsSensor == d.IsSensor && c.Category == d.Category && c.Mask == d.Mask && c.Group == d.Group
             && a.Offset == b.Offset && a.Turn.C == b.Turn.C && a.Turn.S == b.Turn.S;
     }
 }

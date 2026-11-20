@@ -20,11 +20,28 @@ public struct Manifold
 }
 
 /// <summary>Contact generation. Points with separation below <c>margin</c> are kept, so fast bodies get speculative contacts before they touch.</summary>
-internal static class Collision
+internal static partial class Collision
 {
     public static void Collide(in Shape a, Vector2 pa, Rot qa, in Shape b, Vector2 pb, Rot qb, float margin, out Manifold m)
     {
         m = default;
+        if (a.Kind == ShapeKind.ChainSegment || b.Kind == ShapeKind.ChainSegment)
+        {
+            // Chains collide with circles, capsules and polygons, not with segments or other chains (as in Box2D).
+            if (a.Kind == ShapeKind.ChainSegment && b.Kind == ShapeKind.ChainSegment) return;
+            if (a.Kind == ShapeKind.ChainSegment)
+            {
+                if (b.Kind == ShapeKind.Circle) ChainCircle(a, pa, qa, b, pb, qb, margin, ref m);
+                else if (!b.IsSegment) ChainPolygon(a, pa, qa, b, pb, qb, margin, ref m);
+            }
+            else
+            {
+                if (a.Kind == ShapeKind.Circle) ChainCircle(b, pb, qb, a, pa, qa, margin, ref m);
+                else if (!a.IsSegment) ChainPolygon(b, pb, qb, a, pa, qa, margin, ref m);
+                if (m.Count > 0) Flip(ref m);
+            }
+            return;
+        }
         if (a.Kind == ShapeKind.Circle && b.Kind == ShapeKind.Circle) Circles(a, pa, qa, b, pb, qb, margin, ref m);
         else if (a.Kind == ShapeKind.Polygon && b.Kind == ShapeKind.Circle) PolygonCircle(a, pa, qa, b, pb, qb, margin, ref m);
         else if (a.Kind == ShapeKind.Circle && b.Kind == ShapeKind.Polygon)
@@ -249,57 +266,5 @@ internal static class Collision
             }
         }
         c1 = p1 + d1 * s; c2 = p2 + d2 * t;
-    }
-
-    /// <summary>Clip the incident face of <paramref name="inc"/> against the reference face of <paramref name="refShape"/>.</summary>
-    private static void Clip(in Shape refShape, Vector2 pr, Rot qr, int refEdge, in Shape inc, Vector2 pi, Rot qi, float radius, float margin, bool flip, ref Manifold m)
-    {
-        // Work in the reference polygon's frame.
-        var q = Rot.InvMul(qr, qi);
-        var p = qr.InvRotate(pi - pr);
-        var n = refShape.Normal(refEdge);
-        var v1 = refShape.Vertex(refEdge); var v2 = refShape.Vertex(refEdge + 1 < refShape.Count ? refEdge + 1 : 0);
-        // Incident face: the one most anti-parallel to the reference normal.
-        int incEdge = 0;
-        float minDot = float.MaxValue;
-        for (int i = 0; i < inc.Count; i++)
-        {
-            float d = V.Dot(n, q.Rotate(inc.Normal(i)));
-            if (d < minDot) { minDot = d; incEdge = i; }
-        }
-        int i1 = incEdge, i2 = incEdge + 1 < inc.Count ? incEdge + 1 : 0;
-        var w1 = p + q.Rotate(inc.Vertex(i1)); var w2 = p + q.Rotate(inc.Vertex(i2));
-        // Clip the segment w1–w2 to the reference face's side planes.
-        var tangent = SimMath.Normalize(v2 - v1);
-        float lower = 0, upper = V.Dot(v2 - v1, tangent);
-        float a1 = V.Dot(w1 - v1, tangent), a2 = V.Dot(w2 - v1, tangent);
-        Vector2 c1 = w1, c2 = w2;
-        if (a1 < lower && a2 > lower) c1 = w1 + (w2 - w1) * ((lower - a1) / (a2 - a1));
-        else if (a2 < lower && a1 > lower) c2 = w2 + (w1 - w2) * ((lower - a2) / (a1 - a2));
-        float b1 = V.Dot(c1 - v1, tangent), b2 = V.Dot(c2 - v1, tangent);
-        if (b1 > upper && b2 < upper) c1 = c2 + (c1 - c2) * ((upper - b2) / (b1 - b2));
-        else if (b2 > upper && b1 < upper) c2 = c1 + (c2 - c1) * ((upper - b1) / (b2 - b1));
-        var normal = qr.Rotate(n);
-        m.Normal = flip ? -normal : normal;
-        AddPoint(ref m, c1, n, v1, refShape.Radius, inc.Radius, radius, margin, pr, qr, pi, flip, (ushort)(refEdge << 8 | i1), lower, upper, tangent);
-        AddPoint(ref m, c2, n, v1, refShape.Radius, inc.Radius, radius, margin, pr, qr, pi, flip, (ushort)(refEdge << 8 | i2 | 0x80), lower, upper, tangent);
-    }
-
-    private static void AddPoint(ref Manifold m, Vector2 c, Vector2 n, Vector2 v1, float refRadius, float incRadius, float radius, float margin,
-        Vector2 pr, Rot qr, Vector2 pi, bool flip, ushort id, float lower, float upper, Vector2 tangent)
-    {
-        float along = V.Dot(c - v1, tangent);
-        if (along < lower - 1e-4f || along > upper + 1e-4f) return; // the clip removed it
-        float separation = V.Dot(c - v1, n) - radius;
-        if (separation > margin) return;
-        // Half way between the reference surface and the incident point's surface.
-        var surfaceRef = c - n * (V.Dot(c - v1, n) - refRadius);
-        var surfaceInc = c - n * incRadius;
-        var point = pr + qr.Rotate(0.5f * (surfaceRef + surfaceInc));
-        var mp = new ManifoldPoint { Separation = separation, Id = (ushort)(id | (flip ? 0x4000 : 0)) };
-        if (flip) { mp.AnchorA = point - pi; mp.AnchorB = point - pr; }
-        else { mp.AnchorA = point - pr; mp.AnchorB = point - pi; }
-        if (m.Count == 0) m.P0 = mp; else m.P1 = mp;
-        m.Count++;
     }
 }

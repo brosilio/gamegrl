@@ -14,6 +14,8 @@ public enum JointType2D : byte
     Weld,
     /// <summary>Pulls body B's anchor toward a target point with a spring, up to a maximum force (dragging with the mouse).</summary>
     Target,
+    /// <summary>No constraint: only stops the two bodies colliding (and ties them into one island).</summary>
+    Filter,
 }
 
 /// <summary>A joint's settings. Anchors are in each body's own frame (for a target joint, the target is in world space).</summary>
@@ -56,12 +58,15 @@ public sealed partial class PhysicsWorld2D
         // Accumulated impulses (warm started across substeps and steps)
         public Vector2 Linear;
         public float Angular, Axial, Lower, Upper, Motor, Perp;
+        // Links: place in each body's joint list (keys are joint × 2 + side) and in its island.
+        public int PrevA, NextA, PrevB, NextB, Island, IslandIndex;
     }
 
     private Joint[] _joints = new Joint[16];
     private int _jointHigh;
     private int[] _freeJoints = new int[8];
     private int _freeJointCount;
+    private int[] _jointHead = [], _jointDegree = []; // per body: first joint key, and how many
 
     public int CreateJoint(Entity owner, int bodyA, int bodyB, in JointDef2D def)
     {
@@ -73,11 +78,13 @@ public sealed partial class PhysicsWorld2D
             j = _jointHigh++;
         }
         if (def.Type == JointType2D.Target) bodyA = -1;
-        _joints[j] = new Joint { Alive = true, Owner = owner, A = bodyA, B = bodyB, Def = def };
+        _joints[j] = new Joint { Alive = true, Owner = owner, A = bodyA, B = bodyB, Def = def, Island = -1, IslandIndex = -1 };
         _joints[j].ReferenceAngle = bodyA >= 0 ? RelativeAngle(Rotation[bodyA], Rotation[bodyB]) : 0;
-        RebuildNoCollide();
+        AddJointEdges(j);
         if (bodyA >= 0) Wake(bodyA);
         Wake(bodyB);
+        LinkJoint(j);
+        if (bodyA >= 0 && !def.CollideConnected) DestroyContactsBetween(bodyA, bodyB);
         return j;
     }
 
@@ -86,10 +93,14 @@ public sealed partial class PhysicsWorld2D
         if (!IsJointAlive(j)) return;
         if (_joints[j].A >= 0) Wake(_joints[j].A);
         Wake(_joints[j].B);
+        UnlinkJoint(j);
+        RemoveJointEdges(j);
+        bool collide = _joints[j].Def.CollideConnected;
+        int a = _joints[j].A, b = _joints[j].B;
         _joints[j] = default;
         if (_freeJointCount == _freeJoints.Length) Array.Resize(ref _freeJoints, _freeJoints.Length * 2);
         _freeJoints[_freeJointCount++] = j;
-        RebuildNoCollide();
+        if (a >= 0 && !collide) RefindPairs(a, b);
     }
 
     public bool IsJointAlive(int j) => (uint)j < (uint)_jointHigh && _joints[j].Alive;
@@ -103,7 +114,11 @@ public sealed partial class PhysicsWorld2D
         ref var joint = ref _joints[j];
         bool collide = joint.Def.CollideConnected;
         joint.Def = def;
-        if (collide != def.CollideConnected) RebuildNoCollide();
+        if (collide != def.CollideConnected && joint.A >= 0)
+        {
+            if (def.CollideConnected) RefindPairs(joint.A, joint.B);
+            else DestroyContactsBetween(joint.A, joint.B);
+        }
         if (joint.Def.Type == JointType2D.Target) Wake(joint.B);
     }
 
@@ -123,28 +138,71 @@ public sealed partial class PhysicsWorld2D
 
     private void RemoveJointsOf(int body)
     {
-        for (int j = 0; j < _jointHigh; j++)
-            if (_joints[j].Alive && (_joints[j].A == body || _joints[j].B == body)) DestroyJoint(j);
+        while (_jointHead[body] >= 0) DestroyJoint(_jointHead[body] >> 1);
     }
 
-    private void RebuildNoCollide()
+    // ---------------------------------------------------------------- per-body joint lists
+
+    private void AddJointEdges(int j)
     {
-        _noCollide.Clear();
-        for (int j = 0; j < _jointHigh; j++)
-            if (_joints[j].Alive && _joints[j].A >= 0 && !_joints[j].Def.CollideConnected) _noCollide.Add(BodyPairKey(_joints[j].A, _joints[j].B));
+        ref var joint = ref _joints[j];
+        joint.PrevA = joint.NextA = joint.PrevB = joint.NextB = -1;
+        if (joint.A >= 0) PushJointEdge(joint.A, j << 1);
+        PushJointEdge(joint.B, j << 1 | 1);
     }
 
-    private void UnionJoints()
+    private void PushJointEdge(int body, int key)
     {
-        for (int j = 0; j < _jointHigh; j++)
+        int head = _jointHead[body];
+        if ((key & 1) == 0) _joints[key >> 1].NextA = head; else _joints[key >> 1].NextB = head;
+        if (head >= 0) SetJointPrev(head, key);
+        _jointHead[body] = key;
+        _jointDegree[body]++;
+    }
+
+    private void RemoveJointEdges(int j)
+    {
+        ref var joint = ref _joints[j];
+        if (joint.A >= 0) UnchainJoint(joint.PrevA, joint.NextA, joint.A);
+        UnchainJoint(joint.PrevB, joint.NextB, joint.B);
+    }
+
+    private void UnchainJoint(int prev, int next, int body)
+    {
+        if (prev >= 0) { if ((prev & 1) == 0) _joints[prev >> 1].NextA = next; else _joints[prev >> 1].NextB = next; }
+        else _jointHead[body] = next;
+        if (next >= 0) SetJointPrev(next, prev);
+        _jointDegree[body]--;
+    }
+
+    private void SetJointPrev(int key, int prev)
+    {
+        if ((key & 1) == 0) _joints[key >> 1].PrevA = prev; else _joints[key >> 1].PrevB = prev;
+    }
+
+    internal int NextJointKey(int key) => (key & 1) == 0 ? _joints[key >> 1].NextA : _joints[key >> 1].NextB;
+
+    /// <summary>Whether a joint between the two bodies turns their collision off (read-only: safe in the parallel pair queries).</summary>
+    private bool JointPreventsCollision(int a, int b)
+    {
+        if (_jointDegree[b] < _jointDegree[a]) (a, b) = (b, a);
+        for (int key = _jointHead[a]; key >= 0; key = NextJointKey(key))
         {
-            ref readonly var joint = ref _joints[j];
-            if (!joint.Alive || joint.A < 0) continue;
-            if (Types[joint.A] == BodyType.Dynamic && Types[joint.B] == BodyType.Dynamic) Union(joint.A, joint.B);
-            else if (Types[joint.A] == BodyType.Dynamic && Awake[joint.B] && Types[joint.B] != BodyType.Static) Wake(joint.A);
-            else if (Types[joint.B] == BodyType.Dynamic && Awake[joint.A] && Types[joint.A] != BodyType.Static) Wake(joint.B);
+            ref readonly var joint = ref _joints[key >> 1];
+            int other = (key & 1) == 0 ? joint.B : joint.A;
+            if (other == b && !joint.Def.CollideConnected) return true;
         }
+        return false;
     }
+
+    /// <summary>Let the broadphase find the two bodies' pairs again (their collision was turned back on).</summary>
+    private void RefindPairs(int a, int b)
+    {
+        int body = _shapeCountOf(a) <= _shapeCountOf(b) ? a : b;
+        for (int s = FirstShape[body]; s >= 0; s = NextShape[s]) MarkMoved(s);
+    }
+
+    private int _shapeCountOf(int b) { int n = 0; for (int s = FirstShape[b]; s >= 0; s = NextShape[s]) n++; return n; }
 
     private void CloneJoints(PhysicsWorld2D w)
     {
@@ -154,7 +212,7 @@ public sealed partial class PhysicsWorld2D
 
     internal static float RelativeAngle(Rot a, Rot b) => SimMath.Atan2(a.C * b.S - a.S * b.C, a.C * b.C + a.S * b.S);
 
-    private bool Active(in Joint j) => j.Alive && (Awake[j.B] || (j.A >= 0 && Awake[j.A])) && (Types[j.B] == BodyType.Dynamic || (j.A >= 0 && Types[j.A] == BodyType.Dynamic));
+    private bool Active(in Joint j) => j.Alive && j.Def.Type != JointType2D.Filter && (Awake[j.B] || (j.A >= 0 && Awake[j.A])) && (Types[j.B] == BodyType.Dynamic || (j.A >= 0 && Types[j.A] == BodyType.Dynamic));
 
     private BodyState Ground => new() { DQ = Rot.Identity };
 
@@ -250,6 +308,7 @@ public sealed partial class PhysicsWorld2D
                 case JointType2D.Prismatic: SolvePrismatic(ref j, ref sa, ref sb, h, invH, useBias); break;
                 case JointType2D.Weld: SolveWeld(ref j, ref sa, ref sb, invH, useBias); break;
                 case JointType2D.Target: SolveTarget(ref j, ref sb, h, useBias); break;
+                case JointType2D.Filter: break;
             }
             if (j.A >= 0) States[j.A] = sa;
         }
