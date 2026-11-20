@@ -5,7 +5,7 @@ using Gamegrl.Audio.Spatial;
 
 namespace Gamegrl.Audio;
 
-internal enum CommandKind : byte { Play, Stop, VoiceGain, VoicePan, VoicePitch, VoiceSpatial, VoiceRotation, VoiceReflections, BusCreate, BusGain, Reverb }
+internal enum CommandKind : byte { Play, Stop, VoiceGain, VoicePan, VoicePitch, VoiceSpatial, VoiceRotation, VoiceReflections, BusCreate, BusGain, Reverb, RemoteReverb }
 
 /// <summary>A message from the game to the audio thread. Times are engine samples; ramps are in frames.</summary>
 internal struct Command
@@ -94,7 +94,7 @@ internal sealed class Mixer
         public Ramp[] Matrix = null!; // bed channel o, input i at [o * Inputs + i]
         public int Inputs;            // clip channels, or 1 for positional voices (the clip mixed to mono)
         public BandEq3 Eq;
-        public Ramp ReverbSend;
+        public Ramp ReverbSend, RemoteSend;
         public SpatialParams Spatial;
         // Early reflections: a delay line of the voice's dry signal (through the surfaces' tone), read by taps.
         public float[] Delay = null!;
@@ -121,8 +121,8 @@ internal sealed class Mixer
     private readonly Panner _panner;
     private readonly AmbisonicDecoder _ambisonics;
     private readonly BinauralVirtualizer? _binaural;
-    private readonly Fdn _reverb;
-    private readonly float[] _reverbInput = new float[MaxBlock];
+    private readonly Fdn _reverb, _remote;
+    private readonly float[] _reverbInput = new float[MaxBlock], _remoteInput = new float[MaxBlock];
     private readonly float[] _outBuffer;
     private readonly float[] _frame = new float[MaxClipChannels];
     private readonly float[] _scratch;
@@ -160,6 +160,7 @@ internal sealed class Mixer
         _ambisonics = new AmbisonicDecoder(_bed);
         _binaural = headphones ? new BinauralVirtualizer(_bed, sampleRate) : null;
         _reverb = new Fdn(_bed, sampleRate);
+        _remote = new Fdn(_bed, sampleRate, focused: true);
         _outBuffer = new float[_outChannels * MaxBlock];
         _scratch = new float[_bedChannels * MaxClipChannels];
         _panScratch = new float[_bedChannels];
@@ -203,6 +204,7 @@ internal sealed class Mixer
             for (int c = 0; c < _bedChannels; c++) Array.Clear(bus.Buffer, c * MaxBlock, n);
         }
         Array.Clear(_reverbInput, 0, n);
+        Array.Clear(_remoteInput, 0, n);
         foreach (var v in _voices) if (v.Active) RenderVoice(v, blockStart, n);
 
         // Children have higher indices than their parents: fold the tree from the leaves up.
@@ -219,6 +221,7 @@ internal sealed class Mixer
         }
         var master = _buses[0].Buffer;
         _reverb.Process(_reverbInput.AsSpan(0, n), master, MaxBlock, n);
+        _remote.Process(_remoteInput.AsSpan(0, n), master, MaxBlock, n);
         for (int f = 0; f < n; f++)
         {
             float g = _buses[0].Gain.Next();
@@ -257,11 +260,12 @@ internal sealed class Mixer
                 v.Inputs = v.Positional ? 1 : clip.Channels;
                 v.Eq.Init(_rate);
                 v.ReverbSend = default;
+                v.RemoteSend = default;
                 v.TapCount = v.LiveTaps = 0;
                 v.Tail = 0;
                 v.DelayDirty = true;
                 v.ReflectionEq.Init(_rate);
-                if (v.Positional) { v.Eq.Set(cmd.Spatial.Low, cmd.Spatial.Mid, cmd.Spatial.High, 0); v.ReverbSend.Set(cmd.Spatial.Reverb, 0); }
+                if (v.Positional) { v.Eq.Set(cmd.Spatial.Low, cmd.Spatial.Mid, cmd.Spatial.High, 0); v.ReverbSend.Set(cmd.Spatial.Reverb, 0); v.RemoteSend.Set(cmd.Spatial.RemoteReverb, 0); }
                 SetMatrix(v, 0, cmd.Matrix);
                 break;
             }
@@ -299,6 +303,7 @@ internal sealed class Mixer
                 v.Step = StepFor(v);
                 v.Eq.Set(cmd.Spatial.Low, cmd.Spatial.Mid, cmd.Spatial.High, cmd.Ramp);
                 v.ReverbSend.Set(cmd.Spatial.Reverb, cmd.Ramp);
+                v.RemoteSend.Set(cmd.Spatial.RemoteReverb, cmd.Ramp);
                 SetMatrix(v, cmd.Ramp, null);
                 SetTaps(v, cmd.Ramp, delays: false);
                 break;
@@ -342,6 +347,14 @@ internal sealed class Mixer
             }
             case CommandKind.BusGain: _buses[cmd.Target].Gain.Set(cmd.Value, cmd.Ramp); break;
             case CommandKind.Reverb: _reverb.Set(cmd.Reverb, cmd.Ramp); break;
+            case CommandKind.RemoteReverb:
+            {
+                _remote.Set(cmd.Reverb, cmd.Ramp);
+                var pan = _panScratch.AsSpan();
+                _panner.Pan(cmd.Spatial.Direction, cmd.Spatial.Spread, pan);
+                _remote.Focus(pan, cmd.Ramp);
+                break;
+            }
         }
     }
 
@@ -528,6 +541,7 @@ internal sealed class Mixer
             v.Eq.Process(block.AsSpan(first, count));
             if (v.TapCount > 0) RenderReflections(v, first, tail ? n - first : count);
             AddRamped(_reverbInput.AsSpan(first, count), block.AsSpan(first, count), ref v.ReverbSend);
+            AddRamped(_remoteInput.AsSpan(first, count), block.AsSpan(first, count), ref v.RemoteSend);
         }
         if (count > 0)
         {

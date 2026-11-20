@@ -25,6 +25,8 @@ public struct SpatialParams
     public float Gain, Spread, Doppler;
     public float Low, Mid, High;
     public float Reverb;
+    /// <summary>Its send to the other room's reverb, heard through an opening (see <see cref="AudioEngine.SetRemoteReverb"/>).</summary>
+    public float RemoteReverb;
 
     public static SpatialParams Default => new() { Direction = -Vector3.UnitZ, Gain = 1, Doppler = 1, Low = 1, Mid = 1, High = 1 };
 }
@@ -320,6 +322,13 @@ public sealed class AudioEngine : IDisposable
     /// <summary>The room's late reverb (decay per band, level, pre-delay), usually from <see cref="Acoustics.ReverbEstimator"/>; ramps over <paramref name="rampSeconds"/>.</summary>
     public void SetReverb(in Acoustics.ReverbParams reverb, float rampSeconds = 0.25f) =>
         Post(new Command { Kind = CommandKind.Reverb, Reverb = reverb, Ramp = Frames(rampSeconds) });
+
+    /// <summary>
+    /// The reverb of another room, heard through an opening: its decay, level and pre-delay, and where the opening is from the
+    /// listener (direction in listener space, spread). Voices send to it with <see cref="SpatialParams.RemoteReverb"/>.
+    /// </summary>
+    public void SetRemoteReverb(in Acoustics.ReverbParams reverb, Vector3 direction, float spread, float rampSeconds = 0.25f) =>
+        Post(new Command { Kind = CommandKind.RemoteReverb, Reverb = reverb, Spatial = SpatialParams.Default with { Direction = direction, Spread = spread }, Ramp = Frames(rampSeconds) });
 
     /// <summary>Whether the mixer is rendering a voice right now (rather than tracking it virtually).</summary>
     public bool IsRendered(VoiceHandle voice) => TryGet(voice, out int i) && Rendering(i);

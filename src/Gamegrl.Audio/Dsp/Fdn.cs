@@ -8,7 +8,8 @@ namespace Gamegrl.Audio.Dsp;
 /// length d, so every band decays at its own rate), a pre-delay and four input allpass diffusers. Line outputs reach
 /// each bed speaker through a different ± combination (rows of a Hadamard matrix), so the tail surrounds the listener
 /// decorrelated. Scaled so a unit impulse puts out unit energy (summed over the bed) whatever the decay time;
-/// <see cref="ReverbParams.Level"/> then sets the reverberant level. Allocation-free once built.
+/// <see cref="ReverbParams.Level"/> then sets the reverberant level. A focused reverb (another room heard through an
+/// opening) instead sums its lines to one signal and pans it with the gains <see cref="Focus"/> sets. Allocation-free once built.
 /// </summary>
 internal sealed class Fdn
 {
@@ -28,11 +29,13 @@ internal sealed class Fdn
     private readonly sbyte[,] _signs;       // [bed channel, line]
     private readonly float[] _taps = new float[Lines];
     private Ramp _level;
-    private float _norm = 1;
+    private float _norm = 1, _focusNorm = 1;
+    private readonly Ramp[]? _focus;  // per bed channel, when focused
     private ReverbParams _params = ReverbParams.None;
 
-    public Fdn(ChannelLayout bed, int sampleRate)
+    public Fdn(ChannelLayout bed, int sampleRate, bool focused = false)
     {
+        if (focused) _focus = new Ramp[bed.Count];
         _rate = sampleRate;
         _channels = bed.Count;
         _lfe = bed.IndexOf(Speaker.Lfe);
@@ -78,8 +81,16 @@ internal sealed class Fdn
         // Energy normalisation: the taps see each trip once; the output combination spreads it over the speakers.
         int speakers = _channels - (_lfe >= 0 ? 1 : 0);
         _norm = t.Mid > 0 ? (float)Math.Sqrt(inverseEnergy / Lines) / MathF.Sqrt(speakers) : 0;
+        _focusNorm = t.Mid > 0 ? (float)Math.Sqrt(inverseEnergy / Lines) : 0;
         _level.Set(p.IsSilent ? 0 : p.Level, ramp);
         _preLength = Math.Clamp((int)(p.PreDelaySeconds * _rate), 1, _preDelay.Length - 1);
+    }
+
+    /// <summary>A focused reverb's pan gains over the bed (power-normalised, e.g. from VBAP), ramped.</summary>
+    public void Focus(ReadOnlySpan<float> gains, int ramp)
+    {
+        if (_focus is null) return;
+        for (int c = 0; c < _focus.Length; c++) _focus[c].Set(gains[c], ramp);
     }
 
     /// <summary>Reads <paramref name="input"/> (mono sends) and adds the tail into the planar bed.</summary>
@@ -122,6 +133,14 @@ internal sealed class Fdn
                 _positions[j] = _positions[j] + 1 == _lengths[j] ? 0 : _positions[j] + 1;
             }
 
+            if (_focus is not null)
+            {
+                float mono = 0;
+                for (int j = 0; j < Lines; j++) mono += (j & 1) == 0 ? _taps[j] : -_taps[j];
+                mono *= _level.Next() * _focusNorm;
+                for (int c = 0; c < _channels; c++) bed[c * stride + f] += mono * _focus[c].Next();
+                continue;
+            }
             float gain = _level.Next() * _norm;
             if (gain == 0) continue;
             for (int c = 0; c < _channels; c++)

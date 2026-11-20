@@ -141,13 +141,25 @@ public static class Diffraction
         return 0.5f * (lo + hi);
     }
 
-    /// <summary>Nothing between two points, ignoring the surfaces they sit on (each end is pulled in by a millimetre).</summary>
+    /// <summary>
+    /// Nothing between two points, ignoring the surfaces they sit on (each end is pulled in by a millimetre), and not a
+    /// crevice: a leg running between solids flush against each other (a wall standing on a floor) grazes both without
+    /// hitting either, so it's rejected when its middle has solid on opposite sides.
+    /// </summary>
     private static bool Clear(AcousticScene scene, Vector3 a, Vector3 b)
     {
         var d = b - a;
         float length = d.Length();
         if (length < 2e-3f) return true;
         float pull = 1e-3f / length;
-        return !scene.Raycast(a + d * pull, d * (1 - 2 * pull), 1, out _);
+        if (scene.Raycast(a + d * pull, d * (1 - 2 * pull), 1, out _)) return false;
+        var mid = 0.5f * (a + b);
+        var axis = d / length;
+        var u = Vector3.Normalize(Vector3.Cross(axis, MathF.Abs(axis.Y) < 0.9f ? Vector3.UnitY : Vector3.UnitX));
+        var v = Vector3.Cross(axis, u);
+        const float probe = 3e-3f;
+        if (scene.InsideSolid(mid + u * probe) && scene.InsideSolid(mid - u * probe)) return false;
+        if (scene.InsideSolid(mid + v * probe) && scene.InsideSolid(mid - v * probe)) return false;
+        return true;
     }
 }

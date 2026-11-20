@@ -372,6 +372,45 @@ public sealed class AcousticScene
         return sum * (1f / (n + 1));
     }
 
+    /// <summary>
+    /// Whether a point is inside a solid instance (a box): by parity, counting how often a ray from it crosses each solid.
+    /// Open surfaces have no inside.
+    /// </summary>
+    public bool InsideSolid(Vector3 point)
+    {
+        if (_a.Length == 0) return false;
+        // An irregular direction, so the ray doesn't run along edges or faces of axis-aligned geometry.
+        var direction = new Vector3(0.5773f, 0.5778f, 0.5770f) * (Vector3.Distance(BoundsMin, BoundsMax) + 1);
+        var inv = new Vector3(1 / direction.X, 1 / direction.Y, 1 / direction.Z);
+        Span<int> instances = stackalloc int[32];
+        Span<int> crossings = stackalloc int[32];
+        int count = 0, sp = 0;
+        Span<int> stack = stackalloc int[64];
+        stack[sp++] = 0;
+        while (sp > 0)
+        {
+            ref var node = ref _nodes[stack[--sp]];
+            if (!Slab(point, inv, node.Min, node.Max, 1)) continue;
+            if (node.Count > 0)
+            {
+                for (int i = node.Left; i < node.Left + node.Count; i++)
+                {
+                    int t = _order[i];
+                    int instance = _instances[t];
+                    if (!_solid[instance]) continue;
+                    float d = Intersect(t, point, direction);
+                    if (d <= 0 || d >= 1) continue;
+                    int k = instances[..count].IndexOf(instance);
+                    if (k < 0) { if (count == instances.Length) continue; k = count++; instances[k] = instance; crossings[k] = 0; }
+                    crossings[k]++;
+                }
+            }
+            else if (sp + 2 <= stack.Length) { stack[sp++] = node.Left; stack[sp++] = node.Left + 1; }
+        }
+        for (int k = 0; k < count; k++) if ((crossings[k] & 1) == 1) return true;
+        return false;
+    }
+
     /// <summary>Whether anything blocks the segment (an early-out visibility test).</summary>
     public bool Blocked(Vector3 from, Vector3 to) => Raycast(from, to - from, 1 - 1e-4f, out _);
 

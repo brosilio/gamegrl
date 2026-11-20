@@ -104,11 +104,13 @@ public struct AudioEnvironment
     public bool Reflections;
     /// <summary>Hidden sources heard round the edges in the way (see <see cref="Diffraction"/>).</summary>
     public bool Diffraction;
+    /// <summary>A loud hidden source's own room reverberating, heard through the opening its sound comes round.</summary>
+    public bool RemoteReverb;
 
     public static AudioEnvironment Default => new()
     {
         TemperatureC = 20, HumidityPercent = 50, DopplerScale = 1, Hdr = true, HdrRangeDb = 60, HdrReleaseDbPerSecond = 12, HdrFloorDb = 50, HdrHeadroomDb = 6,
-        Reverb = true, Reflections = true, Diffraction = true,
+        Reverb = true, Reflections = true, Diffraction = true, RemoteReverb = true,
     };
 }
 
@@ -172,6 +174,8 @@ public sealed class AudioContext : IDisposable
     public AcousticScene Scene { get; internal set; } = AcousticScene.Empty;
     /// <summary>The late reverb at the listener, as last estimated (see <see cref="ReverbEstimator"/>).</summary>
     public ReverbParams Reverb { get; internal set; } = ReverbParams.None;
+    /// <summary>The other room's reverb (round a loud hidden source), as last estimated; silent when there's none.</summary>
+    public ReverbParams RemoteReverb { get; internal set; } = ReverbParams.None;
     internal AcousticSimulator Simulator;
     /// <summary>The listener's world transform as of the last audio update (identity before one is found).</summary>
     public Matrix4x4 Listener { get; internal set; } = Matrix4x4.Identity;
@@ -246,6 +250,7 @@ public sealed class AudioContext : IDisposable
             if (starting) Hdr.Raise(loudness);
             float hdr = HdrGain(loudness, volume);
             spatial.Reverb *= hdr / spatial.Gain;
+            spatial.RemoteReverb *= hdr / spatial.Gain;
             spatial.Gain = hdr;
         }
         return spatial;
@@ -309,8 +314,11 @@ public sealed class AudioContext : IDisposable
         // The reverb hears the source at its own level, not its distance: the reverberant field is even through a room.
         float send = env.Reverb ? Propagation.DistanceGain(MathF.Max(distance, emitter.MinDistance), emitter.MinDistance, float.MaxValue, emitter.Rolloff) : 0;
         // A hidden source excites the listener's room only as much as reaches it (through walls, round edges).
-        float reverb = send > 0 && distance < emitter.MaxDistance ? gain / send * ListenerGain * MathF.Min(1, occlusion.Mid) : 0;
-        return new SpatialParams { Direction = direction, Gain = gain * ListenerGain, Spread = spread, Doppler = doppler, Low = low, Mid = mid, High = high, Reverb = reverb };
+        float own = send > 0 && distance < emitter.MaxDistance ? gain / send * ListenerGain : 0;
+        float reverb = own * MathF.Min(1, occlusion.Mid);
+        // A hidden source also excites its own room (the remote reverb couples it back through the opening).
+        float remote = occlusion.Mid < 0.999f && env.RemoteReverb ? own : 0;
+        return new SpatialParams { Direction = direction, Gain = gain * ListenerGain, Spread = spread, Doppler = doppler, Low = low, Mid = mid, High = high, Reverb = reverb, RemoteReverb = remote };
     }
 
     /// <summary>The direct path's per-band transmission from a source to the listener (all ones without geometry or with occlusion off).</summary>
@@ -541,6 +549,8 @@ internal sealed class AudioUpdate : ISystem
             Queue(shot.Voice, audio.Spatialize(shot.Position, Vector3.Zero, Vector3.Zero, shot.Emitter, shot.Volume, occluded, around, diffraction, out float loudness), loudness, shot.Volume, shot.Position, shot.Emitter, occluded.Mid);
         }
 
+        RemoteRoom(audio, env, dt);
+
         // HDR: the window follows the loudest audible positional voice; then every one gets its gain.
         if (env.Hdr)
         {
@@ -555,8 +565,11 @@ internal sealed class AudioUpdate : ISystem
             {
                 float hdr = audio.HdrGain(_pendingLoudness[i], _pendingVolume[i]);
                 p.Reverb *= hdr / p.Gain;
+                p.RemoteReverb *= hdr / p.Gain;
                 p.Gain = hdr;
             }
+            // Only hidden voices around the remote room's anchor send to it.
+            if (!_remoteActive || Vector3.DistanceSquared(_pendingPosition[i], _remoteAnchor) > _remoteRadius * _remoteRadius) p.RemoteReverb = 0;
             // Ramp over one frame, so each update lands just as the next arrives (a ramp longer than the frame would
             // restart before finishing and lag behind forever).
             engine.SetSpatial(_pending[i], p, rampSeconds: Math.Clamp(dt, 0.002f, 0.05f));
@@ -593,6 +606,58 @@ internal sealed class AudioUpdate : ISystem
         _pending[_pendingCount] = voice; _pendingParams[_pendingCount] = p; _pendingLoudness[_pendingCount] = loudness; _pendingVolume[_pendingCount] = volume;
         _pendingPosition[_pendingCount] = position; _pendingEmitter[_pendingCount] = emitter; _pendingBlocked[_pendingCount] = blocked;
         _pendingCount++;
+    }
+
+    private bool _remoteActive;
+    private Vector3 _remoteAnchor, _remoteOpening;
+    private float _remoteRadius, _remoteCoupling, _remoteHold;
+
+    /// <summary>
+    /// The other room: the hidden source with a way round that would be loudest in plain view anchors it. Its reverb is
+    /// estimated there, and plays from the opening (the first edge of that source's path, as seen from the listener)
+    /// at the level its sound has on the way out; hidden voices near the anchor send to it.
+    /// </summary>
+    private void RemoteRoom(AudioContext audio, in AudioEnvironment env, float dt)
+    {
+        var engine = audio.Engine;
+        int anchor = -1;
+        float best = float.NegativeInfinity;
+        DiffractionPath way = default;
+        var listenerAt = audio.Listener.Translation;
+        if (env.RemoteReverb && env.Diffraction && audio.Scene.TriangleCount > 0)
+            for (int i = 0; i < _pendingCount; i++)
+            {
+                if (_pendingBlocked[i] >= 0.999f || _paths is null || !_paths.TryDiffraction(_pending[i].Value, out var path)) continue;
+                ref readonly var emitter = ref _pendingEmitter[i];
+                float open = Propagation.DistanceGain(Vector3.Distance(_pendingPosition[i], listenerAt), emitter.MinDistance, emitter.MaxDistance, emitter.Rolloff) * _pendingVolume[i];
+                float score = open > 0 ? emitter.LoudnessDb + 20 * MathF.Log10(open) : float.NegativeInfinity;
+                if (score > best) { best = score; anchor = i; way = path; }
+            }
+        if (anchor >= 0)
+        {
+            _remoteAnchor = _pendingPosition[anchor];
+            _remoteOpening = way.First;
+            // The room's reverberant sound leaves the way the source's own sound does.
+            _remoteCoupling = _pendingParams[anchor].Mid;
+            audio.Simulator.SubmitRemote(audio.Scene, _remoteAnchor, env.TemperatureC, env.HumidityPercent);
+        }
+        if (audio.Simulator.TryTakeRemote(out var remote)) audio.RemoteReverb = remote;
+        var room = audio.RemoteReverb;
+        if (anchor >= 0) _remoteHold = 1.2f * MathF.Max(room.DecaySeconds.Low, room.DecaySeconds.Mid);
+        else _remoteHold -= dt; // the room keeps ringing after its sources stop
+        bool active = !room.IsSilent && (anchor >= 0 || _remoteHold > 0);
+        if (!active)
+        {
+            if (_remoteActive) { engine.SetRemoteReverb(ReverbParams.None, -Vector3.UnitZ, 0); audio.RemoteReverb = ReverbParams.None; }
+            _remoteActive = false;
+            return;
+        }
+        _remoteActive = true;
+        _remoteRadius = MathF.Max(3, 0.6f * MathF.Cbrt(MathF.Max(room.Volume, 1)));
+        Matrix4x4.Invert(audio.Listener, out var toListener);
+        var opening = Vector3.Transform(_remoteOpening, toListener);
+        var direction = opening.LengthSquared() > 1e-8f ? Vector3.Normalize(opening) : -Vector3.UnitZ;
+        engine.SetRemoteReverb(room with { Level = room.Level * _remoteCoupling * audio.ListenerGain }, direction, 0.2f, Math.Clamp(dt, 0.002f, 0.05f));
     }
 
     /// <summary>The latest diffraction path round whatever hides a voice's source, when it's hidden and one was found.</summary>

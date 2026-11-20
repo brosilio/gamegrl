@@ -467,6 +467,51 @@ internal static class AcousticsTests
             Assert.True(door.Right > 1.5 * door.Left && Math.Abs(open.Right - open.Left) < 1e-3, $"from the right, where the door is: left {door.Left:0.0000}, right {door.Right:0.0000}");
         });
 
+        Test("acoustics: a burst inside a concrete room, heard from outside, rings on through the door it comes out of", () =>
+        {
+            (double Tail, double Left, double Right, ReverbParams Remote) Run(bool remote)
+            {
+                var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));
+                using var app = b.Build();
+                var w = app.World;
+                var context = w.Resource<AudioContext>();
+                ref var env = ref w.Resource<AudioEnvironment>();
+                env.Hdr = false; env.RemoteReverb = remote;
+                var burst = new AssetRef<AudioAsset>(Guid.NewGuid());
+                var noise = new Random(9);
+                context.Register(burst, AudioClip.Generate("burst", Rate, Rate / 10, _ => 0.5f * (float)(noise.NextDouble() * 2 - 1)));
+                w.Spawn(LocalTransform.Identity, new LocalToWorld(), AudioListener.Default);
+                // Interior x ∈ [−6, 6], y ∈ [−1.5, 3.5], z ∈ [−20, −8]; the front wall has a doorway from x = 1 to 3.
+                void Wall(Vector3 center, Vector3 size) =>
+                    w.Spawn(new LocalTransform { Position = center, Rotation = Quaternion.Identity, Scale = size }, new LocalToWorld(), AcousticSurface.Box(AcousticMaterial.Concrete));
+                Wall(new Vector3(0, -1.65f, -14), new Vector3(12.6f, 0.3f, 12.6f));
+                Wall(new Vector3(0, 3.65f, -14), new Vector3(12.6f, 0.3f, 12.6f));
+                Wall(new Vector3(0, 1, -20.15f), new Vector3(12.6f, 5, 0.3f));
+                Wall(new Vector3(-6.15f, 1, -14), new Vector3(0.3f, 5, 12));
+                Wall(new Vector3(6.15f, 1, -14), new Vector3(0.3f, 5, 12));
+                Wall(new Vector3(-2.65f, 1, -7.85f), new Vector3(7.3f, 5, 0.3f));
+                Wall(new Vector3(4.65f, 1, -7.85f), new Vector3(3.3f, 5, 0.3f));
+                w.Spawn(LocalTransform.At(new Vector3(-2, 0, -14)), new LocalToWorld(), AudioSource.At(burst));
+                const int frame = Rate / 60;
+                var left = new double[2 * Rate]; var right = new double[2 * Rate];
+                for (int f = 0; f < left.Length; f += frame)
+                {
+                    app.Tick(1 / 60.0);
+                    var o = new float[frame * 2];
+                    context.Engine.Render(o);
+                    for (int i = 0; i < frame && f + i < left.Length; i++) { left[f + i] = o[2 * i] * o[2 * i]; right[f + i] = o[2 * i + 1] * o[2 * i + 1]; }
+                }
+                double l = 0, r = 0;
+                for (int i = Rate / 2; i < Rate; i++) { l += left[i]; r += right[i]; }
+                return (l + r, l, r, context.RemoteReverb);
+            }
+            var with = Run(true);
+            var without = Run(false);
+            Assert.True(with.Remote.DecaySeconds.Mid > 1 && with.Remote.Enclosure > 0.9f, $"the room inside: T60 {with.Remote.DecaySeconds}, enclosed {with.Remote.Enclosure:0.00}");
+            Assert.True(with.Tail > 5 * without.Tail, $"its tail between 0.5 and 1 s: {with.Tail:0.0e0} with the room's reverb, {without.Tail:0.0e0} without");
+            Assert.True(with.Right > 1.5 * with.Left, $"from the door, on the right: left {with.Left:0.0e0}, right {with.Right:0.0e0}");
+        });
+
         Test("acoustics: an entity behind a wall entity is heard through the wall's transmission", () =>
         {
             var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));

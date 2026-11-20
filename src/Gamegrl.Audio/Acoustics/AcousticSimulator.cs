@@ -58,7 +58,12 @@ internal sealed class AcousticSimulator : IDisposable
         public required ReflectionRequest[] Requests;
     }
 
-    private const float MoveThreshold = 0.5f, ReflectionMoveThreshold = 0.25f;
+    private const float MoveThreshold = 0.5f, ReflectionMoveThreshold = 0.25f, RemoteMoveThreshold = 1;
+    private Request? _pendingRemote;
+    private ReverbParams _remote;
+    private int _remoteVersion, _takenRemoteVersion;
+    private AcousticScene? _lastRemoteScene;
+    private Vector3 _lastRemote = new(float.NaN);
     private ReflectionJob? _pendingReflections;
     private ReflectionResult? _reflections;
     private int _reflectionVersion, _takenReflectionVersion;
@@ -151,6 +156,33 @@ internal sealed class AcousticSimulator : IDisposable
         Interlocked.Increment(ref _reflectionVersion);
     }
 
+    /// <summary>Game thread: where the other room's reverb should be estimated (a hidden source); a new estimate when it moves a metre.</summary>
+    public void SubmitRemote(AcousticScene scene, Vector3 anchor, float temperature, float humidity)
+    {
+        if (ReferenceEquals(scene, _lastRemoteScene) && Vector3.DistanceSquared(anchor, _lastRemote) < RemoteMoveThreshold * RemoteMoveThreshold) return;
+        _lastRemoteScene = scene; _lastRemote = anchor;
+        var request = new Request { Scene = scene, Listener = anchor, Temperature = temperature, Humidity = humidity };
+        if (_inline) { PublishRemote(Compute(request)); return; }
+        Volatile.Write(ref _pendingRemote, request);
+        _wake.Set();
+    }
+
+    /// <summary>Game thread: the newest remote estimate, if one arrived since the last call.</summary>
+    public bool TryTakeRemote(out ReverbParams result)
+    {
+        int version = Volatile.Read(ref _remoteVersion);
+        lock (_wake) result = _remote;
+        if (version == _takenRemoteVersion) return false;
+        _takenRemoteVersion = version;
+        return true;
+    }
+
+    private void PublishRemote(in ReverbParams result)
+    {
+        lock (_wake) _remote = result;
+        Interlocked.Increment(ref _remoteVersion);
+    }
+
     /// <summary>Game thread: the newest estimate, if one arrived since the last call.</summary>
     public bool TryTake(out ReverbParams result)
     {
@@ -180,7 +212,9 @@ internal sealed class AcousticSimulator : IDisposable
             if (reflections is not null) PublishReflections(FindReflections(reflections));
             var request = Interlocked.Exchange(ref _pending, null);
             if (request is not null) Publish(Compute(request));
-            if (Volatile.Read(ref _pendingReflections) is not null || Volatile.Read(ref _pending) is not null) _wake.Set();
+            var remote = Interlocked.Exchange(ref _pendingRemote, null);
+            if (remote is not null) PublishRemote(Compute(remote));
+            if (Volatile.Read(ref _pendingReflections) is not null || Volatile.Read(ref _pending) is not null || Volatile.Read(ref _pendingRemote) is not null) _wake.Set();
         }
     }
 
