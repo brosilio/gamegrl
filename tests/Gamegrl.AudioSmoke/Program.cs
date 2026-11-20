@@ -157,7 +157,7 @@ static int Analyze(string path, int expectSpacing)
 static void Bench(int voices, bool headphones)
 {
     const int rate = 48000, seconds = 10, frame = rate / 60;
-    var engine = AudioEngine.Offline(rate, headphones ? ChannelLayout.Stereo : ChannelLayout.Surround71, AudioEngineSettings.Default with { Headphones = headphones, MaxVoices = Math.Max(256, voices) });
+    var engine = AudioEngine.Offline(rate, headphones ? ChannelLayout.Stereo : ChannelLayout.Surround71, AudioEngineSettings.Default with { Headphones = headphones, MaxVoices = Math.Max(4096, voices) });
     var clip = AudioClip.Sine(220, 1.37f, rate);
     var handles = new VoiceHandle[voices];
     var random = new Random(4);
@@ -175,5 +175,5 @@ static void Bench(int voices, bool headphones)
         engine.Update();
     }
     double elapsed = watch.Elapsed.TotalSeconds;
-    Console.WriteLine($"{voices} positional voices, {(headphones ? "headphones (7.1.4 bed, binaural)" : "7.1 speakers")}: {seconds / elapsed:0.0}× real time, {elapsed / (seconds * 60) * 1000:0.000} ms per 60 Hz frame of audio");
+    Console.WriteLine($"{voices} positional voices ({engine.RealVoices} rendered), {(headphones ? "headphones (7.1.4 bed, binaural)" : "7.1 speakers")}: {seconds / elapsed:0.0}× real time, {elapsed / (seconds * 60) * 1000:0.000} ms per 60 Hz frame of audio");
 }

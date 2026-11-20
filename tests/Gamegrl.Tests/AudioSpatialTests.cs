@@ -288,6 +288,63 @@ internal static class AudioSpatialTests
             w.Destroy(hum);
         });
 
+        Test("audio spatial: virtual voices — the loudest render, swaps follow loudness and priority, virtual voices keep time", () =>
+        {
+            var e = AudioEngine.Offline(Rate, ChannelLayout.Mono, AudioEngineSettings.Default with { Limiter = false, MaxRealVoices = 8 });
+            var dc = AudioClip.Generate("dc", Rate, 4800, _ => 0.01f);
+            var voices = new VoiceHandle[100];
+            for (int k = 0; k < 100; k++)
+                voices[k] = e.Play(dc, PlayOptions.Default with { Loop = true, Positional = true, Spatial = SpatialParams.Default with { Gain = (k + 1) / 100f } });
+            // Starting 100 voices churns: louder ones swap in while the mixer's spare slots hold voices fading out. Once
+            // those fades end, the next update settles on the eight loudest, and the render after it plays just them.
+            Render(e, 1024);
+            var o = Render(e, 1024);
+            Assert.True(e.ActiveVoices == 100 && e.RealVoices == 8, $"100 playing, {e.RealVoices} rendered");
+            for (int k = 0; k < 100; k++) Assert.True(e.IsRendered(voices[k]) == (k >= 92), $"voice {k} rendered: {e.IsRendered(voices[k])}");
+            float top8 = 0;
+            for (int k = 92; k < 100; k++) top8 += 0.01f * (k + 1) / 100f;
+            Assert.True(MathF.Abs(o[^1] - top8) < 1e-5f, $"the output is the eight loudest ({o[^1]} vs {top8})");
+
+            // The quietest becomes the loudest: it takes the weakest rendered voice's place, with fades.
+            e.SetSpatial(voices[0], SpatialParams.Default with { Gain = 2 });
+            e.Update();
+            o = Render(e, 2048);
+            Assert.True(e.IsRendered(voices[0]) && !e.IsRendered(voices[92]) && e.RealVoices == 8, "voice 0 in, voice 92 out");
+            float swapped = top8 - 0.01f * 0.93f + 0.01f * 2;
+            Assert.True(MathF.Abs(o[^1] - swapped) < 1e-5f, $"after the fades ({o[^1]} vs {swapped})");
+
+            // Priority beats loudness.
+            var music = e.Play(dc, PlayOptions.Default with { Loop = true, Gain = 0.001f, Priority = 100 });
+            Render(e, 1024);
+            Assert.True(e.IsRendered(music), "a high-priority voice renders however quiet it is");
+            Assert.True(e.RealVoices == 8, "still eight");
+
+            // A one-shot that never renders still ends on time.
+            var small = AudioEngine.Offline(Rate, ChannelLayout.Mono, AudioEngineSettings.Default with { Limiter = false, MaxRealVoices = 1 });
+            small.Play(dc, PlayOptions.Default with { Loop = true, Priority = 1 });
+            var blip = small.Play(AudioClip.Generate("blip", Rate, 4800, _ => 0.5f));
+            Assert.True(!small.IsRendered(blip) && small.IsPlaying(blip), "the one-shot is virtual");
+            for (int t = 0; t < 4608; t += 512) Render(small, 512);
+            Assert.True(small.IsPlaying(blip), "still playing at 4608 frames");
+            Render(small, 512);
+            Assert.True(!small.IsPlaying(blip) && small.ActiveVoices == 1, "ended once its 4800 frames passed");
+
+            // A voice that comes back joins at the right place in its clip: a sawtooth tells the position.
+            var saw = AudioClip.Generate("saw", Rate, 48000, i => i / 48000f);
+            var back = AudioEngine.Offline(Rate, ChannelLayout.Mono, AudioEngineSettings.Default with { Limiter = false, MaxRealVoices = 1 });
+            var hog = back.Play(dc, PlayOptions.Default with { Loop = true, Priority = 1 });
+            var waiting = back.Play(saw, PlayOptions.Default with { Loop = true });
+            for (int t = 0; t < 10240; t += 512) Render(back, 512);   // virtual for 10240 frames
+            back.Stop(hog, fadeSeconds: 0.001f);
+            Render(back, 512);                                       // the hog fades and frees its slot
+            back.Update();
+            long promoted = back.Time;
+            var joined = Render(back, 1024);
+            // After the 10 ms swap fade, the sawtooth reads its position: frames since it started.
+            float expected = (promoted + 600) / 48000f, got = joined[600];
+            Assert.True(back.IsRendered(waiting) && MathF.Abs(got - expected) < 2f / 48000, $"rejoined at {got * 48000:0} frames, expected {expected * 48000:0}");
+        });
+
         Test("audio spatial: first-order ambisonics decodes toward its direction and stays fixed in the world as the listener turns", () =>
         {
             var l = ChannelLayout.Surround51;

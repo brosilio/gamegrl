@@ -47,39 +47,76 @@ public struct PlayOptions
     public SpatialParams Spatial;
     /// <summary>Ambisonic clips: the listener's orientation, so the sound field stays fixed in the world.</summary>
     public Quaternion ListenerOrientation;
+    /// <summary>Voices with higher priority are rendered first when there are more voices than the mixer renders (music, dialogue).</summary>
+    public int Priority;
 
     public static PlayOptions Default => new() { Gain = 1, Pitch = 1, Spatial = SpatialParams.Default, ListenerOrientation = Quaternion.Identity };
 }
 
 public struct AudioEngineSettings
 {
-    public int MaxVoices, MaxBuses, CommandCapacity;
+    /// <summary>Voices the game can have playing at once (tracked, not all rendered); up to 65535.</summary>
+    public int MaxVoices;
+    /// <summary>Voices the mixer renders: the most important of those playing (priority, then audibility).</summary>
+    public int MaxRealVoices;
+    public int MaxBuses, CommandCapacity;
     /// <summary>A lookahead peak limiter on the master bus, so nothing clips at the device.</summary>
     public bool Limiter;
     public float LimiterCeilingDb;
     /// <summary>Render for headphones: mix into a virtual 7.1.4 bed heard through the spherical-head model (needs a stereo output).</summary>
     public bool Headphones;
 
-    public static AudioEngineSettings Default => new() { MaxVoices = 256, MaxBuses = 64, CommandCapacity = 4096, Limiter = true, LimiterCeilingDb = -1 };
+    public static AudioEngineSettings Default => new()
+    {
+        MaxVoices = 4096, MaxRealVoices = 128, MaxBuses = 64, CommandCapacity = 8192, Limiter = true, LimiterCeilingDb = -1,
+    };
 }
 
 /// <summary>
 /// The game's handle on audio. Calls come from one thread (the game's); they post commands to the audio thread and never
-/// wait for it. Voices start and stop on exact samples of the engine timeline (<see cref="Time"/>). Call
-/// <see cref="Update"/> once per frame to learn which voices have ended. Runs on a device (<see cref="Start"/>) or offline,
-/// rendered on demand (<see cref="Offline"/>) for tests and bounces.
+/// wait for it. Voices start and stop on exact samples of the engine timeline (<see cref="Time"/>).
+/// <para>
+/// Voices are virtual: up to <see cref="AudioEngineSettings.MaxVoices"/> play at once, and the mixer renders the
+/// <see cref="AudioEngineSettings.MaxRealVoices"/> most important (priority first, then audibility — a positional
+/// voice's spatial gain times its volume). The rest keep their place in the clip and their parameters, and come in with
+/// a short fade when they rank high enough; inaudible voices are never rendered. Call <see cref="Update"/> once per frame:
+/// it takes in ended voices, advances virtual ones and re-ranks.
+/// </para>
+/// Runs on a device (<see cref="Start"/>) or offline, rendered on demand (<see cref="Offline"/>) for tests and bounces.
 /// </summary>
 public sealed class AudioEngine : IDisposable
 {
+    private const int Reserve = 32;           // mixer slots beyond MaxRealVoices, for voices fading out while others fade in
+    private const float SwapFadeSeconds = 0.01f;
+    private const float InaudibleDb = -100;
+    private const float StickinessDb = 3;     // a rendered voice keeps its place unless a virtual one beats it by this much
+
+    private struct Voice
+    {
+        public bool Active, Real, Demoting, Stopping, Loop, Positional;
+        public int Generation, Mixer, Bus, Priority, FadeIn;
+        public AudioClip Clip;
+        public float Gain, Pan, Pitch;
+        public SpatialParams Spatial;
+        public Quaternion Rotation;
+        public float[]? Matrix;
+        public long Start, StopAt;
+        public double Position; // clip frames, as of the last update
+    }
+
     private readonly Mixer _mixer;
     private readonly SpscRing<Command> _commands;
     private readonly SpscRing<AudioEvent> _events;
-    private readonly int[] _generations;
-    private readonly bool[] _playing;
+    private readonly Voice[] _voices;
     private readonly int[] _free;
-    private readonly int _maxBuses;
+    private int _freeCount;
+    private readonly int[] _mixerOwner, _mixerGeneration, _mixerFree;
+    private int _mixerFreeCount;
+    private readonly (float Key, int Voice)[] _ranking;
+    private readonly int _maxReal, _maxBuses;
     private readonly Dictionary<ChannelLayout, float[]> _matrices = [];
-    private int _freeCount, _busCount = 1, _dropped;
+    private int _realCount, _busCount = 1, _dropped, _activeCount;
+    private long _lastTime;
     private IAudioDevice? _device;
 
     public int SampleRate => _mixer.SampleRate;
@@ -94,23 +131,35 @@ public sealed class AudioEngine : IDisposable
     /// <summary>Frames between rendering a sample and hearing it: the device's buffering plus the limiter's lookahead.</summary>
     public long LatencyFrames => (_device?.LatencyFrames ?? 0) + _mixer.LimiterLatency;
     public IAudioDevice? Device => _device;
-    public int ActiveVoices => _playing.Length - _freeCount;
-    public int MaxVoices => _playing.Length;
+    /// <summary>Voices playing, rendered or not.</summary>
+    public int ActiveVoices => _activeCount;
+    /// <summary>Voices the mixer is rendering now.</summary>
+    public int RealVoices => _realCount;
+    public int MaxVoices => _voices.Length;
+    public int MaxRealVoices => _maxReal;
     /// <summary>Commands lost because the queue was full (the audio thread fell behind).</summary>
     public int DroppedCommands => _dropped;
 
     private AudioEngine(int sampleRate, ChannelLayout layout, in AudioEngineSettings settings)
     {
         if (settings.MaxVoices is <= 0 or > 0xFFFF) throw new ArgumentOutOfRangeException(nameof(settings), "MaxVoices must be 1..65535");
+        int maxReal = Math.Clamp(settings.MaxRealVoices <= 0 ? 128 : settings.MaxRealVoices, 1, settings.MaxVoices);
+        int mixerSlots = maxReal + Reserve;
         _commands = new SpscRing<Command>(settings.CommandCapacity);
-        _events = new SpscRing<AudioEvent>(settings.MaxVoices * 2);
-        _mixer = new Mixer(sampleRate, layout, settings.Headphones, settings.MaxVoices, settings.MaxBuses, settings.Limiter, settings.LimiterCeilingDb, _commands, _events);
+        _events = new SpscRing<AudioEvent>(mixerSlots * 2);
+        _mixer = new Mixer(sampleRate, layout, settings.Headphones, mixerSlots, settings.MaxBuses, settings.Limiter, settings.LimiterCeilingDb, _commands, _events);
         _maxBuses = settings.MaxBuses;
-        _generations = new int[settings.MaxVoices];
-        _playing = new bool[settings.MaxVoices];
+        _maxReal = maxReal;
+        _voices = new Voice[settings.MaxVoices];
         _free = new int[settings.MaxVoices];
         for (int i = 0; i < _free.Length; i++) _free[i] = _free.Length - 1 - i;
         _freeCount = _free.Length;
+        _mixerOwner = new int[mixerSlots];
+        _mixerGeneration = new int[mixerSlots];
+        _mixerFree = new int[mixerSlots];
+        for (int i = 0; i < mixerSlots; i++) { _mixerOwner[i] = -1; _mixerFree[i] = mixerSlots - 1 - i; }
+        _mixerFreeCount = mixerSlots;
+        _ranking = new (float, int)[settings.MaxVoices];
     }
 
     /// <summary>An engine rendered by <see cref="Render"/> on the caller's thread.</summary>
@@ -134,20 +183,40 @@ public sealed class AudioEngine : IDisposable
 
     public VoiceHandle Play(AudioClip clip, in PlayOptions options)
     {
-        Update();
+        TakeEvents();
         if (_freeCount == 0) return default;
-        int slot = _free[--_freeCount];
-        int gen = _generations[slot] = (_generations[slot] + 1) & 0x7FFF;
-        var handle = new VoiceHandle((gen << 16) | (slot + 1));
-        _playing[slot] = true;
-        Post(new Command
+        int i = _free[--_freeCount];
+        ref var v = ref _voices[i];
+        int gen = (v.Generation + 1) & 0x7FFF;
+        v = new Voice
         {
-            Kind = CommandKind.Play, Target = handle.Value, Clip = clip, Bus = options.Bus.Index, Loop = options.Loop,
-            Time = options.StartTime, Value = options.Gain, Pan = options.Pan, Pitch = options.Pitch <= 0 ? 1 : options.Pitch,
-            Ramp = Frames(options.FadeInSeconds), Offset = (long)Math.Round(options.Offset * clip.SampleRate * 4294967296.0),
-            Positional = options.Positional, Spatial = options.Spatial, Rotation = Quaternion.Conjugate(Normalised(options.ListenerOrientation)),
+            Active = true, Generation = gen, Clip = clip, Bus = options.Bus.Index, Loop = options.Loop, Positional = options.Positional && !clip.Layout.IsAmbisonic,
+            Gain = options.Gain, Pan = options.Pan, Pitch = options.Pitch <= 0 ? 1 : options.Pitch, Spatial = options.Spatial, Priority = options.Priority,
+            Rotation = Quaternion.Conjugate(Normalised(options.ListenerOrientation)), FadeIn = Frames(options.FadeInSeconds),
             Matrix = !options.Positional && clip.Channels > 1 && !clip.Layout.IsAmbisonic ? MatrixFor(clip.Layout) : null,
-        });
+            Start = Math.Max(options.StartTime, Time), StopAt = long.MaxValue, Position = Math.Max(0, options.Offset * clip.SampleRate),
+        };
+        _activeCount++;
+        var handle = new VoiceHandle((gen << 16) | (i + 1));
+        // Render at once if there's room, or if it outranks the weakest rendered voice.
+        float key = Key(in v);
+        if (key > float.MinValue)
+        {
+            if (_realCount < _maxReal) Promote(i, exact: true);
+            else
+            {
+                int weakest = -1;
+                float weakestKey = float.MaxValue;
+                for (int s = 0; s < _mixerOwner.Length; s++)
+                {
+                    int o = _mixerOwner[s];
+                    if (o < 0 || !_voices[o].Real || _voices[o].Demoting || _voices[o].Stopping) continue;
+                    float k = Key(in _voices[o]) + StickinessDb;
+                    if (k < weakestKey) { weakestKey = k; weakest = o; }
+                }
+                if (weakest >= 0 && key > weakestKey && _mixerFreeCount > 0) { Demote(weakest); Promote(i, exact: true); }
+            }
+        }
         return handle;
     }
 
@@ -156,35 +225,58 @@ public sealed class AudioEngine : IDisposable
     /// <summary>Fades the voice out over <paramref name="fadeSeconds"/> starting at engine sample <paramref name="at"/> (or now).</summary>
     public void Stop(VoiceHandle voice, float fadeSeconds = 0.005f, long at = 0)
     {
-        if (IsPlaying(voice)) Post(new Command { Kind = CommandKind.Stop, Target = voice.Value, Time = at, Ramp = Math.Max(1, Frames(fadeSeconds)) });
+        if (!TryGet(voice, out int i)) return;
+        ref var v = ref _voices[i];
+        if (v.Real && !v.Demoting)
+        {
+            if (v.Stopping) return;
+            v.Stopping = true;
+            Post(new Command { Kind = CommandKind.Stop, Target = v.Mixer, Time = at, Ramp = Math.Max(1, Frames(fadeSeconds)) });
+        }
+        else if (at > Time) v.StopAt = at;
+        else End(i);
     }
 
     public void SetGain(VoiceHandle voice, float gain, float rampSeconds = 0.01f)
     {
-        if (IsPlaying(voice)) Post(new Command { Kind = CommandKind.VoiceGain, Target = voice.Value, Value = gain, Ramp = Frames(rampSeconds) });
+        if (!TryGet(voice, out int i)) return;
+        _voices[i].Gain = gain;
+        if (Rendering(i)) Post(new Command { Kind = CommandKind.VoiceGain, Target = _voices[i].Mixer, Value = gain, Ramp = Frames(rampSeconds) });
     }
 
     public void SetPan(VoiceHandle voice, float pan, float rampSeconds = 0.01f)
     {
-        if (IsPlaying(voice)) Post(new Command { Kind = CommandKind.VoicePan, Target = voice.Value, Value = pan, Ramp = Frames(rampSeconds) });
+        if (!TryGet(voice, out int i)) return;
+        _voices[i].Pan = pan;
+        if (Rendering(i)) Post(new Command { Kind = CommandKind.VoicePan, Target = _voices[i].Mixer, Value = pan, Ramp = Frames(rampSeconds) });
     }
 
     public void SetPitch(VoiceHandle voice, float pitch)
     {
-        if (IsPlaying(voice) && pitch > 0) Post(new Command { Kind = CommandKind.VoicePitch, Target = voice.Value, Value = pitch });
+        if (pitch <= 0 || !TryGet(voice, out int i)) return;
+        _voices[i].Pitch = pitch;
+        if (Rendering(i)) Post(new Command { Kind = CommandKind.VoicePitch, Target = _voices[i].Mixer, Value = pitch });
     }
 
     /// <summary>Moves a positional voice: direction, gain, spread, Doppler and band gains, ramped over <paramref name="rampSeconds"/>.</summary>
     public void SetSpatial(VoiceHandle voice, in SpatialParams spatial, float rampSeconds = 0.02f)
     {
-        if (IsPlaying(voice)) Post(new Command { Kind = CommandKind.VoiceSpatial, Target = voice.Value, Spatial = spatial, Ramp = Frames(rampSeconds) });
+        if (!TryGet(voice, out int i)) return;
+        _voices[i].Spatial = spatial;
+        if (Rendering(i)) Post(new Command { Kind = CommandKind.VoiceSpatial, Target = _voices[i].Mixer, Spatial = spatial, Ramp = Frames(rampSeconds) });
     }
 
     /// <summary>Ambisonic voices: the listener's current orientation, so the field stays fixed in the world as the head turns.</summary>
     public void SetListenerOrientation(VoiceHandle voice, Quaternion orientation, float rampSeconds = 0.02f)
     {
-        if (IsPlaying(voice)) Post(new Command { Kind = CommandKind.VoiceRotation, Target = voice.Value, Rotation = Quaternion.Conjugate(Normalised(orientation)), Ramp = Frames(rampSeconds) });
+        if (!TryGet(voice, out int i)) return;
+        var rotation = Quaternion.Conjugate(Normalised(orientation));
+        _voices[i].Rotation = rotation;
+        if (Rendering(i)) Post(new Command { Kind = CommandKind.VoiceRotation, Target = _voices[i].Mixer, Rotation = rotation, Ramp = Frames(rampSeconds) });
     }
+
+    /// <summary>Whether the mixer is rendering a voice right now (rather than tracking it virtually).</summary>
+    public bool IsRendered(VoiceHandle voice) => TryGet(voice, out int i) && Rendering(i);
 
     private static Quaternion Normalised(Quaternion q) => q.LengthSquared() < 1e-12f ? Quaternion.Identity : Quaternion.Normalize(q);
 
@@ -207,32 +299,150 @@ public sealed class AudioEngine : IDisposable
     public void SetBusGain(BusHandle bus, float gain, float rampSeconds = 0.01f) =>
         Post(new Command { Kind = CommandKind.BusGain, Target = bus.Index, Value = gain, Ramp = Frames(rampSeconds) });
 
-    public bool IsPlaying(VoiceHandle voice)
-    {
-        int slot = voice.Slot;
-        return voice.IsValid && (uint)slot < (uint)_playing.Length && _playing[slot] && _generations[slot] == voice.Value >> 16;
-    }
+    public bool IsPlaying(VoiceHandle voice) => TryGet(voice, out _);
 
     /// <summary>Fades out every playing voice (leaving play mode, changing levels).</summary>
     public void StopAll(float fadeSeconds = 0.005f)
     {
-        Update();
-        for (int slot = 0; slot < _playing.Length; slot++)
-            if (_playing[slot]) Stop(new VoiceHandle((_generations[slot] << 16) | (slot + 1)), fadeSeconds);
+        TakeEvents();
+        for (int i = 0; i < _voices.Length; i++)
+            if (_voices[i].Active) Stop(new VoiceHandle((_voices[i].Generation << 16) | (i + 1)), fadeSeconds);
     }
 
-    /// <summary>Takes in what the audio thread reported: ended voices free their slots.</summary>
+    /// <summary>
+    /// Once per frame: takes in what the audio thread reported (ended voices free their slots), advances virtual voices
+    /// through their clips (ending one-shots that run out), and re-ranks: the most important voices are rendered.
+    /// </summary>
     public void Update()
+    {
+        TakeEvents();
+        long now = Time, previous = _lastTime;
+        _lastTime = now;
+        for (int i = 0; i < _voices.Length; i++)
+        {
+            ref var v = ref _voices[i];
+            if (!v.Active) continue;
+            // Every voice's position is tracked here too, so a rendered voice can go virtual and come back in place.
+            long from = Math.Max(v.Start, previous);
+            if (now > from)
+            {
+                v.Position += (now - from) * Rate(in v);
+                if (v.Loop) v.Position %= v.Clip.Frames;
+            }
+            if (v.Real) continue;
+            if (v.StopAt <= now || (!v.Loop && v.Position >= v.Clip.Frames)) End(i);
+        }
+        Rank();
+    }
+
+    private void Rank()
+    {
+        int n = 0;
+        for (int i = 0; i < _voices.Length; i++)
+        {
+            ref var v = ref _voices[i];
+            if (!v.Active || v.Stopping) continue;
+            float key = Key(in v);
+            if (key == float.MinValue) { if (v.Real && !v.Demoting) Demote(i); continue; }
+            _ranking[n++] = (v.Real && !v.Demoting ? key + StickinessDb : key, i);
+        }
+        var ranked = _ranking.AsSpan(0, n);
+        if (n > _maxReal) ranked.Sort(static (a, b) => b.Key.CompareTo(a.Key));
+        int keep = Math.Min(n, _maxReal);
+        for (int k = keep; k < n; k++) { int i = ranked[k].Voice; if (_voices[i].Real && !_voices[i].Demoting) Demote(i); }
+        for (int k = 0; k < keep; k++) { int i = ranked[k].Voice; if (!_voices[i].Real && _realCount < _maxReal && _mixerFreeCount > 0) Promote(i, exact: false); }
+    }
+
+    /// <summary>Priority, then loudness in dB; <see cref="float.MinValue"/> for a voice too quiet to render.</summary>
+    private static float Key(in Voice v)
+    {
+        float audibility = v.Gain * (v.Positional ? v.Spatial.Gain : 1);
+        if (audibility <= 0) return float.MinValue;
+        float db = 20 * MathF.Log10(audibility);
+        return db < InaudibleDb ? float.MinValue : v.Priority * 1000f + db;
+    }
+
+    private double Rate(in Voice v) => (double)v.Clip.SampleRate / SampleRate * v.Pitch * (v.Positional ? v.Spatial.Doppler : 1);
+
+    /// <summary>
+    /// Starts rendering a voice. A voice that hasn't started yet (or is starting now, from <see cref="Play"/>) starts on
+    /// its exact sample with its own fade; one coming back from virtual joins at its tracked position with a short fade.
+    /// </summary>
+    private void Promote(int i, bool exact)
+    {
+        ref var v = ref _voices[i];
+        int slot = _mixerFree[--_mixerFreeCount];
+        int gen = _mixerGeneration[slot] = (_mixerGeneration[slot] + 1) & 0x7FFF;
+        v.Mixer = (gen << 16) | (slot + 1);
+        v.Real = true;
+        v.Demoting = false;
+        _mixerOwner[slot] = i;
+        _realCount++;
+        bool fromStart = exact || v.Start > Time;
+        Post(new Command
+        {
+            Kind = CommandKind.Play, Target = v.Mixer, Clip = v.Clip, Bus = v.Bus, Loop = v.Loop,
+            Time = fromStart ? v.Start : 0, Value = v.Gain, Pan = v.Pan, Pitch = v.Pitch,
+            Ramp = fromStart ? v.FadeIn : Frames(SwapFadeSeconds), Offset = (long)Math.Round(v.Position * 4294967296.0),
+            Positional = v.Positional, Spatial = v.Spatial, Rotation = v.Rotation, Matrix = v.Matrix,
+        });
+    }
+
+    /// <summary>Fades a rendered voice out; it stays playing, virtually, once the mixer lets it go.</summary>
+    private void Demote(int i)
+    {
+        ref var v = ref _voices[i];
+        v.Demoting = true;
+        _realCount--;
+        Post(new Command { Kind = CommandKind.Stop, Target = v.Mixer, Ramp = Frames(SwapFadeSeconds) });
+    }
+
+    private void TakeEvents()
     {
         while (_events.TryPop(out var e))
         {
             if (e.Kind != AudioEventKind.VoiceEnded) continue;
             int slot = (e.Voice & 0xFFFF) - 1;
-            if (!_playing[slot] || _generations[slot] != e.Voice >> 16) continue;
-            _playing[slot] = false;
-            _free[_freeCount++] = slot;
+            if ((uint)slot >= (uint)_mixerOwner.Length || _mixerGeneration[slot] != e.Voice >> 16) continue;
+            int owner = _mixerOwner[slot];
+            _mixerOwner[slot] = -1;
+            _mixerFree[_mixerFreeCount++] = slot;
+            if (owner < 0) continue;
+            ref var v = ref _voices[owner];
+            if (!v.Active || v.Mixer != e.Voice) continue;
+            v.Mixer = 0;
+            v.Real = false;
+            if (v.Demoting) v.Demoting = false; // virtual now
+            else { _realCount--; End(owner); }  // it ended, or was stopped
         }
     }
+
+    private void End(int i)
+    {
+        ref var v = ref _voices[i];
+        if (v.Mixer != 0)
+        {
+            // Still fading out in the mixer: the slot frees itself when the mixer reports it.
+            int slot = (v.Mixer & 0xFFFF) - 1;
+            if (_mixerOwner[slot] == i) _mixerOwner[slot] = -1;
+            if (v.Real && !v.Demoting) { _realCount--; Post(new Command { Kind = CommandKind.Stop, Target = v.Mixer, Ramp = Frames(SwapFadeSeconds) }); }
+        }
+        v.Active = false;
+        v.Real = v.Demoting = v.Stopping = false;
+        v.Mixer = 0;
+        v.Clip = null!;
+        v.Matrix = null;
+        _activeCount--;
+        _free[_freeCount++] = i;
+    }
+
+    private bool TryGet(VoiceHandle voice, out int i)
+    {
+        i = voice.Slot;
+        return voice.IsValid && (uint)i < (uint)_voices.Length && _voices[i].Active && _voices[i].Generation == voice.Value >> 16;
+    }
+
+    private bool Rendering(int i) => _voices[i].Real && !_voices[i].Demoting;
 
     /// <summary>Engine samples for a duration in seconds.</summary>
     public int Frames(double seconds) => seconds <= 0 ? 0 : (int)Math.Round(seconds * SampleRate);
