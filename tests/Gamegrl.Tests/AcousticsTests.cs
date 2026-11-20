@@ -391,6 +391,82 @@ internal static class AcousticsTests
             Assert.True(gun.Duration > 0.3 && gun.Samples.Max(MathF.Abs) <= 0.951f, "the gunshot is 0.4 s and normalised");
         });
 
+        Test("acoustics: diffraction — over a wall top, over a thick barrier, round a door frame, with ISO 9613-2's losses", () =>
+        {
+            var listener = Vector3.Zero; var source = new Vector3(0, 0, -10);
+            const float c = 343;
+            // A free-standing thin wall: one quad at z = −5 reaching y = 2. Its top is an open edge.
+            var thin = new AcousticSceneBuilder();
+            Vector3[] quad = [new(-20, -10, 0), new(20, -10, 0), new(20, 2, 0), new(-20, -10, 0), new(20, 2, 0), new(-20, 2, 0)];
+            thin.AddMesh(quad, Matrix4x4.CreateTranslation(0, 0, -5), AcousticMaterial.Concrete);
+            Assert.True(Diffraction.Find(thin.Build(), listener, source, out var over, c), "a path over the wall");
+            float expected = 2 * MathF.Sqrt(25 + 4), z = expected - 10;
+            Assert.True(over.Edges == 1 && MathF.Abs(over.Length - expected) < 1e-3f && Vector3.Distance(over.First, new Vector3(0, 2, -5)) < 0.01f,
+                $"over the top: {over.Length} m via {over.First}, expected {expected} via (0, 2, −5)");
+            float low = MathF.Pow(10, -MathF.Min(20, 10 * MathF.Log10(3 + 40 * z / (c / 400))) / 20);
+            Assert.True(MathF.Abs(over.Gain.Low - low) < 1e-4f && MathF.Abs(over.Gain.Mid - 0.1f) < 1e-4f && MathF.Abs(over.Gain.High - 0.1f) < 1e-4f,
+                $"losses {over.Gain}: low {20 * MathF.Log10(over.Gain.Low):0.0} dB (expected {20 * MathF.Log10(low):0.0}), mid and high at the 20 dB cap");
+            Assert.True(MathF.Abs(Diffraction.BarrierDb(0, 1) - 10 * MathF.Log10(3)) < 1e-5f, "at the shadow's edge, 4.8 dB");
+
+            // A barrier 2 m thick: over its front and back top edges.
+            var thick = new AcousticSceneBuilder();
+            thick.AddBox(Box(new Vector3(0, -4, -5), new Vector3(40, 12, 2)), AcousticMaterial.Concrete);
+            Assert.True(Diffraction.Find(thick.Build(), listener, source, out var both, c), "a path over the barrier");
+            float expected2 = 2 * MathF.Sqrt(16 + 4) + 2;
+            Assert.True(both.Edges == 2 && MathF.Abs(both.Length - expected2) < 2e-3f, $"over both edges: {both.Edges} edges, {both.Length} m, expected {expected2}");
+            float c3 = Diffraction.DoubleC3(2, c / 400);
+            float low2 = MathF.Pow(10, -Diffraction.BarrierDb(expected2 - 10, c / 400, c3, Diffraction.DoubleCapDb) / 20);
+            Assert.True(MathF.Abs(both.Gain.Low - low2) < 1e-4f && both.Gain.Low < over.Gain.Low, $"double diffraction loses more: {20 * MathF.Log10(both.Gain.Low):0.0} dB low");
+
+            // A doorway from x = 1 to 2 in a tall wall: round the nearer door frame, so the sound comes from the right.
+            var door = new AcousticSceneBuilder();
+            door.AddBox(Box(new Vector3(-9.5f, 0, -5), new Vector3(21, 40, 0.2f)), AcousticMaterial.Concrete);
+            door.AddBox(Box(new Vector3(12, 0, -5), new Vector3(20, 40, 0.2f)), AcousticMaterial.Concrete);
+            Assert.True(Diffraction.Find(door.Build(), listener, source, out var through, c), "a path through the door");
+            Assert.True(MathF.Abs(through.First.X - 1) < 0.01f && through.First.Z > -5.2f && through.Length < 10.3f,
+                $"round the frame at x = 1: {through.First}, {through.Length} m (straight through the doorway's edge: {2 * MathF.Sqrt(25 + 1):0.000})");
+            Assert.True(!Diffraction.Find(door.Build(), listener, new Vector3(3, 0, -10), out _, c), "a source in plain view through the door needs none"); // the line crosses the wall at x = 1.5
+        });
+
+        Test("acoustics: a tone behind an opaque wall reaches the listener through a doorway on the right, at the diffraction loss", () =>
+        {
+            (double Left, double Right) Run(bool wall)
+            {
+                var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));
+                using var app = b.Build();
+                var w = app.World;
+                var context = w.Resource<AudioContext>();
+                ref var env = ref w.Resource<AudioEnvironment>();
+                env.Hdr = false; env.Reverb = false; env.Reflections = false;
+                var tone = new AssetRef<AudioAsset>(Guid.NewGuid());
+                context.Register(tone, AudioClip.Sine(2530, 4, amplitude: 0.5f));
+                w.Spawn(LocalTransform.Identity, new LocalToWorld(), AudioListener.Default);
+                if (wall)
+                {
+                    var opaque = new AcousticMaterial(Bands3.All(0.1f), 0, Bands3.All(0));
+                    w.Spawn(new LocalTransform { Position = new Vector3(-9.5f, 0, -5), Rotation = Quaternion.Identity, Scale = new Vector3(21, 40, 0.2f) }, new LocalToWorld(), AcousticSurface.Box(opaque));
+                    w.Spawn(new LocalTransform { Position = new Vector3(12, 0, -5), Rotation = Quaternion.Identity, Scale = new Vector3(20, 40, 0.2f) }, new LocalToWorld(), AcousticSurface.Box(opaque));
+                }
+                w.Spawn(LocalTransform.At(new Vector3(0, 0, -10)), new LocalToWorld(), AudioSource.At(tone, loop: true) with { Emitter = AudioEmitter.Default with { Reflections = false } });
+                double l = 0, r = 0; int n = 0;
+                for (int k = 0; k < 12; k++)
+                {
+                    app.Tick(1 / 60.0);
+                    var o = new float[Rate / 60 * 2];
+                    context.Engine.Render(o);
+                    if (k < 6) continue; // the path search and ramps settle
+                    for (int i = 0; i < o.Length; i += 2) { l += o[i] * o[i]; r += o[i + 1] * o[i + 1]; n++; }
+                }
+                return (Math.Sqrt(l / n), Math.Sqrt(r / n));
+            }
+            var open = Run(false);
+            var door = Run(true);
+            double ratio = Math.Sqrt((door.Left * door.Left + door.Right * door.Right) / (open.Left * open.Left + open.Right * open.Right));
+            // Round the door frame's two edges (the wall is 0.2 m thick): about 18 dB down in the mid band, 10/10.2 for distance.
+            Assert.True(ratio > 0.09 && ratio < 0.2, $"through the doorway: {20 * Math.Log10(ratio):0.0} dB against open air");
+            Assert.True(door.Right > 1.5 * door.Left && Math.Abs(open.Right - open.Left) < 1e-3, $"from the right, where the door is: left {door.Left:0.0000}, right {door.Right:0.0000}");
+        });
+
         Test("acoustics: an entity behind a wall entity is heard through the wall's transmission", () =>
         {
             var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));

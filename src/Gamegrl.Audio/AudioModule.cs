@@ -102,11 +102,13 @@ public struct AudioEnvironment
     public bool Reverb;
     /// <summary>Early reflections off acoustic surfaces, for the <see cref="AudioUpdate.ReflectionVoices"/> loudest positional voices.</summary>
     public bool Reflections;
+    /// <summary>Hidden sources heard round the edges in the way (see <see cref="Diffraction"/>).</summary>
+    public bool Diffraction;
 
     public static AudioEnvironment Default => new()
     {
         TemperatureC = 20, HumidityPercent = 50, DopplerScale = 1, Hdr = true, HdrRangeDb = 60, HdrReleaseDbPerSecond = 12, HdrFloorDb = 50, HdrHeadroomDb = 6,
-        Reverb = true, Reflections = true,
+        Reverb = true, Reflections = true, Diffraction = true,
     };
 }
 
@@ -261,7 +263,15 @@ public sealed class AudioContext : IDisposable
     /// <paramref name="loudness"/> is the source's level at the listener in dB (for HDR), counting <paramref name="volume"/>.
     /// The gain returned excludes HDR. <paramref name="forward"/> is the source's facing (zero: no cone).
     /// </summary>
-    internal SpatialParams Spatialize(Vector3 position, Vector3 velocity, Vector3 forward, in AudioEmitter emitter, float volume, Bands3 occlusion, out float loudness)
+    internal SpatialParams Spatialize(Vector3 position, Vector3 velocity, Vector3 forward, in AudioEmitter emitter, float volume, Bands3 occlusion, out float loudness) =>
+        Spatialize(position, velocity, forward, emitter, volume, occlusion, false, default, out loudness);
+
+    /// <summary>
+    /// As above, with a diffraction path round whatever blocks the direct line: the sound through the walls and the sound
+    /// round the edge add up by energy, per band, and it's heard from between their directions, weighted by energy.
+    /// </summary>
+    internal SpatialParams Spatialize(Vector3 position, Vector3 velocity, Vector3 forward, in AudioEmitter emitter, float volume, Bands3 occlusion,
+        bool diffracted, in DiffractionPath diffraction, out float loudness)
     {
         var env = Environment;
         Matrix4x4.Invert(Listener, out var toListener);
@@ -271,6 +281,21 @@ public sealed class AudioContext : IDisposable
         float distance = offset.Length();
         var direction = local.LengthSquared() > 1e-8f ? Vector3.Normalize(local) : -Vector3.UnitZ;
         var away = distance > 1e-4f ? offset / distance : Vector3.Zero; // from the listener toward the source
+        if (diffracted && occlusion.Mid < 0.999f)
+        {
+            float ratio = DistanceLaw(diffraction.Length, emitter) / MathF.Max(DistanceLaw(distance, emitter), 1e-6f);
+            var around = diffraction.Gain * ratio;
+            static float Sum(float a, float b) => MathF.Sqrt(a * a + b * b);
+            var combined = new Bands3(Sum(occlusion.Low, around.Low), Sum(occlusion.Mid, around.Mid), Sum(occlusion.High, around.High));
+            var edge = Vector3.Transform(diffraction.First, toListener);
+            if (edge.LengthSquared() > 1e-8f)
+            {
+                float wThrough = occlusion.Mid * occlusion.Mid, wAround = around.Mid * around.Mid;
+                var blend = direction * wThrough + Vector3.Normalize(edge) * wAround;
+                if (blend.LengthSquared() > 1e-12f) direction = Vector3.Normalize(blend);
+            }
+            occlusion = combined;
+        }
         float gain = Propagation.DistanceGain(distance, emitter.MinDistance, emitter.MaxDistance, emitter.Rolloff);
         if (forward != Vector3.Zero && distance > 1e-4f)
             gain *= Propagation.ConeGain(Vector3.Dot(Vector3.Normalize(forward), -away), emitter.ConeInner, emitter.ConeOuter, emitter.ConeOuterGain);
@@ -283,7 +308,8 @@ public sealed class AudioContext : IDisposable
         float spread = emitter.Radius > 0 ? Math.Clamp(emitter.Radius / MathF.Max(distance, 1e-3f), 0, 1) : 0;
         // The reverb hears the source at its own level, not its distance: the reverberant field is even through a room.
         float send = env.Reverb ? Propagation.DistanceGain(MathF.Max(distance, emitter.MinDistance), emitter.MinDistance, float.MaxValue, emitter.Rolloff) : 0;
-        float reverb = send > 0 && distance < emitter.MaxDistance ? gain / send * ListenerGain : 0;
+        // A hidden source excites the listener's room only as much as reaches it (through walls, round edges).
+        float reverb = send > 0 && distance < emitter.MaxDistance ? gain / send * ListenerGain * MathF.Min(1, occlusion.Mid) : 0;
         return new SpatialParams { Direction = direction, Gain = gain * ListenerGain, Spread = spread, Doppler = doppler, Low = low, Mid = mid, High = high, Reverb = reverb };
     }
 
@@ -392,10 +418,11 @@ internal sealed class AudioUpdate : ISystem
     private float[] _pendingLoudness = [], _pendingVolume = [];
     private Vector3[] _pendingPosition = [];
     private AudioEmitter[] _pendingEmitter = [];
+    private float[] _pendingBlocked = []; // the mid band's direct-path transmission (1: in plain view)
     private int _pendingCount, _stamp;
     /// <summary>How many positional voices get early reflections: the loudest rendered ones.</summary>
     public const int ReflectionVoices = 8;
-    private readonly ReflectionRequest[] _requests = new ReflectionRequest[ReflectionVoices];
+    private readonly ReflectionRequest[] _requests = new ReflectionRequest[ReflectionVoices * 2];
     private readonly int[] _requestIndex = new int[ReflectionVoices];
     private readonly List<VoiceHandle> _reflecting = [];
     private ReflectionResult? _paths;
@@ -415,7 +442,7 @@ internal sealed class AudioUpdate : ISystem
         _sentVolume = new float[n]; _sentPitch = new float[n]; _sentPan = new float[n];
         _lastPosition = new Vector3[n]; _hasLast = new bool[n]; _occlusion = new Bands3[n]; _occlusionVoice = new int[n];
         _pending = new VoiceHandle[n]; _pendingParams = new SpatialParams[n]; _pendingLoudness = new float[n]; _pendingVolume = new float[n];
-        _pendingPosition = new Vector3[n]; _pendingEmitter = new AudioEmitter[n];
+        _pendingPosition = new Vector3[n]; _pendingEmitter = new AudioEmitter[n]; _pendingBlocked = new float[n];
     }
 
     public void Run(World world)
@@ -426,6 +453,7 @@ internal sealed class AudioUpdate : ISystem
         audio.Hdr.RangeDb = env.HdrRangeDb; audio.Hdr.ReleaseDbPerSecond = env.HdrReleaseDbPerSecond; audio.Hdr.FloorDb = env.HdrFloorDb;
         var engine = audio.Engine;
         engine.Update();
+        _diffraction = env.Diffraction;
         float dt = world.HasResource<Time>() ? MathF.Max(world.Resource<Time>().Delta, 1e-4f) : 1 / 60f;
         UpdateListener(audio, dt);
         if (env.Reverb)
@@ -477,7 +505,7 @@ internal sealed class AudioUpdate : ISystem
                         _occlusion[slot] = occlusion; _occlusionVoice[slot] = voice.Value;
                         playing = true;
                         // Placed (and given reflections) this very frame: a short sound may be over by the next.
-                        if (positional) Queue(voice, audio.Spatialize(world4.Translation, Vector3.Zero, forward, s.Emitter, s.Volume, occlusion, out float startLoudness), startLoudness, s.Volume, world4.Translation, s.Emitter);
+                        if (positional) Queue(voice, audio.Spatialize(world4.Translation, Vector3.Zero, forward, s.Emitter, s.Volume, occlusion, out float startLoudness), startLoudness, s.Volume, world4.Translation, s.Emitter, occlusion.Mid);
                     }
                 }
                 else if (playing)
@@ -491,7 +519,9 @@ internal sealed class AudioUpdate : ISystem
                         var p = world4.Translation;
                         var velocity = _hasLast[slot] ? (p - _lastPosition[slot]) / dt : Vector3.Zero;
                         _lastPosition[slot] = p; _hasLast[slot] = true;
-                        Queue(voice, audio.Spatialize(p, velocity, forward, s.Emitter, s.Volume, Occluded(audio, voice, p, s.Emitter), out float loudness), loudness, s.Volume, p, s.Emitter);
+                        var occluded = Occluded(audio, voice, p, s.Emitter);
+                        bool around = TryDiffraction(voice, occluded, out var diffraction);
+                        Queue(voice, audio.Spatialize(p, velocity, forward, s.Emitter, s.Volume, occluded, around, diffraction, out float loudness), loudness, s.Volume, p, s.Emitter, occluded.Mid);
                     }
                     else engine.SetListenerOrientation(voice, orientation, rampSeconds: Math.Clamp(dt, 0.002f, 0.05f));
                 }
@@ -506,7 +536,9 @@ internal sealed class AudioUpdate : ISystem
         {
             var shot = shots[i];
             if (!engine.IsPlaying(shot.Voice)) { shots[i] = shots[^1]; shots.RemoveAt(shots.Count - 1); continue; }
-            Queue(shot.Voice, audio.Spatialize(shot.Position, Vector3.Zero, Vector3.Zero, shot.Emitter, shot.Volume, Occluded(audio, shot.Voice, shot.Position, shot.Emitter), out float loudness), loudness, shot.Volume, shot.Position, shot.Emitter);
+            var occluded = Occluded(audio, shot.Voice, shot.Position, shot.Emitter);
+            bool around = TryDiffraction(shot.Voice, occluded, out var diffraction);
+            Queue(shot.Voice, audio.Spatialize(shot.Position, Vector3.Zero, Vector3.Zero, shot.Emitter, shot.Volume, occluded, around, diffraction, out float loudness), loudness, shot.Volume, shot.Position, shot.Emitter, occluded.Mid);
         }
 
         // HDR: the window follows the loudest audible positional voice; then every one gets its gain.
@@ -555,13 +587,21 @@ internal sealed class AudioUpdate : ISystem
         return _occlusion[slot];
     }
 
-    private void Queue(VoiceHandle voice, in SpatialParams p, float loudness, float volume, Vector3 position, in AudioEmitter emitter)
+    private void Queue(VoiceHandle voice, in SpatialParams p, float loudness, float volume, Vector3 position, in AudioEmitter emitter, float blocked)
     {
         if (_pendingCount == _pending.Length) return;
         _pending[_pendingCount] = voice; _pendingParams[_pendingCount] = p; _pendingLoudness[_pendingCount] = loudness; _pendingVolume[_pendingCount] = volume;
-        _pendingPosition[_pendingCount] = position; _pendingEmitter[_pendingCount] = emitter;
+        _pendingPosition[_pendingCount] = position; _pendingEmitter[_pendingCount] = emitter; _pendingBlocked[_pendingCount] = blocked;
         _pendingCount++;
     }
+
+    /// <summary>The latest diffraction path round whatever hides a voice's source, when it's hidden and one was found.</summary>
+    private bool TryDiffraction(VoiceHandle voice, Bands3 occlusion, out DiffractionPath path)
+    {
+        path = default;
+        return _diffraction && occlusion.Mid < 0.999f && _paths is not null && _paths.TryDiffraction(voice.Value, out path);
+    }
+    private bool _diffraction;
 
     /// <summary>
     /// Early reflections: the loudest rendered positional voices that want them are sent to the simulator; the paths
@@ -572,9 +612,9 @@ internal sealed class AudioUpdate : ISystem
     {
         var engine = audio.Engine;
         int count = 0;
-        if (env.Reflections && audio.Scene.TriangleCount > 0)
+        if ((env.Reflections || env.Diffraction) && audio.Scene.TriangleCount > 0)
         {
-            for (int i = 0; i < _pendingCount; i++)
+            for (int i = 0; i < _pendingCount && env.Reflections; i++)
             {
                 if (!_pendingEmitter[i].Reflections || _pendingParams[i].Gain <= 0 || !engine.IsRendered(_pending[i])) continue;
                 float loudness = _pendingLoudness[i];
@@ -586,7 +626,31 @@ internal sealed class AudioUpdate : ISystem
                 count = Math.Min(count + 1, ReflectionVoices);
             }
             for (int k = 0; k < count; k++) _requests[k] = new ReflectionRequest { Key = _pending[_requestIndex[k]].Value, Source = _pendingPosition[_requestIndex[k]] };
-            audio.Simulator.SubmitReflections(audio.Scene, audio.Listener.Translation, _requests.AsSpan(0, count));
+            // Plus the hidden voices that would be loudest in plain view: they need their way round found to be heard at all
+            // (behind an opaque wall their loudness is nothing, so rank them by distance and volume alone).
+            int hidden = 0;
+            Span<int> hiddenIndex = stackalloc int[ReflectionVoices];
+            Span<float> potential = stackalloc float[ReflectionVoices];
+            var listenerAt = audio.Listener.Translation;
+            for (int i = 0; i < _pendingCount && env.Diffraction; i++)
+            {
+                if (_pendingBlocked[i] >= 0.999f) continue;
+                bool listed = false;
+                for (int k = 0; k < count && !listed; k++) listed = _requestIndex[k] == i;
+                if (listed) continue;
+                ref readonly var emitter = ref _pendingEmitter[i];
+                float open = Propagation.DistanceGain(Vector3.Distance(_pendingPosition[i], listenerAt), emitter.MinDistance, emitter.MaxDistance, emitter.Rolloff) * _pendingVolume[i];
+                if (open <= 0) continue;
+                float score = emitter.LoudnessDb + 20 * MathF.Log10(open);
+                int at = hidden;
+                while (at > 0 && potential[at - 1] < score) at--;
+                if (at >= ReflectionVoices) continue;
+                for (int k = Math.Min(hidden, ReflectionVoices - 1); k > at; k--) { hiddenIndex[k] = hiddenIndex[k - 1]; potential[k] = potential[k - 1]; }
+                hiddenIndex[at] = i; potential[at] = score;
+                hidden = Math.Min(hidden + 1, ReflectionVoices);
+            }
+            for (int k = 0; k < hidden; k++) _requests[count + k] = new ReflectionRequest { Key = _pending[hiddenIndex[k]].Value, Source = _pendingPosition[hiddenIndex[k]] };
+            audio.Simulator.SubmitReflections(audio.Scene, audio.Listener.Translation, _requests.AsSpan(0, count + hidden), Propagation.SpeedOfSound(env.TemperatureC));
             if (audio.Simulator.TryTakeReflections(out var result)) _paths = result;
         }
 

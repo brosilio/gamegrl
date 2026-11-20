@@ -14,6 +14,13 @@ public struct AcousticPlane
     public readonly Vector3 Mirror(Vector3 p) => p - 2 * Distance(p) * Normal;
 }
 
+/// <summary>An edge sound can diffract around, with the normals of the faces meeting at it (the same twice for an open edge).</summary>
+public struct DiffractionEdge
+{
+    public Vector3 A, B, NormalA, NormalB;
+    public bool Open;
+}
+
 /// <summary>A ray's hit: distance along it, the triangle, its unit normal (as wound) and its material.</summary>
 public struct AcousticHit
 {
@@ -48,6 +55,7 @@ public sealed class AcousticScene
     private int _nodeCount;
     private AcousticPlane[]? _planes;
     private int[] _planeOf = [];
+    private DiffractionEdge[]? _edges;
 
     public int TriangleCount => _a.Length;
     public float SurfaceArea { get; }
@@ -102,6 +110,56 @@ public sealed class AcousticScene
             area += a;
         }
         return area > 0 ? sum * (1 / area) : default;
+    }
+
+    /// <summary>
+    /// The edges sound can bend around: edges shared by two triangles that meet at a convex corner (not coplanar), and
+    /// open edges belonging to one triangle only (the top of a free-standing wall made of a quad). Computed on first use.
+    /// </summary>
+    public ReadOnlySpan<DiffractionEdge> Edges
+    {
+        get
+        {
+            if (_edges is not null) return _edges;
+            var shared = new Dictionary<(long, long), (int First, int Second, int Count)>();
+            long Key(Vector3 v) => ((long)MathF.Round(v.X * 1000) * 73856093) ^ ((long)MathF.Round(v.Y * 1000) * 19349663) ^ ((long)MathF.Round(v.Z * 1000) * 83492791);
+            Span<Vector3> corner = stackalloc Vector3[3];
+            for (int t = 0; t < _a.Length; t++)
+            {
+                corner[0] = _a[t]; corner[1] = _a[t] + _e1[t]; corner[2] = _a[t] + _e2[t];
+                for (int k = 0; k < 3; k++)
+                {
+                    long a = Key(corner[k]), b = Key(corner[(k + 1) % 3]);
+                    var key = a < b ? (a, b) : (b, a);
+                    shared[key] = shared.TryGetValue(key, out var e) ? (e.First, e.Count == 1 ? t : e.Second, e.Count + 1) : (t, -1, 1);
+                }
+            }
+            var edges = new List<DiffractionEdge>();
+            var seen = new HashSet<(long, long)>();
+            for (int t = 0; t < _a.Length; t++)
+            {
+                corner[0] = _a[t]; corner[1] = _a[t] + _e1[t]; corner[2] = _a[t] + _e2[t];
+                for (int k = 0; k < 3; k++)
+                {
+                    Vector3 p = corner[k], q = corner[(k + 1) % 3];
+                    long a = Key(p), b = Key(q);
+                    var key = a < b ? (a, b) : (b, a);
+                    if (!seen.Add(key)) continue;
+                    var info = shared[key];
+                    if (info.Count == 1) { edges.Add(new DiffractionEdge { A = p, B = q, NormalA = _normals[t], NormalB = _normals[t], Open = true }); continue; }
+                    if (info.Count != 2) continue;
+                    int other = info.First == t ? info.Second : info.First;
+                    var na = _normals[t]; var nb = _normals[other];
+                    if (Vector3.Dot(na, nb) > 0.999f) continue; // coplanar: a face's own diagonal
+                    // Convex when the other triangle lies behind this one's plane (outward normals, as boxes and closed meshes wind).
+                    var otherThird = (_a[other] + (_a[other] + _e1[other]) + (_a[other] + _e2[other])) - p - q;
+                    if (Vector3.Dot(na, otherThird - p) > 1e-5f) continue;
+                    edges.Add(new DiffractionEdge { A = p, B = q, NormalA = na, NormalB = nb });
+                }
+            }
+            _edges = edges.ToArray();
+            return _edges;
+        }
     }
 
     /// <summary>The plane a triangle lies in (an index into <see cref="Planes"/>).</summary>
