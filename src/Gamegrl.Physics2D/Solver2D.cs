@@ -18,7 +18,9 @@ internal struct BodyState
 
 public sealed partial class PhysicsWorld2D
 {
-    private const int Colors = 24, Overflow = Colors;
+    // Box2D's graph: 23 colours and an overflow; constraints between two dynamic bodies take the first 20, constraints
+    // with one dynamic body take colours from the end (solved last, so they get the final say).
+    private const int Colors = 23, Overflow = Colors, DynamicColors = 20;
     // Colours with fewer constraints than this run inline: dispatching to workers costs more than it saves.
     private const int ParallelBatch = 128;
 
@@ -74,14 +76,15 @@ public sealed partial class PhysicsWorld2D
     {
         w.States = States.Clone(); w._stepMass = _stepMass.Clone(); w._awake = (int[])_awake.Clone(); w._justSleptList = (int[])_justSleptList.Clone(); w._bodyColors = (uint[])_bodyColors.Clone(); w._sleepVelocity = (float[])_sleepVelocity.Clone(); w._bullets = new int[_bullets.Length];
         w._colorLists = new int[Colors + 1][]; for (int k = 0; k <= Colors; k++) w._colorLists[k] = (int[])_colorLists[k].Clone();
-        w._colorCounts = (int[])_colorCounts.Clone(); w._colorStart = (int[])_colorStart.Clone(); w._colorBatchStart = (int[])_colorBatchStart.Clone(); w._order = (int[])_order.Clone(); w._constraints = (ContactConstraint[])_constraints.Clone();
+        w._colorCounts = (int[])_colorCounts.Clone(); w._colorJointCounts = (int[])_colorJointCounts.Clone(); w._jointColorStart = (int[])_jointColorStart.Clone(); w._jointOrder = (int[])_jointOrder.Clone();
+        w._colorJoints = new int[Colors + 1][]; for (int k = 0; k <= Colors; k++) w._colorJoints[k] = (int[])_colorJoints[k].Clone(); w._colorStart = (int[])_colorStart.Clone(); w._colorBatchStart = (int[])_colorBatchStart.Clone(); w._order = (int[])_order.Clone(); w._constraints = (ContactConstraint[])_constraints.Clone();
         w._wide = _wide.Clone(); w._wideCold = _wideCold.Clone();
         w._segments = (Segment[])_segments.Clone(); w._claims = new int[_claims.Length]; w._barrier = new SpinBarrier();
     }
 
     // ---------------------------------------------------------------- solve
 
-    private enum Stage : byte { BeginBodies, Finalize, Prepare, IntegrateVelocities, WarmStart, Solve, IntegratePositions, Relax, Restitution, Store, Serial, Pack, WideWarmStart, WideSolve, WideRelax, WideRestitution, WideStore }
+    private enum Stage : byte { PrepareJoints, BeginBodies, Finalize, Prepare, IntegrateVelocities, WarmStart, Solve, IntegratePositions, Relax, Restitution, Store, Serial, Pack, WideWarmStart, WideSolve, WideRelax, WideRestitution, WideStore }
     private enum SerialWork : byte { PrepareJoints, WarmStart, Solve, Relax, Restitution, Store, Bullets }
 
     /// <summary>One step of the solver's schedule: a stage over a range (a colour's constraints, or the awake bodies), or serial work.</summary>
@@ -90,6 +93,7 @@ public sealed partial class PhysicsWorld2D
         public Stage Stage;
         public SerialWork Serial;
         public int Start, Count, Block;
+        public int JointStart, JointCount; // a colour's joints, solved alongside its contact batches
     }
 
     private Segment[] _segments = new Segment[256];
@@ -99,18 +103,19 @@ public sealed partial class PhysicsWorld2D
     private float _h, _invH, _invDt, _dt;
     private float[] _sleepVelocity = [];
 
-    private void AddSegment(Stage stage, int start, int count, int block, SerialWork serial = default)
+    private void AddSegment(Stage stage, int start, int count, int block, SerialWork serial = default, int jointStart = 0, int jointCount = 0)
     {
-        if (stage != Stage.Serial && count == 0) return;
+        if (stage != Stage.Serial && count == 0 && jointCount == 0) return;
         if (_segmentCount == _segments.Length) { Array.Resize(ref _segments, _segments.Length * 2); Array.Resize(ref _claims, _segments.Length); }
-        _segments[_segmentCount++] = new Segment { Stage = stage, Start = start, Count = count, Block = block, Serial = serial };
+        _segments[_segmentCount++] = new Segment { Stage = stage, Start = start, Count = count, Block = block, Serial = serial, JointStart = jointStart, JointCount = jointCount };
     }
 
-    private void AddColors(Stage stage, SerialWork serial)
+    private void AddColors(Stage stage, SerialWork serial, bool joints = true)
     {
-        // Colours run as batches of four constraints (SolverWide).
+        // Colours run as batches of four contacts (SolverWide) beside the colour's joints.
         for (int color = 0; color < Colors; color++)
-            AddSegment(stage, _colorBatchStart[color], _colorBatchStart[color + 1] - _colorBatchStart[color], 8);
+            AddSegment(stage, _colorBatchStart[color], _colorBatchStart[color + 1] - _colorBatchStart[color], 8, default,
+                _jointColorStart[color], joints ? _jointColorStart[color + 1] - _jointColorStart[color] : 0);
         // Joints and the constraints no colour could take share bodies: one thread does them, in order.
         AddSegment(Stage.Serial, 0, 0, 0, serial);
     }
@@ -138,8 +143,12 @@ public sealed partial class PhysicsWorld2D
             if (seg.Stage == Stage.Serial) { if (thread == 0) RunSerial(seg.Serial); }
             else
             {
-                int start = (int)((long)seg.Count * thread / threads), end = (int)((long)seg.Count * (thread + 1) / threads);
-                if (end > start) RunRange(seg.Stage, seg.Start + start, seg.Start + end);
+                // Joints first, then contact batches, split as one range.
+                int total = seg.Count + seg.JointCount, joints = seg.JointCount;
+                int start = (int)((long)total * thread / threads), end = (int)((long)total * (thread + 1) / threads);
+                if (start < joints) RunJoints(seg.Stage, seg.JointStart + start, seg.JointStart + Math.Min(end, joints));
+                int bs = Math.Max(start, joints) - joints, be = end - joints;
+                if (be > bs) RunRange(seg.Stage, seg.Start + bs, seg.Start + be);
             }
             _barrier.Wait();
             if (timed) StageTicks![(int)seg.Stage] += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
@@ -183,15 +192,28 @@ public sealed partial class PhysicsWorld2D
         }
     }
 
+    /// <summary>A range of the colour-ordered joints for a stage (prepare is over all of them).</summary>
+    private void RunJoints(Stage stage, int start, int end)
+    {
+        switch (stage)
+        {
+            case Stage.PrepareJoints: for (int k = start; k < end; k++) PrepareJoint(_jointOrder[k]); break;
+            case Stage.WideWarmStart: for (int k = start; k < end; k++) WarmStartJoint(_jointOrder[k]); break;
+            case Stage.WideSolve: for (int k = start; k < end; k++) SolveJoint(_jointOrder[k], true); break;
+            case Stage.WideRelax: for (int k = start; k < end; k++) SolveJoint(_jointOrder[k], false); break;
+        }
+    }
+
     private void RunSerial(SerialWork work)
     {
         int start = _colorStart[Overflow], end = _colorStart[Overflow + 1];
+        int js = _jointColorStart[Overflow], je = _jointColorStart[Overflow + 1];
         switch (work)
         {
-            case SerialWork.PrepareJoints: PrepareJoints(_h); break;
-            case SerialWork.WarmStart: WarmStartJoints(); RunRange(Stage.WarmStart, start, end); break;
-            case SerialWork.Solve: SolveJoints(_h, _invH, true); RunRange(Stage.Solve, start, end); break;
-            case SerialWork.Relax: SolveJoints(_h, _invH, false); RunRange(Stage.Relax, start, end); break;
+            case SerialWork.PrepareJoints: break;
+            case SerialWork.WarmStart: RunJoints(Stage.WideWarmStart, js, je); RunRange(Stage.WarmStart, start, end); break;
+            case SerialWork.Solve: RunJoints(Stage.WideSolve, js, je); RunRange(Stage.Solve, start, end); break;
+            case SerialWork.Relax: RunJoints(Stage.WideRelax, js, je); RunRange(Stage.Relax, start, end); break;
             case SerialWork.Restitution: RunRange(Stage.Restitution, start, end); break;
             case SerialWork.Store: RunRange(Stage.Store, start, end); break;
             case SerialWork.Bullets: SolveBullets(); break;
@@ -209,7 +231,6 @@ public sealed partial class PhysicsWorld2D
         float contactHertz = Math.Min(s.ContactHertz, 0.25f * invH);
         _contactSoft = Softness.Make(contactHertz, s.ContactDampingRatio, h);
         _staticSoft = Softness.Make(2 * contactHertz, s.ContactDampingRatio, h);
-        _jointSoft = Softness.Make(2 * contactHertz, s.JointDampingRatio, h);
 
         using (ColorMarker.Scope()) { ColorContacts(); SizeBatches(); }
 
@@ -218,7 +239,7 @@ public sealed partial class PhysicsWorld2D
         // Coloured constraints are prepared straight into their batches (Pack); only the overflow uses the scalar form.
         AddSegment(Stage.Prepare, _colorStart[Overflow], _colorStart[Overflow + 1] - _colorStart[Overflow], 64);
         AddSegment(Stage.Pack, 0, _wideCount, 16);
-        AddSegment(Stage.Serial, 0, 0, 0, SerialWork.PrepareJoints);
+        AddSegment(Stage.PrepareJoints, 0, 0, 16, default, 0, _jointOrderCount);
         for (int sub = 0; sub < substeps; sub++)
         {
             AddSegment(Stage.IntegrateVelocities, 0, _awakeCount, 128);
@@ -227,7 +248,7 @@ public sealed partial class PhysicsWorld2D
             AddSegment(Stage.IntegratePositions, 0, _awakeCount, 128);
             AddColors(Stage.WideRelax, SerialWork.Relax);
         }
-        AddColors(Stage.WideRestitution, SerialWork.Restitution);
+        AddColors(Stage.WideRestitution, SerialWork.Restitution, joints: false);
         AddSegment(Stage.WideStore, 0, _wideCount, 16);
         AddSegment(Stage.Serial, 0, 0, 0, SerialWork.Store);
         AddSegment(Stage.Finalize, 0, _awakeCount, 256);
@@ -235,7 +256,7 @@ public sealed partial class PhysicsWorld2D
         Array.Clear(_claims, 0, _segmentCount);
 
         // Threads for the work there is: a few hundred constraints per thread, or barriers cost more than they save.
-        int threads = Jobs is { } jobs ? Math.Clamp(Math.Max(_constraintCount, _awakeCount) / 384, 1, jobs.WorkerCount + 1) : 1;
+        int threads = Jobs is { } jobs ? Math.Clamp(Math.Max(_constraintCount + _jointOrderCount, _awakeCount) / 384, 1, jobs.WorkerCount + 1) : 1;
         if (MaxThreads > 0) threads = Math.Min(threads, MaxThreads);
         _barrier.Reset(threads);
         _threads = threads;
@@ -245,6 +266,7 @@ public sealed partial class PhysicsWorld2D
             if (threads > 1) Jobs!.RunOnThreads(threads, ref job);
             else { _threads = 1; RunSchedule(0); }
         }
+        CollectJointEvents();
 
     }
 
@@ -281,7 +303,7 @@ public sealed partial class PhysicsWorld2D
         if (!Settings.EnableSleep || !AllowSleep[b] || sleepVelocity > SleepThreshold[b]) Continuous(b, maxDelta, maxVelocity, _dt);
     }
 
-    private Softness _contactSoft, _staticSoft, _jointSoft;
+    private Softness _contactSoft, _staticSoft;
     private static readonly ProfileMarker ColorMarker = ProfileMarker.Get("Physics2D.Color", ProfileCategory.Engine);
     private static readonly ProfileMarker ScheduleMarker = ProfileMarker.Get("Physics2D.Constraints", ProfileCategory.Engine);
 
@@ -312,6 +334,11 @@ public sealed partial class PhysicsWorld2D
     private uint[] _bodyColors = []; // per body: bit k set when one of its graph contacts has colour k
     private int[][] _colorLists = NewColorLists();
     private int[] _colorCounts = new int[Colors + 1];
+    private int[][] _colorJoints = NewColorLists();
+    private int[] _colorJointCounts = new int[Colors + 1];
+    private int[] _jointColorStart = new int[Colors + 2];
+    private int[] _jointOrder = new int[16];
+    private int _jointOrderCount;
     private bool _recolor = true;
 
     private static int[][] NewColorLists()
@@ -329,19 +356,42 @@ public sealed partial class PhysicsWorld2D
         return (Types[a] == BodyType.Dynamic && Awake[a]) || (Types[b] == BodyType.Dynamic && Awake[b]);
     }
 
-    private void AddToGraph(int c)
+    /// <summary>A colour for a constraint between two bodies (Box2D's policy), marking it on their dynamic, awake bodies; Overflow when none is free.</summary>
+    private int AssignColor(int a, int b)
     {
-        ref var contact = ref Contacts[c];
-        int a = contact.BodyA, b = contact.BodyB;
-        bool dynA = Types[a] == BodyType.Dynamic && Awake[a], dynB = Types[b] == BodyType.Dynamic && Awake[b];
-        // First colour neither dynamic body has (bits past Colors are always free, so a full set lands on Overflow).
-        uint taken = (dynA ? _bodyColors[a] : 0) | (dynB ? _bodyColors[b] : 0);
-        int color = Math.Min(BitOperations.TrailingZeroCount(~taken), Overflow);
+        bool dynA = a >= 0 && Types[a] == BodyType.Dynamic && Awake[a], dynB = b >= 0 && Types[b] == BodyType.Dynamic && Awake[b];
+        int color = Overflow;
+        if (dynA && dynB)
+        {
+            int c = BitOperations.TrailingZeroCount(~(_bodyColors[a] | _bodyColors[b]));
+            if (c < DynamicColors) color = c;
+        }
+        else if (dynA || dynB)
+        {
+            // From the last colour down to 1.
+            uint free = ~_bodyColors[dynA ? a : b] & (((1u << Colors) - 1) & ~1u);
+            if (free != 0) color = 31 - BitOperations.LeadingZeroCount(free);
+        }
         if (color < Colors)
         {
             if (dynA) _bodyColors[a] |= 1u << color;
             if (dynB) _bodyColors[b] |= 1u << color;
         }
+        return color;
+    }
+
+    /// <summary>Clear a constraint's colour from its bodies (they're as they were when it was added: any change since would have scheduled a recolour).</summary>
+    private void ReleaseColor(int color, int a, int b)
+    {
+        if (color >= Colors) return;
+        if (a >= 0 && Types[a] == BodyType.Dynamic && Awake[a]) _bodyColors[a] &= ~(1u << color);
+        if (b >= 0 && Types[b] == BodyType.Dynamic && Awake[b]) _bodyColors[b] &= ~(1u << color);
+    }
+
+    private void AddToGraph(int c)
+    {
+        ref var contact = ref Contacts[c];
+        int color = AssignColor(contact.BodyA, contact.BodyB);
         ref var list = ref _colorLists[color];
         ref int count = ref _colorCounts[color];
         if (count == list.Length) Array.Resize(ref list, count * 2);
@@ -354,13 +404,7 @@ public sealed partial class PhysicsWorld2D
     {
         ref var contact = ref Contacts[c];
         int color = contact.GraphColor - 1;
-        if (color < Colors)
-        {
-            // Bodies are as they were when it was added (any change since would have scheduled a recolour).
-            int a = contact.BodyA, b = contact.BodyB;
-            if (Types[a] == BodyType.Dynamic && Awake[a]) _bodyColors[a] &= ~(1u << color);
-            if (Types[b] == BodyType.Dynamic && Awake[b]) _bodyColors[b] &= ~(1u << color);
-        }
+        ReleaseColor(color, contact.BodyA, contact.BodyB);
         var list = _colorLists[color];
         int last = list[--_colorCounts[color]];
         list[contact.GraphSlot] = last;
@@ -373,7 +417,10 @@ public sealed partial class PhysicsWorld2D
         Array.Clear(_bodyColors, 0, _bodyHigh);
         Array.Clear(_colorCounts);
         // Every contact leaves the graph (sleeping ones may still hold a stale colour); the solvable are awake.
+        Array.Clear(_colorJointCounts);
         for (int c = 0; c < _contactHigh; c++) Contacts[c].GraphColor = 0;
+        for (int j = 0; j < _jointHigh; j++) _joints[j].GraphColor = 0;
+        for (int j = 0; j < _jointHigh; j++) if (JointSolvable(j)) AddJointToGraph(j);
         for (int k = 0; k < _awakeContactCount; k++)
         {
             int c = _awakeContacts[k];
@@ -401,6 +448,13 @@ public sealed partial class PhysicsWorld2D
         if (_constraints.Length < _colorCounts[Overflow]) _constraints = new ContactConstraint[_colorCounts[Overflow] * 2];
         for (int k = 0; k <= Overflow; k++) Array.Copy(_colorLists[k], 0, _order, _colorStart[k], _colorCounts[k]);
         _constraintCount = n;
+        // Joints, colour by colour, the same way.
+        int jn = 0;
+        for (int k = 0; k <= Overflow; k++) { _jointColorStart[k] = jn; jn += _colorJointCounts[k]; }
+        _jointColorStart[Overflow + 1] = jn;
+        if (_jointOrder.Length < jn) _jointOrder = new int[jn * 2];
+        for (int k = 0; k <= Overflow; k++) Array.Copy(_colorJoints[k], 0, _jointOrder, _jointColorStart[k], _colorJointCounts[k]);
+        _jointOrderCount = jn;
     }
 
     private void Prepare(ref ContactConstraint cc)

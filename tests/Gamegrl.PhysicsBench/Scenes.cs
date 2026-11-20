@@ -16,7 +16,7 @@ internal abstract class Scene
     protected static BodyDef2D Static(Vector2 p) => BodyDef2D.Static(p);
     protected static Shape Box(float hx, float hy) => Shape.Box(hx, hy);
     protected static Shape OffsetBox(float hx, float hy, Vector2 center) => Shape.Box(new Vector2(hx, hy), center, Rot.Identity);
-    protected static JointDef2D Revolute(Vector2 anchorA, Vector2 anchorB) => new() { Type = JointType2D.Revolute, AnchorA = anchorA, AnchorB = anchorB, DampingRatio = 2 };
+    protected static JointDef2D Revolute(Vector2 anchorA, Vector2 anchorB) => JointDef2D.Revolute(anchorA, anchorB);
 }
 
 internal sealed record SceneInfo(string Name, int Steps, Func<Scene> Make);
@@ -377,7 +377,7 @@ internal sealed class SleepScene : Scene
         for (int p = 0; p < PyramidCount; p++)
         {
             if (w.IsAwake(_a[p])) continue;
-            int joint = w.CreateJoint(default, _a[p], _b[p], new JointDef2D { Type = JointType2D.Filter });
+            int joint = w.CreateJoint(default, _a[p], _b[p], JointDef2D.Default(JointType2D.Filter));
             w.DestroyJoint(joint);
             break;
         }

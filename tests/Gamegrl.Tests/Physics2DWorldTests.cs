@@ -186,7 +186,7 @@ internal static class Physics2DWorldTests
             Assert.Equal(0, w.AwakeContactCount); // nothing between sleeping bodies is collided
             // A joint made and destroyed inside the left pile wakes it alone (Box2D's sleep benchmark) and leaves its
             // island needing a split; it still falls asleep again.
-            int j = w.CreateJoint(default, left[0], left[1], new JointDef2D { Type = JointType2D.Filter });
+            int j = w.CreateJoint(default, left[0], left[1], JointDef2D.Default(JointType2D.Filter));
             w.DestroyJoint(j);
             Assert.True(left.All(w.IsAwake) && right.All(b => !w.IsAwake(b)), "only the left pile woke");
             Steps(w, 120);

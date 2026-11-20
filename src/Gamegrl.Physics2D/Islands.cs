@@ -290,6 +290,11 @@ public sealed partial class PhysicsWorld2D
             for (int key = _contactHead[island.Bodies[k]]; key >= 0; key = NextContactKey(key))
                 if (Links[key >> 1].AwakeIndex < 0) AddAwakeContact(key >> 1);
         if (_recolor) return;
+        for (int k = 0; k < island.JointCount; k++)
+        {
+            int j = island.Joints[k];
+            if (_joints[j].GraphColor == 0 && JointSolvable(j)) AddJointToGraph(j);
+        }
         for (int k = 0; k < island.ContactCount; k++)
         {
             int c = island.Contacts[k];
@@ -304,8 +309,12 @@ public sealed partial class PhysicsWorld2D
         if (island.ConstraintRemoveCount > 0 && island.BodyCount > 1) return false;
         // Out of the graph while the bodies still count as awake (their colour bits clear with them).
         if (!_recolor)
+        {
             for (int k = 0; k < island.ContactCount; k++)
                 if (Contacts[island.Contacts[k]].GraphColor != 0) RemoveFromGraph(island.Contacts[k]);
+            for (int k = 0; k < island.JointCount; k++)
+                if (_joints[island.Joints[k]].GraphColor != 0) RemoveJointFromGraph(island.Joints[k]);
+        }
         for (int k = 0; k < island.BodyCount; k++)
         {
             int b = island.Bodies[k];

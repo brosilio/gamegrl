@@ -74,8 +74,9 @@ public struct Collider2D : IComponent
 }
 
 /// <summary>
-/// A joint between two bodies' entities (or, for <see cref="JointType2D.Target"/>, pulling <see cref="BodyB"/> toward
-/// <see cref="JointDef2D.Target"/>). Put it on its own entity or on either body's; its settings can change any frame.
+/// A joint between two bodies' entities; with no <see cref="BodyA"/> it attaches <see cref="BodyB"/> to the world (frame A
+/// is then a world pose: <see cref="JointDef2D.Target"/> drags a body). Put it on its own entity or on either body's; its
+/// settings can change any frame.
 /// </summary>
 public struct Joint2D : IComponent
 {
@@ -83,7 +84,7 @@ public struct Joint2D : IComponent
     public JointDef2D Def;
     [NoSerialize] public int Handle; // joint index + 1
 
-    public static Joint2D Default => new() { Def = new JointDef2D { Type = JointType2D.Revolute, DampingRatio = 0.7f } };
+    public static Joint2D Default => new() { Def = JointDef2D.Revolute(default, default) };
 }
 
 /// <summary>
@@ -254,11 +255,11 @@ internal sealed class Physics2DStep : ISystem
                 ref var joint = ref joints[r];
                 int j = joint.Handle - 1;
                 int bodyA = BodyOf(world, physics, joint.BodyA), bodyB = BodyOf(world, physics, joint.BodyB);
-                bool valid = bodyB >= 0 && (bodyA >= 0 || joint.Def.Type == JointType2D.Target);
+                bool valid = bodyB >= 0 && (bodyA >= 0 || joint.BodyA.IsNull);
                 if (physics.IsJointAlive(j) && physics.OwnerOfJoint(j) == entities[r])
                 {
                     var (ja, jb) = physics.JointBodies(j);
-                    if (valid && jb == bodyB && (ja == bodyA || joint.Def.Type == JointType2D.Target)) { physics.UpdateJoint(j, joint.Def); Stamp(ref _jointStamps, j, stamp); continue; }
+                    if (valid && jb == bodyB && ja == bodyA && physics.JointDef(j).Type == joint.Def.Type) { physics.UpdateJoint(j, joint.Def); Stamp(ref _jointStamps, j, stamp); continue; }
                     physics.DestroyJoint(j);
                 }
                 joint.Handle = valid ? physics.CreateJoint(entities[r], bodyA, bodyB, joint.Def) + 1 : 0;

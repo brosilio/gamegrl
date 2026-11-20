@@ -230,26 +230,26 @@ internal static class Physics2DTests
             {
                 var anchor = Body(w, new Vector2(0, 10), Collider2D.Box(new Vector2(0.2f, 0.2f)), RigidBody2D.Static);
                 bob = Body(w, new Vector2(length, 10), Collider2D.Circle(0.1f));
-                w.Spawn(new Joint2D { BodyA = anchor, BodyB = bob, Def = new JointDef2D { Type = JointType2D.Revolute, AnchorA = Vector2.Zero, AnchorB = new Vector2(-length, 0) } });
+                w.Spawn(new Joint2D { BodyA = anchor, BodyB = bob, Def = JointDef2D.Revolute(Vector2.Zero, new Vector2(-length, 0)) });
 
                 var hook = Body(w, new Vector2(10, 10), Collider2D.Box(new Vector2(0.2f, 0.2f)), RigidBody2D.Static);
                 springy = Body(w, new Vector2(10, 5), Collider2D.Circle(0.2f)); // stretched 2 m past its rest length
-                w.Spawn(new Joint2D { BodyA = hook, BodyB = springy, Def = new JointDef2D { Type = JointType2D.Distance, Length = 3, MinLength = 3, MaxLength = 3, Hertz = 2, DampingRatio = 0.1f } });
+                w.Spawn(new Joint2D { BodyA = hook, BodyB = springy, Def = JointDef2D.Distance(Vector2.Zero, Vector2.Zero, 3) with { EnableSpring = true, Hertz = 2, DampingRatio = 0.1f } });
 
                 var rail = Body(w, new Vector2(20, 10), Collider2D.Box(new Vector2(0.2f, 0.2f)), RigidBody2D.Static);
                 slider = Body(w, new Vector2(20, 10), Collider2D.Box(new Vector2(0.4f, 0.4f)));
-                w.Spawn(new Joint2D { BodyA = rail, BodyB = slider, Def = new JointDef2D { Type = JointType2D.Prismatic, Axis = Vector2.Normalize(new Vector2(1, -1)), EnableLimit = true, Lower = -1, Upper = 2 } });
+                w.Spawn(new Joint2D { BodyA = rail, BodyB = slider, Def = JointDef2D.Prismatic(Vector2.Zero, Vector2.Zero, new Vector2(1, -1)) with { EnableLimit = true, Lower = -1, Upper = 2 } });
 
                 var axle = Body(w, new Vector2(30, 10), Collider2D.Box(new Vector2(0.2f, 0.2f)), RigidBody2D.Static);
                 wheel = Body(w, new Vector2(30, 10), Collider2D.Circle(0.5f));
-                w.Spawn(new Joint2D { BodyA = axle, BodyB = wheel, Def = new JointDef2D { Type = JointType2D.Revolute, EnableMotor = true, MotorSpeed = 3, MaxMotorForce = 100 } });
+                w.Spawn(new Joint2D { BodyA = axle, BodyB = wheel, Def = JointDef2D.Revolute(Vector2.Zero, Vector2.Zero) with { EnableMotor = true, MotorSpeed = 3, MaxMotorForce = 100 } });
 
                 var wall = Body(w, new Vector2(40, 10), Collider2D.Box(new Vector2(0.2f, 2)), RigidBody2D.Static);
                 cantilever = Body(w, new Vector2(41.1f, 10), Collider2D.Box(new Vector2(2, 0.2f)));
-                w.Spawn(new Joint2D { BodyA = wall, BodyB = cantilever, Def = new JointDef2D { Type = JointType2D.Weld, AnchorA = new Vector2(0.1f, 0), AnchorB = new Vector2(-1, 0) } });
+                w.Spawn(new Joint2D { BodyA = wall, BodyB = cantilever, Def = JointDef2D.Weld(new Vector2(0.1f, 0), new Vector2(-1, 0)) });
 
                 dragged = Body(w, new Vector2(50, 0.5f), Collider2D.Box(Vector2.One), RigidBody2D.Default with { NeverSleep = true });
-                w.Spawn(new Joint2D { BodyB = dragged, Def = new JointDef2D { Type = JointType2D.Target, Target = new Vector2(55, 5), Hertz = 5, DampingRatio = 0.7f, MaxForce = 1000 } });
+                w.Spawn(new Joint2D { BodyB = dragged, Def = JointDef2D.Target(new Vector2(55, 5), Vector2.Zero, 5, 0.7f, 1000) });
             });
             using (app)
             {
