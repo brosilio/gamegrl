@@ -15,4 +15,5 @@ Physics2DTests.Register();
 Physics2DWorldTests.Register();
 AudioTests.Register();
 AudioSpatialTests.Register();
+AcousticsTests.Register();
 return Harness.Run(args.Length > 0 ? args[0] : null);

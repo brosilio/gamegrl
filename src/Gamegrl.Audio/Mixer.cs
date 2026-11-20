@@ -48,6 +48,14 @@ internal struct Ramp
         Step = (target - Current) / frames;
     }
 
+    /// <summary>Moves on by <paramref name="frames"/> steps at once.</summary>
+    public void Advance(int frames)
+    {
+        if (Remaining == 0) return;
+        if (frames >= Remaining) { Current = Target; Remaining = 0; }
+        else { Current += Step * frames; Remaining -= frames; }
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public float Next()
     {
@@ -368,7 +376,7 @@ internal sealed class Mixer
             {
                 float mono = 0;
                 for (int c = 0; c < clipChannels; c++) mono += x[c];
-                block[f] = v.Eq.Process(mono * toMono) * gain;
+                block[f] = mono * toMono * gain;
             }
             else for (int c = 0; c < inputs; c++) block[c * MaxBlock + f] = x[c] * gain;
             v.Pos += v.Step;
@@ -376,6 +384,7 @@ internal sealed class Mixer
         }
 
         int count = f - first;
+        if (positional && count > 0) v.Eq.Process(block.AsSpan(first, count));
         if (count > 0)
         {
             var buffer = _buses[v.Bus].Buffer;

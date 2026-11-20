@@ -1,5 +1,6 @@
 using System.Numerics;
 using Gamegrl.Assets;
+using Gamegrl.Audio.Acoustics;
 using Gamegrl.Audio.Devices;
 using Gamegrl.Audio.Spatial;
 
@@ -32,10 +33,12 @@ public struct AudioEmitter
     [Range(0, 1)] public float ConeOuterGain;
     [Range(0, 50)] public float Radius;
     [Range(0, 4)] public float DopplerScale;
+    /// <summary>Acoustic surfaces between it and the listener muffle it (see <see cref="AcousticSurface"/>).</summary>
+    public bool Occlusion;
 
     public static AudioEmitter Default => new()
     {
-        MinDistance = 1, MaxDistance = 500, Rolloff = 1, LoudnessDb = 80, ConeInner = 360, ConeOuter = 360, ConeOuterGain = 1, DopplerScale = 1,
+        MinDistance = 1, MaxDistance = 500, Rolloff = 1, LoudnessDb = 80, ConeInner = 360, ConeOuter = 360, ConeOuterGain = 1, DopplerScale = 1, Occlusion = true,
     };
 }
 
@@ -121,6 +124,8 @@ public sealed class AudioContext : IDisposable
 
     public AudioEngine Engine { get; }
     public HdrWindow Hdr { get; } = new();
+    /// <summary>The acoustic geometry, rebuilt from <see cref="AcousticSurface"/>s when they change.</summary>
+    public AcousticScene Scene { get; internal set; } = AcousticScene.Empty;
     /// <summary>The listener's world transform as of the last audio update (identity before one is found).</summary>
     public Matrix4x4 Listener { get; internal set; } = Matrix4x4.Identity;
     internal float ListenerGain = 1;
@@ -166,7 +171,7 @@ public sealed class AudioContext : IDisposable
     public VoiceHandle PlayAt(AssetRef<AudioAsset> asset, Vector3 position, in AudioEmitter emitter, in PlayOptions options)
     {
         if (Clip(asset) is not { } clip) return default;
-        var spatial = Placed(position, Vector3.Zero, Vector3.Zero, emitter, options.Gain, starting: true);
+        var spatial = Placed(position, Vector3.Zero, Vector3.Zero, emitter, options.Gain, Occlusion(position, emitter), starting: true);
         var voice = Engine.Play(clip, options with { Positional = true, Spatial = spatial });
         if (voice.IsValid) OneShots.Add(new OneShot { Voice = voice, Position = position, Emitter = emitter, Volume = options.Gain });
         return voice;
@@ -175,9 +180,9 @@ public sealed class AudioContext : IDisposable
     public VoiceHandle PlayAt(AssetRef<AudioAsset> asset, Vector3 position) => PlayAt(asset, position, AudioEmitter.Default, PlayOptions.Default);
 
     /// <summary>A voice starting now, fully placed: spatial parameters with HDR applied (a sound louder than the window raises it at once).</summary>
-    internal SpatialParams Placed(Vector3 position, Vector3 velocity, Vector3 forward, in AudioEmitter emitter, float volume, bool starting)
+    internal SpatialParams Placed(Vector3 position, Vector3 velocity, Vector3 forward, in AudioEmitter emitter, float volume, Bands3 occlusion, bool starting)
     {
-        var spatial = Spatialize(position, velocity, forward, emitter, volume, out float loudness);
+        var spatial = Spatialize(position, velocity, forward, emitter, volume, occlusion, out float loudness);
         if (Environment.Hdr && spatial.Gain > 0)
         {
             if (starting) Hdr.Raise(loudness);
@@ -198,7 +203,7 @@ public sealed class AudioContext : IDisposable
     /// <paramref name="loudness"/> is the source's level at the listener in dB (for HDR), counting <paramref name="volume"/>.
     /// The gain returned excludes HDR. <paramref name="forward"/> is the source's facing (zero: no cone).
     /// </summary>
-    internal SpatialParams Spatialize(Vector3 position, Vector3 velocity, Vector3 forward, in AudioEmitter emitter, float volume, out float loudness)
+    internal SpatialParams Spatialize(Vector3 position, Vector3 velocity, Vector3 forward, in AudioEmitter emitter, float volume, Bands3 occlusion, out float loudness)
     {
         var env = Environment;
         Matrix4x4.Invert(Listener, out var toListener);
@@ -212,12 +217,18 @@ public sealed class AudioContext : IDisposable
         if (forward != Vector3.Zero && distance > 1e-4f)
             gain *= Propagation.ConeGain(Vector3.Dot(Vector3.Normalize(forward), -away), emitter.ConeInner, emitter.ConeOuter, emitter.ConeOuterGain);
         var (low, mid, high) = Propagation.AirBands(distance, env.TemperatureC, env.HumidityPercent);
+        low *= occlusion.Low; mid *= occlusion.Mid; high *= occlusion.High;
         // Doppler: speeds along the line between them (the source's away from the listener, the listener's toward the source).
         float doppler = Propagation.Doppler(Vector3.Dot(velocity, away), Vector3.Dot(ListenerVelocity, away), Propagation.SpeedOfSound(env.TemperatureC), env.DopplerScale * emitter.DopplerScale);
-        loudness = gain * volume > 0 ? emitter.LoudnessDb + 20 * MathF.Log10(gain * volume) : float.NegativeInfinity;
+        float heard = gain * volume * occlusion.Mid; // occlusion counts toward loudness (HDR, which voices render)
+        loudness = heard > 0 ? emitter.LoudnessDb + 20 * MathF.Log10(heard) : float.NegativeInfinity;
         float spread = emitter.Radius > 0 ? Math.Clamp(emitter.Radius / MathF.Max(distance, 1e-3f), 0, 1) : 0;
         return new SpatialParams { Direction = direction, Gain = gain * ListenerGain, Spread = spread, Doppler = doppler, Low = low, Mid = mid, High = high };
     }
+
+    /// <summary>The direct path's per-band transmission from a source to the listener (all ones without geometry or with occlusion off).</summary>
+    internal Bands3 Occlusion(Vector3 position, in AudioEmitter emitter) =>
+        emitter.Occlusion && Scene.TriangleCount > 0 ? Scene.DirectPath(Listener.Translation, position, emitter.Radius, emitter.Radius > 0 ? 8 : 0) : Bands3.All(1);
 
     private AudioClip? Load(Guid guid)
     {
@@ -259,6 +270,7 @@ public sealed class AudioModule(AudioOutput output, string? device = null, bool 
         var audio = new AudioContext(CreateEngine());
         builder.SetResource(audio, a => { a.Engine.StopAll(); a.OneShots.Clear(); return a; });
         builder.SetResource(AudioEnvironment.Default);
+        builder.AddSystem(new AcousticGeometryUpdate());
         builder.AddSystem(new AudioUpdate());
         builder.OnStop(_ => audio.Dispose());
     }
@@ -301,6 +313,8 @@ internal sealed class AudioUpdate : ISystem
     private float[] _sentVolume = [], _sentPitch = [], _sentPan = [];
     private Vector3[] _lastPosition = [];
     private bool[] _hasLast = [];
+    private Bands3[] _occlusion = [];
+    private int[] _occlusionVoice = []; // which voice each cached occlusion belongs to
     // This frame's positional voices: computed first, sent once the HDR window has moved.
     private VoiceHandle[] _pending = [];
     private SpatialParams[] _pendingParams = [];
@@ -320,7 +334,7 @@ internal sealed class AudioUpdate : ISystem
         int n = world.Resource<AudioContext>().Engine.MaxVoices;
         _owner = new Entity[n]; _ownerVoice = new int[n]; _stamps = new int[n];
         _sentVolume = new float[n]; _sentPitch = new float[n]; _sentPan = new float[n];
-        _lastPosition = new Vector3[n]; _hasLast = new bool[n];
+        _lastPosition = new Vector3[n]; _hasLast = new bool[n]; _occlusion = new Bands3[n]; _occlusionVoice = new int[n];
         _pending = new VoiceHandle[n]; _pendingParams = new SpatialParams[n]; _pendingLoudness = new float[n]; _pendingVolume = new float[n];
     }
 
@@ -364,7 +378,8 @@ internal sealed class AudioUpdate : ISystem
                     if (playing) { engine.Stop(voice); _owner[voice.Slot] = default; }
                     playing = false;
                     var options = PlayOptions.Default with { Gain = s.Volume, Pitch = s.Pitch, Pan = s.Pan, Loop = s.Loop, ListenerOrientation = orientation };
-                    if (positional) options = options with { Positional = true, Spatial = audio.Placed(world4.Translation, Vector3.Zero, forward, s.Emitter, s.Volume, starting: true) };
+                    var occlusion = positional ? audio.Occlusion(world4.Translation, s.Emitter) : Bands3.All(1);
+                    if (positional) options = options with { Positional = true, Spatial = audio.Placed(world4.Translation, Vector3.Zero, forward, s.Emitter, s.Volume, occlusion, starting: true) };
                     voice = audio.Clip(s.Clip) is { } clip ? engine.Play(clip, options) : default;
                     s.Voice = voice.Value;
                     if (voice.IsValid)
@@ -373,6 +388,7 @@ internal sealed class AudioUpdate : ISystem
                         _owner[slot] = entities[r]; _ownerVoice[slot] = voice.Value;
                         _sentVolume[slot] = s.Volume; _sentPitch[slot] = s.Pitch; _sentPan[slot] = s.Pan;
                         _lastPosition[slot] = world4.Translation; _hasLast[slot] = true;
+                        _occlusion[slot] = occlusion; _occlusionVoice[slot] = voice.Value;
                         playing = true;
                     }
                 }
@@ -387,7 +403,7 @@ internal sealed class AudioUpdate : ISystem
                         var p = world4.Translation;
                         var velocity = _hasLast[slot] ? (p - _lastPosition[slot]) / dt : Vector3.Zero;
                         _lastPosition[slot] = p; _hasLast[slot] = true;
-                        Queue(voice, audio.Spatialize(p, velocity, forward, s.Emitter, s.Volume, out float loudness), loudness, s.Volume);
+                        Queue(voice, audio.Spatialize(p, velocity, forward, s.Emitter, s.Volume, Occluded(audio, voice, p, s.Emitter), out float loudness), loudness, s.Volume);
                     }
                     else engine.SetListenerOrientation(voice, orientation, rampSeconds: Math.Clamp(dt, 0.002f, 0.05f));
                 }
@@ -402,7 +418,7 @@ internal sealed class AudioUpdate : ISystem
         {
             var shot = shots[i];
             if (!engine.IsPlaying(shot.Voice)) { shots[i] = shots[^1]; shots.RemoveAt(shots.Count - 1); continue; }
-            Queue(shot.Voice, audio.Spatialize(shot.Position, Vector3.Zero, Vector3.Zero, shot.Emitter, shot.Volume, out float loudness), loudness, shot.Volume);
+            Queue(shot.Voice, audio.Spatialize(shot.Position, Vector3.Zero, Vector3.Zero, shot.Emitter, shot.Volume, Occluded(audio, shot.Voice, shot.Position, shot.Emitter), out float loudness), loudness, shot.Volume);
         }
 
         // HDR: the window follows the loudest audible positional voice; then every one gets its gain.
@@ -427,6 +443,21 @@ internal sealed class AudioUpdate : ISystem
             engine.Stop(new VoiceHandle(_ownerVoice[slot]));
             _owner[slot] = default;
         }
+    }
+
+    /// <summary>
+    /// A voice's occlusion: recomputed every frame while it renders, every eighth frame (staggered) while it's virtual,
+    /// so thousands of quiet voices don't each cast rays every frame.
+    /// </summary>
+    private Bands3 Occluded(AudioContext audio, VoiceHandle voice, Vector3 position, in AudioEmitter emitter)
+    {
+        int slot = voice.Slot;
+        if (_occlusionVoice[slot] != voice.Value || audio.Engine.IsRendered(voice) || (slot + _stamp) % 8 == 0)
+        {
+            _occlusion[slot] = audio.Occlusion(position, emitter);
+            _occlusionVoice[slot] = voice.Value;
+        }
+        return _occlusion[slot];
     }
 
     private void Queue(VoiceHandle voice, in SpatialParams p, float loudness, float volume)
