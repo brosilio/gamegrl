@@ -4,6 +4,16 @@ using System.Runtime.InteropServices;
 
 namespace Gamegrl.Audio.Acoustics;
 
+/// <summary>A plane of the scene: points x with Normal·x = Offset, and the area of the triangles in it.</summary>
+public struct AcousticPlane
+{
+    public Vector3 Normal;
+    public float Offset, Area;
+
+    public readonly float Distance(Vector3 p) => Vector3.Dot(Normal, p) - Offset;
+    public readonly Vector3 Mirror(Vector3 p) => p - 2 * Distance(p) * Normal;
+}
+
 /// <summary>A ray's hit: distance along it, the triangle, its unit normal (as wound) and its material.</summary>
 public struct AcousticHit
 {
@@ -36,6 +46,8 @@ public sealed class AcousticScene
     private readonly int[] _order;
     private Node[] _nodes = [];
     private int _nodeCount;
+    private AcousticPlane[]? _planes;
+    private int[] _planeOf = [];
 
     public int TriangleCount => _a.Length;
     public float SurfaceArea { get; }
@@ -77,6 +89,46 @@ public sealed class AcousticScene
     }
 
     public AcousticMaterial MaterialOf(int triangle) => _palette[_materials[triangle]];
+
+    /// <summary>The plane a triangle lies in (an index into <see cref="Planes"/>).</summary>
+    public int PlaneOf(int triangle) { _ = Planes; return _planeOf[triangle]; }
+
+    /// <summary>
+    /// The distinct planes the triangles lie in (coplanar triangles grouped, either winding), with their total area:
+    /// what image sources reflect in. Computed on first use.
+    /// </summary>
+    public ReadOnlySpan<AcousticPlane> Planes
+    {
+        get
+        {
+            if (_planes is not null) return _planes;
+            var planes = new List<AcousticPlane>();
+            var index = new Dictionary<(int, int, int, int), int>();
+            var planeOf = new int[_a.Length];
+            for (int t = 0; t < _a.Length; t++)
+            {
+                var n = _normals[t];
+                // One orientation per plane: the first non-zero component positive.
+                if (n.X < -1e-6f || (MathF.Abs(n.X) <= 1e-6f && (n.Y < -1e-6f || (MathF.Abs(n.Y) <= 1e-6f && n.Z < 0)))) n = -n;
+                float d = Vector3.Dot(n, _a[t]);
+                var key = ((int)MathF.Round(n.X * 1000), (int)MathF.Round(n.Y * 1000), (int)MathF.Round(n.Z * 1000), (int)MathF.Round(d * 1000));
+                float area = 0.5f * Vector3.Cross(_e1[t], _e2[t]).Length();
+                if (!index.TryGetValue(key, out int p))
+                {
+                    p = planes.Count;
+                    index[key] = p;
+                    planes.Add(new AcousticPlane { Normal = n, Offset = d });
+                }
+                var plane = planes[p];
+                plane.Area += area;
+                planes[p] = plane;
+                planeOf[t] = p;
+            }
+            _planeOf = planeOf;
+            _planes = planes.ToArray();
+            return _planes;
+        }
+    }
 
     // ------------------------------------------------------------------ building
 

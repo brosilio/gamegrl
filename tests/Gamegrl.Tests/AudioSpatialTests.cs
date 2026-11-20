@@ -345,6 +345,26 @@ internal static class AudioSpatialTests
             Assert.True(back.IsRendered(waiting) && MathF.Abs(got - expected) < 2f / 48000, $"rejoined at {got * 48000:0} frames, expected {expected * 48000:0}");
         });
 
+        Test("audio spatial: early reflections play from their own direction, delayed and scaled relative to the direct sound", () =>
+        {
+            var l = ChannelLayout.Surround71;
+            var e = Engine(l);
+            var click = AudioClip.Generate("click", Rate, 1, _ => 1);
+            var v = e.Play(click, PlayOptions.Default with { StartTime = 1000, Positional = true, Spatial = SpatialParams.Default with { Gain = 0.8f } });
+            Span<Reflection> taps = [new Reflection { Direction = Directions.FromAngles(90, 0), Delay = 0.010f, Gain = 0.5f }];
+            e.SetReflections(v, taps, new Gamegrl.Audio.Acoustics.Bands3(1, 1, 1));
+            var o = Render(e, 2048);
+            int fc = l.IndexOf(Speaker.FrontCenter), sl = l.IndexOf(Speaker.SideLeft);
+            Assert.True(MathF.Abs(o[1000 * l.Count + fc] - 0.8f) < 1e-4f, $"direct click from the front at 0.8 ({o[1000 * l.Count + fc]})");
+            float echo = o[1480 * l.Count + sl];
+            Assert.True(MathF.Abs(echo - 0.4f) < 0.02f, $"reflection from the left 480 samples later at 0.5 × 0.8 ({echo})");
+            float stray = 0;
+            for (int f = 0; f < 2048; f++)
+                for (int c = 0; c < l.Count; c++)
+                    if (!(f == 1000 && c == fc) && !(f >= 1479 && f <= 1481 && c == sl)) stray = MathF.Max(stray, MathF.Abs(o[f * l.Count + c]));
+            Assert.True(stray < 0.02f, $"nothing else ({stray})");
+        });
+
         Test("audio spatial: first-order ambisonics decodes toward its direction and stays fixed in the world as the listener turns", () =>
         {
             var l = ChannelLayout.Surround51;

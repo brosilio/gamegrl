@@ -7,7 +7,7 @@ using Gamegrl.Audio.Devices;
 //
 //   Gamegrl.AudioSmoke [--device default] [--layout stereo|quad|5.1|7.1|7.1.4] [--seconds 4] [--period 256]
 //   Gamegrl.AudioSmoke --wav out.wav [--layout 5.1] [--seconds 4]      render offline instead
-//   Gamegrl.AudioSmoke --bench N                                       N moving positional voices, offline: real-time factor
+//   Gamegrl.AudioSmoke --bench N                                       N moving positional voices in a room (reverb, 8 × 8 reflections), offline
 //   Gamegrl.AudioSmoke --analyze recording.wav [--expect-spacing N]     click onsets and their spacing (fails without 3 in a row N apart)
 
 string? device = null, wav = null, analyze = null;
@@ -162,6 +162,10 @@ static void Bench(int voices, bool headphones)
     var handles = new VoiceHandle[voices];
     var random = new Random(4);
     for (int i = 0; i < voices; i++) handles[i] = engine.Play(clip, PlayOptions.Default with { Loop = true, Positional = true, Gain = 0.01f });
+    // The room: a 2 s reverb, and the eight loudest voices with eight early reflections each (the most the engine gives).
+    engine.SetReverb(new Gamegrl.Audio.Acoustics.ReverbParams { DecaySeconds = Gamegrl.Audio.Acoustics.Bands3.All(2), Level = 1, PreDelaySeconds = 0.02f });
+    var taps = new Reflection[ReflectionTaps.Count];
+    for (int k = 0; k < taps.Length; k++) taps[k] = new Reflection { Direction = Gamegrl.Audio.Spatial.Directions.FromAngles(k * 45, 10), Delay = 0.004f + 0.009f * k, Gain = 0.5f };
     var block = new float[frame * engine.Layout.Count];
     var watch = Stopwatch.StartNew();
     for (int f = 0; f < seconds * 60; f++)
@@ -169,7 +173,8 @@ static void Bench(int voices, bool headphones)
         for (int i = 0; i < voices; i++)
         {
             float az = (f * 0.7f + i * 37) % 360;
-            engine.SetSpatial(handles[i], SpatialParams.Default with { Direction = Gamegrl.Audio.Spatial.Directions.FromAngles(az, (i % 7) * 10 - 20), Gain = 0.5f, Low = 1, Mid = 0.8f, High = 0.5f }, 1f / 60);
+            engine.SetSpatial(handles[i], SpatialParams.Default with { Direction = Gamegrl.Audio.Spatial.Directions.FromAngles(az, (i % 7) * 10 - 20), Gain = 0.5f, Low = 1, Mid = 0.8f, High = 0.5f, Reverb = 0.3f }, 1f / 60);
+            if (i < 8) engine.SetReflections(handles[i], taps, new Gamegrl.Audio.Acoustics.Bands3(1.1f, 1, 0.7f), 1f / 60);
         }
         engine.Render(block);
         engine.Update();

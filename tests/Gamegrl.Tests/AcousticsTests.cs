@@ -248,6 +248,88 @@ internal static class AcousticsTests
                 $"rendered tail decays in {measured:0.00} s; estimated {estimate.DecaySeconds}");
         });
 
+        Test("acoustics: image sources in a shoebox — 6 first-order and 18 second-order paths at the analytic lengths", () =>
+        {
+            // Room x ∈ [−5, 5], y ∈ [−3, 3], z ∈ [−2, 2]; mirror images are per-axis reflections.
+            var builder = new AcousticSceneBuilder();
+            builder.AddBox(Box(Vector3.Zero, new Vector3(10, 6, 4)), new AcousticMaterial(Bands3.All(0.19f), 0, Bands3.All(0)));
+            var scene = builder.Build();
+            Assert.Equal(6, scene.Planes.Length);
+            var listener = new Vector3(1.2f, -0.7f, 0.4f);
+            var source = new Vector3(-2.5f, 1.1f, -0.9f);
+            var expected1 = new List<float>(); var expected2 = new List<float>();
+            float[] lo = [-5, -3, -2], hi = [5, 3, 2];
+            float Get(Vector3 v, int a) => a == 0 ? v.X : a == 1 ? v.Y : v.Z;
+            Vector3 Set(Vector3 v, int a, float x) => a == 0 ? v with { X = x } : a == 1 ? v with { Y = x } : v with { Z = x };
+            Vector3 Mirror(Vector3 v, int wall) { int a = wall / 2; float w = wall % 2 == 0 ? lo[a] : hi[a]; return Set(v, a, 2 * w - Get(v, a)); }
+            for (int w = 0; w < 6; w++) expected1.Add(Vector3.Distance(listener, Mirror(source, w)));
+            // Second order: distinct images (perpendicular walls commute; opposite walls give two images).
+            var seen = new HashSet<(int, int, int)>();
+            for (int w1 = 0; w1 < 6; w1++)
+            for (int w2 = 0; w2 < 6; w2++)
+            {
+                if (w1 == w2) continue;
+                var image = Mirror(Mirror(source, w1), w2);
+                var key = ((int)MathF.Round(image.X * 1000), (int)MathF.Round(image.Y * 1000), (int)MathF.Round(image.Z * 1000));
+                if (seen.Add(key)) expected2.Add(Vector3.Distance(listener, image));
+            }
+            Assert.Equal(18, expected2.Count);
+
+            var paths = new ReflectionPath[64];
+            int n = ImageSources.Find(scene, listener, source, paths);
+            var found1 = paths[..n].Where(p => p.Order == 1).Select(p => p.Length).Order().ToArray();
+            var found2 = paths[..n].Where(p => p.Order == 2).Select(p => p.Length).Order().ToArray();
+            Assert.True(found1.Length == 6 && found2.Length == 18, $"found {found1.Length} first-order and {found2.Length} second-order paths");
+            var e1 = expected1.Order().ToArray(); var e2 = expected2.Order().ToArray();
+            for (int i = 0; i < 6; i++) Assert.True(MathF.Abs(found1[i] - e1[i]) < 1e-3f, $"first order {i}: {found1[i]} vs {e1[i]}");
+            for (int i = 0; i < 18; i++) Assert.True(MathF.Abs(found2[i] - e2[i]) < 1e-3f, $"second order {i}: {found2[i]} vs {e2[i]}");
+            float r1 = MathF.Sqrt(0.81f), r2 = 0.81f;
+            foreach (var p in paths[..n])
+            {
+                Assert.True(MathF.Abs(p.Surfaces.Mid - (p.Order == 1 ? r1 : r2)) < 1e-5f, "each bounce keeps √(1 − α) of the amplitude");
+                Assert.True(MathF.Abs(MathF.Abs(p.Point.X) - 5) < 1e-3f || MathF.Abs(MathF.Abs(p.Point.Y) - 3) < 1e-3f || MathF.Abs(MathF.Abs(p.Point.Z) - 2) < 1e-3f, "the reflection point is on a wall");
+            }
+            // A pillar between the source and a wall blocks that wall's reflection.
+            builder.AddBox(Box(new Vector3(-3.75f, 1.1f, -0.9f), new Vector3(0.5f, 0.5f, 0.5f)), AcousticMaterial.Concrete);
+            int blocked = ImageSources.Find(builder.Build(), listener, source, paths, maxOrder: 1);
+            Assert.True(blocked < 6, $"a pillar beside the source hides at least one first-order path ({blocked} left)");
+        });
+
+        Test("acoustics: a click in a concrete room arrives with its floor reflection 152 samples behind", () =>
+        {
+            var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));
+            using var app = b.Build();
+            var w = app.World;
+            var context = w.Resource<AudioContext>();
+            w.Resource<AudioEnvironment>().Hdr = false;
+            w.Resource<AudioEnvironment>().Reverb = false; // just the early reflections
+            var click = new AssetRef<AudioAsset>(Guid.NewGuid());
+            context.Register(click, AudioClip.Generate("click", Rate, 1, _ => 1));
+            w.Spawn(LocalTransform.Identity, new LocalToWorld(), AudioListener.Default);
+            // Room x ∈ [−6, 6], y ∈ [−1.5, 3.5], z ∈ [−5.5, 3.5]: the floor is 1.5 m below the listener's ears.
+            w.Spawn(new LocalTransform { Position = new Vector3(0, 1, -1), Rotation = Quaternion.Identity, Scale = new Vector3(12, 5, 9) }, new LocalToWorld(), AcousticSurface.Box(AcousticMaterial.Concrete));
+            app.Tick(1 / 60.0);
+            context.Engine.Render(new float[Rate / 60 * 2]);
+            var source = new Vector3(2, 0, -3);
+            w.Spawn(LocalTransform.At(source), new LocalToWorld(), AudioSource.At(click));
+            const int frame = Rate / 60;
+            app.Tick(1 / 60.0);
+            var o = new float[frame * 2];
+            context.Engine.Render(o);
+            var energy = new double[frame];
+            for (int i = 0; i < frame; i++) energy[i] = o[2 * i] * o[2 * i] + o[2 * i + 1] * o[2 * i + 1];
+            int direct = Array.IndexOf(energy, energy.Max());
+            // The floor's image is 3 m below the source: 4.690 m against 3.606 m direct, 1.084 m = 3.16 ms = 152 samples later.
+            float c = Gamegrl.Audio.Spatial.Propagation.SpeedOfSound(20);
+            int expected = direct + (int)MathF.Round((MathF.Sqrt(4 + 9 + 9) - MathF.Sqrt(4 + 9)) / c * Rate);
+            int peak = expected - 3;
+            for (int i = expected - 3; i <= expected + 3; i++) if (energy[i] > energy[peak]) peak = i;
+            double around = 0; int count = 0;
+            for (int i = direct + 20; i < expected - 10; i++) { around = Math.Max(around, energy[i]); count++; }
+            Assert.True(Math.Abs(peak - expected) <= 1 && energy[peak] > 10 * around, $"floor reflection at {peak - direct} samples (expected {expected - direct}), {energy[peak]:0.0e0} against {around:0.0e0} before it");
+            Assert.True(context.Scene.Planes.Length == 6, "the room's six walls");
+        });
+
         Test("acoustics: an entity behind a wall entity is heard through the wall's transmission", () =>
         {
             var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));

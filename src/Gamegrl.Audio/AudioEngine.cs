@@ -29,6 +29,24 @@ public struct SpatialParams
     public static SpatialParams Default => new() { Direction = -Vector3.UnitZ, Gain = 1, Doppler = 1, Low = 1, Mid = 1, High = 1 };
 }
 
+/// <summary>
+/// An early reflection of a positional voice: where it comes from (listener space), how long after the direct sound it
+/// arrives, and its amplitude relative to the direct sound.
+/// </summary>
+public struct Reflection
+{
+    public Vector3 Direction;
+    public float Delay, Gain;
+}
+
+/// <summary>Up to <see cref="Count"/> reflections, inline (no allocation).</summary>
+[System.Runtime.CompilerServices.InlineArray(Count)]
+public struct ReflectionTaps
+{
+    public const int Count = 8;
+    private Reflection _first;
+}
+
 public struct PlayOptions
 {
     public BusHandle Bus;
@@ -101,6 +119,9 @@ public sealed class AudioEngine : IDisposable
         public SpatialParams Spatial;
         public Quaternion Rotation;
         public float[]? Matrix;
+        public ReflectionTaps Taps;
+        public int TapCount;
+        public Acoustics.Bands3 Tone;
         public long Start, StopAt;
         public double Position; // clip frames, as of the last update
     }
@@ -267,6 +288,21 @@ public sealed class AudioEngine : IDisposable
         if (Rendering(i)) Post(new Command { Kind = CommandKind.VoiceSpatial, Target = _voices[i].Mixer, Spatial = spatial, Ramp = Frames(rampSeconds) });
     }
 
+    /// <summary>
+    /// A positional voice's early reflections (at most <see cref="ReflectionTaps.Count"/>), all shaped by
+    /// <paramref name="tone"/> (per-band gains relative to the mid band: the surfaces' colour). An empty span removes them.
+    /// </summary>
+    public void SetReflections(VoiceHandle voice, ReadOnlySpan<Reflection> taps, Acoustics.Bands3 tone, float rampSeconds = 0.02f)
+    {
+        if (!TryGet(voice, out int i) || !_voices[i].Positional) return;
+        ref var v = ref _voices[i];
+        int n = Math.Min(taps.Length, ReflectionTaps.Count);
+        for (int k = 0; k < n; k++) v.Taps[k] = taps[k];
+        v.TapCount = n;
+        v.Tone = tone;
+        if (Rendering(i)) Post(new Command { Kind = CommandKind.VoiceReflections, Target = v.Mixer, Taps = v.Taps, TapCount = n, Tone = tone, Ramp = Frames(rampSeconds) });
+    }
+
     /// <summary>Ambisonic voices: the listener's current orientation, so the field stays fixed in the world as the head turns.</summary>
     public void SetListenerOrientation(VoiceHandle voice, Quaternion orientation, float rampSeconds = 0.02f)
     {
@@ -391,6 +427,7 @@ public sealed class AudioEngine : IDisposable
             Ramp = fromStart ? v.FadeIn : Frames(SwapFadeSeconds), Offset = (long)Math.Round(v.Position * 4294967296.0),
             Positional = v.Positional, Spatial = v.Spatial, Rotation = v.Rotation, Matrix = v.Matrix,
         });
+        if (v.TapCount > 0) Post(new Command { Kind = CommandKind.VoiceReflections, Target = v.Mixer, Taps = v.Taps, TapCount = v.TapCount, Tone = v.Tone });
     }
 
     /// <summary>Fades a rendered voice out; it stays playing, virtually, once the mixer lets it go.</summary>

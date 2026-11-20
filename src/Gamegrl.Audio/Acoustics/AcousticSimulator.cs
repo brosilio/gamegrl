@@ -2,6 +2,27 @@ using System.Numerics;
 
 namespace Gamegrl.Audio.Acoustics;
 
+/// <summary>A voice that wants early reflections, and where its source is.</summary>
+internal struct ReflectionRequest
+{
+    public int Key;
+    public Vector3 Source;
+}
+
+/// <summary>Early reflection paths found for a set of voices (up to <see cref="ReflectionTaps.Count"/> each), immutable.</summary>
+internal sealed class ReflectionResult
+{
+    public required int[] Keys;
+    public required int[] Counts;
+    public required ReflectionPath[] Paths; // voice i's at [i * ReflectionTaps.Count ..]
+
+    public ReadOnlySpan<ReflectionPath> For(int key)
+    {
+        int i = Array.IndexOf(Keys, key);
+        return i < 0 ? default : Paths.AsSpan(i * ReflectionTaps.Count, Counts[i]);
+    }
+}
+
 /// <summary>
 /// Runs the expensive acoustic estimates off the game thread: the game submits the scene and the listener every frame
 /// (cheap), and the simulator re-estimates the reverb when the scene changed, the listener moved more than half a metre,
@@ -17,7 +38,20 @@ internal sealed class AcousticSimulator : IDisposable
         public float Temperature, Humidity;
     }
 
-    private const float MoveThreshold = 0.5f;
+    private sealed class ReflectionJob
+    {
+        public required AcousticScene Scene;
+        public Vector3 Listener;
+        public required ReflectionRequest[] Requests;
+    }
+
+    private const float MoveThreshold = 0.5f, ReflectionMoveThreshold = 0.25f;
+    private ReflectionJob? _pendingReflections;
+    private ReflectionResult? _reflections;
+    private int _reflectionVersion, _takenReflectionVersion;
+    private AcousticScene? _lastReflectionScene;
+    private Vector3 _lastReflectionListener;
+    private ReflectionRequest[] _lastRequests = [];
     private readonly bool _inline;
     private readonly Thread? _thread;
     private readonly AutoResetEvent _wake = new(false);
@@ -53,6 +87,52 @@ internal sealed class AcousticSimulator : IDisposable
         _wake.Set();
     }
 
+    /// <summary>
+    /// Game thread, every frame: the voices that want reflections. A new search starts when the scene or the set of voices
+    /// changed, or the listener or any source moved a quarter of a metre.
+    /// </summary>
+    public void SubmitReflections(AcousticScene scene, Vector3 listener, ReadOnlySpan<ReflectionRequest> requests)
+    {
+        bool changed = !ReferenceEquals(scene, _lastReflectionScene) || requests.Length != _lastRequests.Length
+            || Vector3.DistanceSquared(listener, _lastReflectionListener) > ReflectionMoveThreshold * ReflectionMoveThreshold;
+        for (int i = 0; i < requests.Length && !changed; i++)
+            changed = requests[i].Key != _lastRequests[i].Key || Vector3.DistanceSquared(requests[i].Source, _lastRequests[i].Source) > ReflectionMoveThreshold * ReflectionMoveThreshold;
+        if (!changed) return;
+        _lastReflectionScene = scene; _lastReflectionListener = listener; _lastRequests = requests.ToArray();
+        var job = new ReflectionJob { Scene = scene, Listener = listener, Requests = _lastRequests };
+        if (_inline) { PublishReflections(FindReflections(job)); return; }
+        Volatile.Write(ref _pendingReflections, job);
+        _wake.Set();
+    }
+
+    /// <summary>Game thread: the newest reflection paths, if a search finished since the last call.</summary>
+    public bool TryTakeReflections(out ReflectionResult? result)
+    {
+        int version = Volatile.Read(ref _reflectionVersion);
+        result = Volatile.Read(ref _reflections);
+        if (version == _takenReflectionVersion) return false;
+        _takenReflectionVersion = version;
+        return true;
+    }
+
+    private static ReflectionResult FindReflections(ReflectionJob job)
+    {
+        int n = job.Requests.Length, k = ReflectionTaps.Count;
+        var result = new ReflectionResult { Keys = new int[n], Counts = new int[n], Paths = new ReflectionPath[n * k] };
+        for (int i = 0; i < n; i++)
+        {
+            result.Keys[i] = job.Requests[i].Key;
+            result.Counts[i] = ImageSources.Find(job.Scene, job.Listener, job.Requests[i].Source, result.Paths.AsSpan(i * k, k));
+        }
+        return result;
+    }
+
+    private void PublishReflections(ReflectionResult result)
+    {
+        Volatile.Write(ref _reflections, result);
+        Interlocked.Increment(ref _reflectionVersion);
+    }
+
     /// <summary>Game thread: the newest estimate, if one arrived since the last call.</summary>
     public bool TryTake(out ReverbParams result)
     {
@@ -76,9 +156,13 @@ internal sealed class AcousticSimulator : IDisposable
         while (!_stopping)
         {
             _wake.WaitOne();
+            if (_stopping) break;
+            // Reflections first: they follow moving sources and want to be fresh; the reverb changes slowly.
+            var reflections = Interlocked.Exchange(ref _pendingReflections, null);
+            if (reflections is not null) PublishReflections(FindReflections(reflections));
             var request = Interlocked.Exchange(ref _pending, null);
-            if (request is null || _stopping) continue;
-            Publish(Compute(request));
+            if (request is not null) Publish(Compute(request));
+            if (Volatile.Read(ref _pendingReflections) is not null || Volatile.Read(ref _pending) is not null) _wake.Set();
         }
     }
 

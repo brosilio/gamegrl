@@ -5,7 +5,7 @@ using Gamegrl.Audio.Spatial;
 
 namespace Gamegrl.Audio;
 
-internal enum CommandKind : byte { Play, Stop, VoiceGain, VoicePan, VoicePitch, VoiceSpatial, VoiceRotation, BusCreate, BusGain, Reverb }
+internal enum CommandKind : byte { Play, Stop, VoiceGain, VoicePan, VoicePitch, VoiceSpatial, VoiceRotation, VoiceReflections, BusCreate, BusGain, Reverb }
 
 /// <summary>A message from the game to the audio thread. Times are engine samples; ramps are in frames.</summary>
 internal struct Command
@@ -23,6 +23,9 @@ internal struct Command
     public AudioClip? Clip;
     public float[]? Matrix;     // Play, multichannel clips: clip → bed gains, computed and cached on the game side
     public Acoustics.ReverbParams Reverb;
+    public ReflectionTaps Taps;
+    public int TapCount;
+    public Acoustics.Bands3 Tone;
 }
 
 internal enum AudioEventKind : byte { VoiceEnded }
@@ -93,6 +96,15 @@ internal sealed class Mixer
         public BandEq3 Eq;
         public Ramp ReverbSend;
         public SpatialParams Spatial;
+        // Early reflections: a delay line of the voice's dry signal (through the surfaces' tone), read by taps.
+        public float[] Delay = null!;
+        public int DelayPos, TapCount, LiveTaps; // TapCount includes removed taps still fading out
+        public int Tail;                         // after the clip ends: frames left for the reflections to sound
+        public bool DelayDirty;
+        public BandEq3 ReflectionEq;
+        public ReflectionTaps Taps;
+        public Ramp[] TapDelay = null!;   // samples
+        public Ramp[] TapGains = null!;   // tap k, bed channel o at [k * bed + o]
         public Quaternion Rotation = Quaternion.Identity;
     }
 
@@ -115,6 +127,10 @@ internal sealed class Mixer
     private readonly float[] _frame = new float[MaxClipChannels];
     private readonly float[] _scratch;
     private readonly float[] _voiceBlock = new float[MaxClipChannels * MaxBlock]; // a voice's block: planar inputs (or mono)
+    private readonly float[] _dry = new float[MaxBlock], _tap = new float[MaxBlock];
+    private readonly float[] _panScratch;
+    public const float MaxReflectionDelaySeconds = 0.12f;
+    private readonly int _delayLength;
     private readonly Voice[] _voices;
     private readonly Bus[] _buses;
     private readonly SpscRing<Command> _commands;
@@ -146,11 +162,18 @@ internal sealed class Mixer
         _reverb = new Fdn(_bed, sampleRate);
         _outBuffer = new float[_outChannels * MaxBlock];
         _scratch = new float[_bedChannels * MaxClipChannels];
+        _panScratch = new float[_bedChannels];
+        _delayLength = (int)(MaxReflectionDelaySeconds * sampleRate) + MaxBlock + 4;
         _limiter = limiter ? new Limiter(_outChannels, sampleRate, limiterCeilingDb) : null;
         _commands = commands;
         _events = events;
         _voices = new Voice[maxVoices];
-        for (int i = 0; i < maxVoices; i++) _voices[i] = new Voice { Matrix = new Ramp[_bedChannels * MaxClipChannels] };
+        for (int i = 0; i < maxVoices; i++)
+            _voices[i] = new Voice
+            {
+                Matrix = new Ramp[_bedChannels * MaxClipChannels], Delay = new float[_delayLength],
+                TapDelay = new Ramp[ReflectionTaps.Count], TapGains = new Ramp[ReflectionTaps.Count * _bedChannels],
+            };
         _buses = new Bus[maxBuses];
         for (int i = 0; i < maxBuses; i++) _buses[i] = new Bus { Buffer = new float[_bedChannels * MaxBlock], Gain = new Ramp { Current = 1, Target = 1 } };
         _buses[0].Used = true;
@@ -234,6 +257,10 @@ internal sealed class Mixer
                 v.Inputs = v.Positional ? 1 : clip.Channels;
                 v.Eq.Init(_rate);
                 v.ReverbSend = default;
+                v.TapCount = v.LiveTaps = 0;
+                v.Tail = 0;
+                v.DelayDirty = true;
+                v.ReflectionEq.Init(_rate);
                 if (v.Positional) { v.Eq.Set(cmd.Spatial.Low, cmd.Spatial.Mid, cmd.Spatial.High, 0); v.ReverbSend.Set(cmd.Spatial.Reverb, 0); }
                 SetMatrix(v, 0, cmd.Matrix);
                 break;
@@ -273,6 +300,28 @@ internal sealed class Mixer
                 v.Eq.Set(cmd.Spatial.Low, cmd.Spatial.Mid, cmd.Spatial.High, cmd.Ramp);
                 v.ReverbSend.Set(cmd.Spatial.Reverb, cmd.Ramp);
                 SetMatrix(v, cmd.Ramp, null);
+                SetTaps(v, cmd.Ramp, delays: false);
+                break;
+            }
+            case CommandKind.VoiceReflections:
+            {
+                var v = Find(cmd.Target);
+                if (v is null || !v.Positional) break;
+                if (v.DelayDirty) { Array.Clear(v.Delay); v.DelayDirty = false; }
+                // Taps that are new start at their delay; existing ones glide to the new delay (Doppler on the reflection).
+                int previous = v.TapCount;
+                v.Taps = cmd.Taps;
+                v.TapCount = v.LiveTaps = cmd.TapCount;
+                for (int k = previous; k < v.TapCount; k++)
+                {
+                    v.TapDelay[k] = default;
+                    v.TapDelay[k].Set(DelaySamples(v.Taps[k].Delay), 0);
+                    for (int o = 0; o < _bedChannels; o++) v.TapGains[k * _bedChannels + o] = default;
+                }
+                for (int k = v.TapCount; k < previous; k++) for (int o = 0; o < _bedChannels; o++) v.TapGains[k * _bedChannels + o].Set(0, cmd.Ramp);
+                if (v.TapCount < previous) v.TapCount = previous; // fade the removed taps out; they stay until silent
+                v.ReflectionEq.Set(cmd.Tone.Low, cmd.Tone.Mid, cmd.Tone.High, cmd.Ramp);
+                SetTaps(v, cmd.Ramp, delays: true, instantFrom: previous);
                 break;
             }
             case CommandKind.VoiceRotation:
@@ -342,8 +391,77 @@ internal sealed class Mixer
     /// as mono), then each input added into each bed channel with its gain ramp, skipping silent channels (VBAP feeds two
     /// or three speakers) and vectorised.
     /// </summary>
+    private float DelaySamples(float seconds) => Math.Clamp(seconds * _rate, 1, _delayLength - MaxBlock - 3);
+
+    /// <summary>Each tap's gains: VBAP from its direction, times its gain relative to the direct sound, times the voice's spatial gain.</summary>
+    private void SetTaps(Voice v, int ramp, bool delays, int instantFrom = int.MaxValue)
+    {
+        var pan = _panScratch.AsSpan();
+        for (int k = 0; k < v.LiveTaps; k++)
+        {
+            ref var tap = ref v.Taps[k];
+            _panner.Pan(tap.Direction, 0, pan);
+            float g = tap.Gain * v.Spatial.Gain;
+            int r = k >= instantFrom ? 0 : ramp; // new taps start at their level; existing ones glide
+            for (int o = 0; o < _bedChannels; o++) v.TapGains[k * _bedChannels + o].Set(pan[o] * g, r);
+            if (delays) v.TapDelay[k].Set(DelaySamples(tap.Delay), Math.Max(ramp, 1));
+        }
+    }
+
+    /// <summary>Writes the voice's dry block into its delay line (through the surfaces' tone) and adds each tap into the bed.</summary>
+    private void RenderReflections(Voice v, int first, int count)
+    {
+        var dry = _dry.AsSpan(first, count);
+        v.ReflectionEq.Process(dry);
+        var line = v.Delay;
+        int length = line.Length, start = v.DelayPos;
+        for (int i = 0; i < count; i++) line[(start + i) % length] = dry[i];
+        v.DelayPos = (start + count) % length;
+        var buffer = _buses[v.Bus].Buffer;
+        int active = 0;
+        for (int k = 0; k < v.TapCount; k++)
+        {
+            bool silent = true;
+            for (int o = 0; o < _bedChannels && silent; o++) { ref var g = ref v.TapGains[k * _bedChannels + o]; silent = g.Current == 0 && g.Remaining == 0; }
+            if (silent) continue;
+            active = k + 1;
+            var tap = _tap.AsSpan(first, count);
+            ref var delay = ref v.TapDelay[k];
+            for (int i = 0; i < count; i++)
+            {
+                // Linear interpolation at a fractional delay behind the write position.
+                float d = delay.Next();
+                float pos = start + i - d;
+                int i0 = (int)MathF.Floor(pos);
+                float frac = pos - i0;
+                int a = ((i0 % length) + length) % length, b = a + 1 == length ? 0 : a + 1;
+                tap[i] = line[a] + (line[b] - line[a]) * frac;
+            }
+            for (int o = 0; o < _bedChannels; o++) AddRamped(buffer.AsSpan(o * MaxBlock + first, count), tap, ref v.TapGains[k * _bedChannels + o]);
+        }
+        v.TapCount = Math.Max(active, v.LiveTaps); // removed taps that have faded to silence are dropped
+    }
+
+    /// <summary>The longest current tap delay, in frames: how long the reflections outlast the clip.</summary>
+    private int ReflectionTail(Voice v)
+    {
+        float longest = 0;
+        for (int k = 0; k < v.TapCount; k++) longest = MathF.Max(longest, MathF.Max(v.TapDelay[k].Current, v.TapDelay[k].Target));
+        return (int)MathF.Ceiling(longest) + 2;
+    }
+
     private void RenderVoice(Voice v, long blockStart, int n)
     {
+        if (v.Tail > 0)
+        {
+            // The clip has ended; its reflections are still on their way.
+            int remaining = Math.Min(n, v.Tail);
+            _dry.AsSpan(0, remaining).Clear();
+            RenderReflections(v, 0, remaining);
+            v.Tail -= remaining;
+            if (v.Tail <= 0 || v.TapCount == 0) End(v, blockStart + remaining);
+            return;
+        }
         int first = (int)Math.Clamp(v.Start - blockStart, 0, n);
         if (first >= n) return;
         var clip = v.Clip;
@@ -394,9 +512,16 @@ internal sealed class Mixer
         }
 
         int count = f - first;
-        if (positional && count > 0)
+        bool tail = ended && positional && v.TapCount > 0;
+        if (positional && (count > 0 || tail))
         {
+            if (v.TapCount > 0)
+            {
+                block.AsSpan(first, count).CopyTo(_dry.AsSpan(first, count));
+                if (tail) _dry.AsSpan(f, n - f).Clear(); // silence after the end keeps the echoes on time within this block
+            }
             v.Eq.Process(block.AsSpan(first, count));
+            if (v.TapCount > 0) RenderReflections(v, first, tail ? n - first : count);
             AddRamped(_reverbInput.AsSpan(first, count), block.AsSpan(first, count), ref v.ReverbSend);
         }
         if (count > 0)
@@ -409,7 +534,11 @@ internal sealed class Mixer
                 for (int c = 0; c < inputs; c++) AddRamped(dst, block.AsSpan(c * MaxBlock + first, count), ref matrix[o * inputs + c]);
             }
         }
-        if (ended) End(v, blockStart + f);
+        if (ended)
+        {
+            if (tail) { v.Tail = ReflectionTail(v) - (n - f); if (v.Tail <= 0) End(v, blockStart + n); }
+            else End(v, blockStart + f);
+        }
     }
 
     /// <summary><c>dst[i] += src[i] · g(i)</c> for a linear ramp g, advanced by the span's length; nothing when it's silent.</summary>
