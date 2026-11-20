@@ -130,8 +130,13 @@ public sealed unsafe class AssetArchive : IAssetSource, IDisposable
 
     private static long Align(long v) => (v + 15) & ~15L;
 
+    private bool _disposed;
+
+    /// <summary>Unmaps the archive. Safe to call twice: the assets module disposes it on stop, and the world owns it as a resource.</summary>
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
         _view.SafeMemoryMappedViewHandle.ReleasePointer();
         _view.Dispose();
         _file.Dispose();
