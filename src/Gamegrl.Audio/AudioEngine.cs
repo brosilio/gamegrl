@@ -67,6 +67,7 @@ public sealed class AudioEngine : IDisposable
     public long LatencyFrames => (_device?.LatencyFrames ?? 0) + _mixer.LimiterLatency;
     public IAudioDevice? Device => _device;
     public int ActiveVoices => _playing.Length - _freeCount;
+    public int MaxVoices => _playing.Length;
     /// <summary>Commands lost because the queue was full (the audio thread fell behind).</summary>
     public int DroppedCommands => _dropped;
 
@@ -161,6 +162,14 @@ public sealed class AudioEngine : IDisposable
     {
         int slot = voice.Slot;
         return voice.IsValid && (uint)slot < (uint)_playing.Length && _playing[slot] && _generations[slot] == voice.Value >> 16;
+    }
+
+    /// <summary>Fades out every playing voice (leaving play mode, changing levels).</summary>
+    public void StopAll(float fadeSeconds = 0.005f)
+    {
+        Update();
+        for (int slot = 0; slot < _playing.Length; slot++)
+            if (_playing[slot]) Stop(new VoiceHandle((_generations[slot] << 16) | (slot + 1)), fadeSeconds);
     }
 
     /// <summary>Takes in what the audio thread reported: ended voices free their slots.</summary>

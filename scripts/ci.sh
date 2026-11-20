@@ -3,6 +3,8 @@
 # "It builds" is not "it works under AOT": the AOT test run is the one that counts.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# The editor tests and smoke runs play Spinners, which has sound: keep CI silent (the audio smoke stage tests devices).
+export GAMEGRL_AUDIO=null
 
 echo "== build"
 dotnet build gamegrl.slnx -c Release -nologo -v q -m:1

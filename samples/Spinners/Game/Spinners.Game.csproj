@@ -7,5 +7,6 @@
     <ProjectReference Include="../../../src/Gamegrl.Rendering/Gamegrl.Rendering.csproj" />
     <ProjectReference Include="../../../src/Gamegrl.UI/Gamegrl.UI.csproj" />
     <ProjectReference Include="../../../src/Gamegrl.Physics2D/Gamegrl.Physics2D.csproj" />
+    <ProjectReference Include="../../../src/Gamegrl.Audio/Gamegrl.Audio.csproj" />
   </ItemGroup>
 </Project>

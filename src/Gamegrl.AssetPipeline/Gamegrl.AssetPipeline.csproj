@@ -2,5 +2,6 @@
   <!-- Editor-only: importers, .meta files, the Library cache and packing. Never referenced by a player. -->
   <ItemGroup>
     <ProjectReference Include="../Gamegrl.Assets/Gamegrl.Assets.csproj" />
+    <ProjectReference Include="../Gamegrl.Audio/Gamegrl.Audio.csproj" />
   </ItemGroup>
 </Project>

@@ -74,6 +74,28 @@ public sealed class FontImporter : IAssetImporter
 }
 
 /// <summary>
+/// WAV files to the audio artifact: decoded and validated, stored as a float WAV with the source's rate and channel
+/// layout, so the player loads it with no conversion. (Compressed formats and streaming come with Ogg Vorbis.)
+/// </summary>
+public sealed class AudioImporter : IAssetImporter
+{
+    public string Id => "audio";
+    public int Version => 1;
+    public AssetKind Kind => AssetKind.Audio;
+    public IReadOnlyList<string> Extensions { get; } = [".wav"];
+    public IReadOnlyDictionary<string, string> DefaultSettings { get; } = new Dictionary<string, string>();
+    public byte[] Import(ImportContext ctx)
+    {
+        Gamegrl.Audio.AudioClip clip;
+        try { clip = Gamegrl.Audio.Wav.Read(ctx.Bytes, ctx.Path); }
+        catch (InvalidDataException e) { throw new FormatException(ctx.Path + ": " + e.Message, e); }
+        var output = new MemoryStream(44 + 40 + clip.Samples.Length * 4);
+        Gamegrl.Audio.Wav.Write(output, clip.Samples, clip.SampleRate, clip.Layout);
+        return output.ToArray();
+    }
+}
+
+/// <summary>
 /// Text scenes (and prefabs) to the binary player format, with prefab instances flattened. Needs the game's
 /// components loaded in this process.
 /// </summary>
@@ -124,7 +146,7 @@ public sealed class AssetDatabase : IAssetSource, IDisposable
     }
 
     private readonly string _root;
-    private readonly List<IAssetImporter> _importers = [new TextureImporter(), new MeshImporter(), new FontImporter(), new SceneImporter(), new PrefabImporter()];
+    private readonly List<IAssetImporter> _importers = [new TextureImporter(), new MeshImporter(), new FontImporter(), new AudioImporter(), new SceneImporter(), new PrefabImporter()];
     private readonly Dictionary<Guid, AssetRecord> _byGuid = new();
     private readonly Dictionary<string, AssetRecord> _byPath = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _pendingChanges = new();

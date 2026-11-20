@@ -15,6 +15,8 @@ public enum AssetKind : uint
     Prefab = 4,
     /// <summary>A TrueType font file, stored as is; the UI bakes it at the size it needs.</summary>
     Font = 5,
+    /// <summary>Decoded audio as a float WAV (any layout and rate); <c>Gamegrl.Audio</c> loads it into an AudioClip.</summary>
+    Audio = 6,
 }
 
 // Marker types for AssetRef<T>.
@@ -22,6 +24,7 @@ public sealed class TextureAsset;
 public sealed class MeshAsset;
 public sealed class FontAsset;
 public sealed class SceneAsset;
+public sealed class AudioAsset;
 
 /// <summary>A decoded image: RGBA8, rows top to bottom.</summary>
 public sealed class TextureData(int width, int height, byte[] rgba, bool srgb = true)

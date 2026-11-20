@@ -1,3 +1,5 @@
+using Gamegrl.AssetPipeline;
+using Gamegrl.Assets;
 using Gamegrl.Audio;
 using Gamegrl.Audio.Devices;
 using static Gamegrl.Tests.Harness;
@@ -38,6 +40,29 @@ internal static class AudioTests
             }
         }
         return count * (double)rate / (last - first);
+    }
+
+    /// <summary>An asset source holding artifacts in memory.</summary>
+    private sealed class MemoryAssets : IAssetSource
+    {
+        public readonly Dictionary<Guid, (AssetKind Kind, byte[] Bytes)> Items = [];
+        public bool TryRead(Guid guid, out AssetKind kind, out ReadOnlyMemory<byte> artifact)
+        {
+            if (Items.TryGetValue(guid, out var item)) { kind = item.Kind; artifact = item.Bytes; return true; }
+            kind = AssetKind.Unknown; artifact = default; return false;
+        }
+        public Guid FindByPath(string path) => Guid.Empty;
+        public event Action<Guid>? Changed;
+        public void Raise(Guid guid) => Changed?.Invoke(guid);
+        public void PumpChanges() { }
+    }
+
+    /// <summary>A WAV source file run through the importer, as the editor would.</summary>
+    private static byte[] Imported(AudioClip clip, WavSampleFormat format)
+    {
+        var source = new MemoryStream();
+        Wav.Write(source, clip.Samples, clip.SampleRate, clip.Layout, format);
+        return new AudioImporter().Import(new ImportContext("Assets/test.wav", source.ToArray(), new Dictionary<string, string>(), _ => [], _ => null));
     }
 
     public static void Register()
@@ -241,6 +266,66 @@ internal static class AudioTests
             Assert.Equal((1L, 25000L), clock.NextBeat(1001));
             Assert.Equal((0L, 1000L), clock.NextBeat(1000));
             Assert.Equal(new BarBeat(0, 2, 0), clock.PositionAt(1000 + 48000));
+        });
+
+        Test("audio: AudioSource entities play on start, follow volume, restart on request, stop when despawned or stripped", () =>
+        {
+            var assets = new MemoryAssets();
+            var hum = new AssetRef<AudioAsset>(Guid.NewGuid());
+            var blip = new AssetRef<AudioAsset>(Guid.NewGuid());
+            // 16-bit sources: 0.5 survives PCM exactly (16384 / 32768).
+            assets.Items[hum.Guid] = (AssetKind.Audio, Imported(AudioClip.Generate("hum", Rate, 4800, _ => 0.5f), WavSampleFormat.Pcm16));
+            assets.Items[blip.Guid] = (AssetKind.Audio, Imported(AudioClip.Generate("blip", Rate, 100, _ => 0.5f), WavSampleFormat.Pcm16));
+            var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));
+            b.World.SetResource<IAssetSource>(assets);
+            using var app = b.Build();
+            var w = app.World;
+            var context = w.Resource<AudioContext>();
+            var warnings = new List<string>();
+            context.Warn = warnings.Add;
+            var engine = context.Engine;
+            float Left(int frames) { var o = new float[frames * 2]; engine.Render(o); return o[^2]; }
+
+            var looping = w.Spawn(AudioSource.Of(hum, loop: true) with { Pan = -1 });
+            var once = w.Spawn(AudioSource.Of(blip) with { Pan = 1 });
+            var broken = w.Spawn(AudioSource.Of(new AssetRef<AudioAsset>(Guid.NewGuid())));
+            app.Tick(1 / 60.0);
+            Assert.True(w.Get<AudioSource>(looping).IsPlaying && w.Get<AudioSource>(once).IsPlaying, "both started");
+            Assert.True(!w.Get<AudioSource>(broken).IsPlaying && warnings.Count == 1, $"a missing clip warns once and stays silent ({warnings.Count})");
+            Assert.True(Left(256) == 0.5f, "the hum plays hard left at full volume");
+            app.Tick(1 / 60.0);
+            Assert.True(!w.Get<AudioSource>(once).IsPlaying, "the 100-frame blip ended by itself");
+
+            w.Get<AudioSource>(looping).Volume = 0.5f;
+            app.Tick(1 / 60.0);
+            Assert.True(MathF.Abs(Left(1024) - 0.25f) < 1e-6f, "volume changes reach the voice");
+
+            w.Get<AudioSource>(once).Play = true;
+            app.Tick(1 / 60.0);
+            Assert.True(w.Get<AudioSource>(once).IsPlaying && !w.Get<AudioSource>(once).Play, "Play restarts it and is cleared");
+            Left(256);
+
+            w.Destroy(looping);
+            app.Tick(1 / 60.0);
+            Assert.True(Left(1024) == 0, "despawning stops the voice");
+            app.Tick(1 / 60.0);
+            Assert.Equal(0, engine.ActiveVoices);
+
+            var stripped = w.Spawn(AudioSource.Of(hum, loop: true));
+            app.Tick(1 / 60.0);
+            Assert.Equal(1, engine.ActiveVoices);
+            w.Remove<AudioSource>(stripped);
+            app.Tick(1 / 60.0);
+            Left(1024);
+            app.Tick(1 / 60.0);
+            Assert.Equal(0, engine.ActiveVoices);
+
+            // Reimporting a clip reloads it for the next play.
+            assets.Items[hum.Guid] = (AssetKind.Audio, Imported(AudioClip.Generate("hum", Rate, 4800, _ => 0.25f), WavSampleFormat.Pcm16));
+            assets.Raise(hum.Guid);
+            w.Spawn(AudioSource.Of(hum, loop: true) with { Pan = -1 });
+            app.Tick(1 / 60.0);
+            Assert.True(Left(256) == 0.25f, "the reimported clip plays");
         });
 
         Test("audio: the SPSC ring carries a million messages between threads in order", () =>

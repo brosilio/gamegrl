@@ -1,6 +1,7 @@
 using System.Numerics;
 using Gamegrl;
 using Gamegrl.Assets;
+using Gamegrl.Audio;
 using Gamegrl.Physics2D;
 using Gamegrl.Platform;
 using Gamegrl.Platform.Sdl3;
@@ -45,6 +46,12 @@ public struct QuitAfter
 public struct BoxAge : IComponent
 {
     public int Ticks;
+}
+
+/// <summary>The sound a box makes when it lands (Assets/thock.wav).</summary>
+public struct Impacts
+{
+    public AssetRef<AudioAsset> Clip;
 }
 
 /// <summary>The box rain: a seeded generator (simulation state, so it snapshots and replays) and a tick counter.</summary>
@@ -126,6 +133,26 @@ public static partial class Gameplay
         if (++age.Ticks > 240 || t.Position.Y < -8) commands.Destroy(e);
     }
 
+    /// <summary>
+    /// A thock for each box that lands hard, right after the physics step: louder and a little higher for harder hits,
+    /// panned to where it hit. At most three start per tick, so a settling pile doesn't machine-gun.
+    /// </summary>
+    [System(Phase.FixedUpdate, Order = 1100)]
+    private static void ImpactSounds([Res] in PhysicsWorld2D physics, [Res] in AudioContext audio, [Res] in Impacts impacts)
+    {
+        int started = 0;
+        foreach (ref readonly var contact in physics.ContactBegins)
+        {
+            if (contact.Speed < 1.5f) continue;
+            float hardness = Math.Min(contact.Speed, 12) / 12;
+            audio.PlayOneShot(impacts.Clip, PlayOptions.Default with
+            {
+                Gain = 0.15f + 0.6f * hardness, Pitch = 0.85f + 0.3f * hardness, Pan = Math.Clamp(contact.Point.X / 5, -1, 1),
+            });
+            if (++started == 3) break;
+        }
+    }
+
     [System(Phase.First)]
     private static void QuitKeys([Res] in Input input, [Res] in Time time, [Res] in QuitAfter quit, [Res] ref AppControl app)
     {
@@ -145,6 +172,8 @@ public sealed class SpinnersModule : IModule
     {
         builder.AddModule(new UiModule());
         builder.AddModule(new Physics2DModule());
+        builder.AddModule(new AudioModule());
+        builder.SetResource(new Impacts { Clip = new AssetRef<AudioAsset>(new Guid("fed06281f00140c2a07fb5ef8a4011b4")) });
         builder.SetResource(new BoxRain { Random = new SimRandom(7) });
         Gamegrl.Generated.SpinnersGameSystems.AddTo(builder.Schedule);
         builder.SetResource(new SpinTuning { Speed = 1 });
