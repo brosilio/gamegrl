@@ -12,10 +12,10 @@ using Gamegrl.Rhi.Vulkan;
 //                                                                for binaural); --tour plays the scripted walk hands off,
 //                                                                --overlay starts with the acoustic overlay (F1) on
 //   CaveGunfight --wav walk.wav [--headphones] [--capture-at T,...]   the scripted walk rendered offline
-// F12 (or each --capture-at time, in seconds) writes a capture to artifacts/captures/<time>/: the last 12 s of output,
-// a report of every voice's paths, taps and gains and of the reverb estimate, and its decay curves.
+// F12 (or each --capture-at time, in seconds) writes a capture to artifacts/captures/<time>/ (or under --capture-dir):
+// the last 12 s of output, a report of every voice's paths, taps and gains and of the reverb estimate, its decay curves.
 
-const string Usage = "Usage: CaveGunfight [--tour] [--overlay] [--seconds N] [--capture-at T,...] | --wav walk.wav [--headphones] [--capture-at T,...]";
+const string Usage = "Usage: CaveGunfight [--tour] [--overlay] [--seconds N] [--capture-at T,...] [--capture-dir DIR] | --wav walk.wav [--headphones] [--capture-at T,...] [--capture-dir DIR]";
 string? wav = null;
 bool tour = false, phones = false, overlay = false;
 double limit = 0;
@@ -29,6 +29,7 @@ for (int i = 0; i < args.Length; i++)
         case "--tour": tour = true; break;
         case "--overlay": overlay = true; break;
         case "--seconds" when i + 1 < args.Length && double.TryParse(args[i + 1], CultureInfo.InvariantCulture, out limit) && limit > 0: i++; break;
+        case "--capture-dir" when i + 1 < args.Length: captures.Root = args[++i]; break;
         case "--capture-at" when i + 1 < args.Length:
             var times = args[++i].Split(',');
             captures.At = new double[times.Length];
