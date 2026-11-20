@@ -171,6 +171,14 @@ internal static class AudioTests
             Assert.True(engine.IsRendered(next), "the waiting cue gets a slot");
         });
 
+        Test("audio: empty clips consume no voice, including when looped", () =>
+        {
+            using var engine = Engine();
+            var clip = new AudioClip("empty", Rate, ChannelLayout.Mono, []);
+            Assert.True(!engine.Play(clip, PlayOptions.Default with { Loop = true }).IsValid, "nothing to loop");
+            Assert.Equal(0, engine.ActiveVoices);
+        });
+
         Test("audio: resampling keeps pitch — a 44.1 kHz clip plays at its own pitch at 48 kHz; pitch 1.5 raises a fifth", () =>
         {
             var e = Engine(ChannelLayout.Mono);

@@ -206,7 +206,7 @@ public sealed class AudioEngine : IDisposable
     public VoiceHandle Play(AudioClip clip, in PlayOptions options)
     {
         TakeEvents();
-        if (_freeCount == 0) return default;
+        if (_freeCount == 0 || clip.Frames == 0) return default;
         int i = _free[--_freeCount];
         ref var v = ref _voices[i];
         int gen = (v.Generation + 1) & 0x7FFF;
