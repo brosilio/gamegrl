@@ -512,6 +512,36 @@ internal static class AcousticsTests
             Assert.True(with.Right > 1.5 * with.Left, $"from the door, on the right: left {with.Left:0.0e0}, right {with.Right:0.0e0}");
         });
 
+        Test("acoustics: outdoors, a shout slaps back off a facade 60 m away at the image-source delay, after its ground bounce", () =>
+        {
+            var builder = new AcousticSceneBuilder();
+            builder.AddBox(Box(new Vector3(0, -0.1f, 0), new Vector3(400, 0.2f, 400)), AcousticMaterial.Concrete); // the ground, top at y = 0
+            builder.AddBox(Box(new Vector3(0, 10, -62), new Vector3(200, 20, 4)), AcousticMaterial.Concrete);   // a facade, its face at z = −60
+            var listener = Matrix4x4.CreateTranslation(0, 1.7f, 0);
+            var source = new Vector3(0, 1.7f, -10);
+            var setup = AuralizeSetup.For(builder.Build(), listener, source) with
+            {
+                Environment = AudioEnvironment.Default with { Hdr = false, Reverb = false }, TailSeconds = 0.5f,
+            };
+            var ir = Auralizer.ImpulseResponse(setup);
+            var e = new double[ir.Frames];
+            for (int f = 0; f < ir.Frames; f++) e[f] = ir.Samples[2 * f] * ir.Samples[2 * f] + ir.Samples[2 * f + 1] * ir.Samples[2 * f + 1];
+            int direct = Array.IndexOf(e, e.Max());
+            float c = Gamegrl.Audio.Spatial.Propagation.SpeedOfSound(20);
+            int Peak(int at) { int p = at - 3; for (int i = at - 3; i <= at + 3; i++) if (e[i] > e[p]) p = i; return p; }
+            int ground = Peak(direct + (int)MathF.Round((MathF.Sqrt(100 + 3.4f * 3.4f) - 10) / c * Rate));
+            int slap = Peak(direct + (int)MathF.Round(100 / c * Rate));
+            double quietBefore = 0;
+            for (int i = direct + 2000; i < slap - 50; i++) quietBefore = Math.Max(quietBefore, e[i]);
+            Assert.True(e[ground] > 1e-3 * e[direct], $"the ground bounce at +{ground - direct} samples");
+            Assert.True(e[slap] > 100 * quietBefore, $"the slapback at +{slap - direct} samples ({(slap - direct) * 1000.0 / Rate:0.0} ms), clear of what's before it");
+            // The echo sits at a fractional delay, interpolated across neighbouring samples: compare energy around each, not peaks.
+            double Around(int at) { double sum = 0; for (int i = Math.Max(0, at - 4); i <= Math.Min(e.Length - 1, at + 8); i++) sum += e[i]; return sum; }
+            double ratio = Math.Sqrt(Around(slap) / Around(direct));
+            double expected = 10.0 / 110 * Math.Sqrt((1 - 0.07) * (1 - 0.05));
+            Assert.True(Math.Abs(ratio - expected) < 0.25 * expected, $"at {ratio:0.000} of the direct sound, expected {expected:0.000} (distance and the facade)");
+        });
+
         Test("acoustics: an entity behind a wall entity is heard through the wall's transmission", () =>
         {
             var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));

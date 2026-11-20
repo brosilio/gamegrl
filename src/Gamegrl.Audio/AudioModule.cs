@@ -434,6 +434,7 @@ internal sealed class AudioUpdate : ISystem
     private readonly int[] _requestIndex = new int[ReflectionVoices];
     private readonly List<VoiceHandle> _reflecting = [];
     private ReflectionResult? _paths;
+    private readonly ReflectionPath[] _quick = new ReflectionPath[ReflectionTaps.Count];
     private Vector3 _lastListener;
     private bool _haveListener;
 
@@ -728,11 +729,19 @@ internal sealed class AudioUpdate : ISystem
             if (!still) engine.SetReflections(held, default, Bands3.All(1));
         }
         _reflecting.Clear();
+        int quickSearches = 0;
         for (int k = 0; k < count; k++)
         {
             int i = _requestIndex[k];
             var voice = _pending[i];
-            var paths = _paths is null ? default : _paths.For(voice.Value);
+            ReadOnlySpan<ReflectionPath> paths = _paths is null ? default : _paths.For(voice.Value);
+            // A new sound the simulation thread hasn't reached yet (a gunshot is over before it would): first order now,
+            // off the few largest planes, for a few voices a frame.
+            if (paths.IsEmpty && !audio.Simulator.Inline && quickSearches < 4)
+            {
+                quickSearches++;
+                paths = _quick.AsSpan(0, ImageSources.Find(audio.Scene, audio.Listener.Translation, _pendingPosition[i], _quick, maxOrder: 1, maxPlanes: 16));
+            }
             if (paths.IsEmpty) continue;
             int n = AudioContext.Taps(paths, _pendingPosition[i], audio.Listener, _pendingEmitter[i], c, taps, out var tone);
             if (n == 0) continue;

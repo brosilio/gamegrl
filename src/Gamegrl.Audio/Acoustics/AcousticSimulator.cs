@@ -81,6 +81,8 @@ internal sealed class AcousticSimulator : IDisposable
     private Vector3 _lastListener;
     private float _lastTemperature, _lastHumidity;
 
+    /// <summary>Whether estimates are made in <see cref="Submit"/> (offline engines, tests) rather than on the simulation thread.</summary>
+    public bool Inline => _inline;
     public int Rays { get; init; } = 2048;
     public int Bounces { get; init; } = 64;
 

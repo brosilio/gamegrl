@@ -97,10 +97,11 @@ internal sealed class Mixer
         public Ramp ReverbSend, RemoteSend;
         public SpatialParams Spatial;
         // Early reflections: a delay line of the voice's dry signal (through the surfaces' tone), read by taps.
-        public float[] Delay = null!;
+        public float[]? Delay;   // lent from the pool while the voice has reflections
+        public int DelayIndex;
         public int DelayPos, TapCount, LiveTaps; // TapCount includes removed taps still fading out
         public int Tail;                         // after the clip ends: frames left for the reflections to sound
-        public bool DelayDirty;
+
         public BandEq3 ReflectionEq;
         public ReflectionTaps Taps;
         public Ramp[] TapDelay = null!;   // samples
@@ -129,8 +130,14 @@ internal sealed class Mixer
     private readonly float[] _voiceBlock = new float[MaxClipChannels * MaxBlock]; // a voice's block: planar inputs (or mono)
     private readonly float[] _dry = new float[MaxBlock], _tap = new float[MaxBlock];
     private readonly float[] _panScratch;
-    public const float MaxReflectionDelaySeconds = 0.12f;
+    /// <summary>Reflections arriving up to this long after the direct sound play (a facade ~60 m away, a big cave's second order).</summary>
+    public const float MaxReflectionDelaySeconds = 0.35f;
+    /// <summary>Delay lines for voices with reflections: only a few voices get them, so they're lent from a pool.</summary>
+    private const int DelayLines = 16;
     private readonly int _delayLength;
+    private readonly float[][] _delayPool = new float[DelayLines][];
+    private readonly int[] _freeDelays = new int[DelayLines];
+    private int _freeDelayCount;
     private readonly Voice[] _voices;
     private readonly Bus[] _buses;
     private readonly SpscRing<Command> _commands;
@@ -165,6 +172,8 @@ internal sealed class Mixer
         _scratch = new float[_bedChannels * MaxClipChannels];
         _panScratch = new float[_bedChannels];
         _delayLength = (int)(MaxReflectionDelaySeconds * sampleRate) + MaxBlock + 4;
+        for (int i = 0; i < DelayLines; i++) { _delayPool[i] = new float[_delayLength]; _freeDelays[i] = i; }
+        _freeDelayCount = DelayLines;
         _limiter = limiter ? new Limiter(_outChannels, sampleRate, limiterCeilingDb) : null;
         _commands = commands;
         _events = events;
@@ -172,7 +181,7 @@ internal sealed class Mixer
         for (int i = 0; i < maxVoices; i++)
             _voices[i] = new Voice
             {
-                Matrix = new Ramp[_bedChannels * MaxClipChannels], Delay = new float[_delayLength],
+                Matrix = new Ramp[_bedChannels * MaxClipChannels],
                 TapDelay = new Ramp[ReflectionTaps.Count], TapGains = new Ramp[ReflectionTaps.Count * _bedChannels],
             };
         _buses = new Bus[maxBuses];
@@ -263,7 +272,6 @@ internal sealed class Mixer
                 v.RemoteSend = default;
                 v.TapCount = v.LiveTaps = 0;
                 v.Tail = 0;
-                v.DelayDirty = true;
                 v.ReflectionEq.Init(_rate);
                 if (v.Positional) { v.Eq.Set(cmd.Spatial.Low, cmd.Spatial.Mid, cmd.Spatial.High, 0); v.ReverbSend.Set(cmd.Spatial.Reverb, 0); v.RemoteSend.Set(cmd.Spatial.RemoteReverb, 0); }
                 SetMatrix(v, 0, cmd.Matrix);
@@ -312,7 +320,14 @@ internal sealed class Mixer
             {
                 var v = Find(cmd.Target);
                 if (v is null || !v.Positional) break;
-                if (v.DelayDirty) { Array.Clear(v.Delay); v.DelayDirty = false; }
+                if (v.Delay is null)
+                {
+                    if (cmd.TapCount == 0 || _freeDelayCount == 0) break; // nothing to play, or every line is lent
+                    v.DelayIndex = _freeDelays[--_freeDelayCount];
+                    v.Delay = _delayPool[v.DelayIndex];
+                    Array.Clear(v.Delay);
+                    v.DelayPos = 0;
+                }
                 // Taps that are new start at their delay; existing ones glide to the new delay (Doppler on the reflection).
                 int previous = v.TapCount;
                 v.Taps = cmd.Taps;
@@ -426,7 +441,7 @@ internal sealed class Mixer
     {
         var dry = _dry.AsSpan(first, count);
         v.ReflectionEq.Process(dry);
-        var line = v.Delay;
+        var line = v.Delay!;
         int length = line.Length, start = v.DelayPos;
         for (int i = 0; i < count; i++) line[(start + i) % length] = dry[i];
         v.DelayPos = (start + count) % length;
@@ -611,6 +626,7 @@ internal sealed class Mixer
     {
         v.Active = false;
         v.Clip = null!;
+        if (v.Delay is not null) { _freeDelays[_freeDelayCount++] = v.DelayIndex; v.Delay = null; v.TapCount = v.LiveTaps = 0; }
         _events.TryPush(new AudioEvent { Kind = AudioEventKind.VoiceEnded, Voice = v.Handle, Time = time });
     }
 }
