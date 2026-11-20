@@ -462,6 +462,11 @@ internal sealed class Mixer
             if (v.Tail <= 0 || v.TapCount == 0) End(v, blockStart + remaining);
             return;
         }
+        if (v.Stop <= v.Start && v.Stop < blockStart + n)
+        {
+            End(v, v.Stop);
+            return;
+        }
         int first = (int)Math.Clamp(v.Start - blockStart, 0, n);
         if (first >= n) return;
         var clip = v.Clip;

@@ -131,6 +131,18 @@ internal static class AudioTests
             Assert.True(late[0] > 0.7f, "a late start plays immediately");
         });
 
+        Test("audio: stopping before a scheduled start cancels the cue in silence", () =>
+        {
+            using var engine = Engine();
+            var cue = engine.Play(Dc(), PlayOptions.Default with { StartTime = 1024 });
+            engine.Stop(cue, at: 127);
+            Render(engine, 64);
+            Assert.True(engine.IsPlaying(cue), "the scheduled stop is still ahead");
+            var output = Render(engine, 64);
+            Assert.True(!engine.IsPlaying(cue), "release the voice when its stop arrives");
+            Assert.True(output.All(x => x == 0) && Render(engine, 2048).All(x => x == 0), "no note or fade leaks through");
+        });
+
         Test("audio: resampling keeps pitch — a 44.1 kHz clip plays at its own pitch at 48 kHz; pitch 1.5 raises a fifth", () =>
         {
             var e = Engine(ChannelLayout.Mono);
