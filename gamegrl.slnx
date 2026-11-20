@@ -11,12 +11,14 @@
     <Project Path="src/Gamegrl.AssetPipeline/Gamegrl.AssetPipeline.csproj" />
     <Project Path="src/Gamegrl.UI/Gamegrl.UI.csproj" />
     <Project Path="src/Gamegrl.Physics2D/Gamegrl.Physics2D.csproj" />
+    <Project Path="src/Gamegrl.Audio/Gamegrl.Audio.csproj" />
     <Project Path="src/Gamegrl.Editor/Gamegrl.Editor.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Gamegrl.Tests/Gamegrl.Tests.csproj" />
     <Project Path="tests/Gamegrl.Bench/Gamegrl.Bench.csproj" />
     <Project Path="tests/Gamegrl.PhysicsBench/Gamegrl.PhysicsBench.csproj" />
+    <Project Path="tests/Gamegrl.AudioSmoke/Gamegrl.AudioSmoke.csproj" />
     <Project Path="tests/Gamegrl.Editor.PluginFixture/Gamegrl.Editor.PluginFixture.csproj" />
     <Project Path="tests/Gamegrl.Editor.Tests/Gamegrl.Editor.Tests.csproj" />
   </Folder>

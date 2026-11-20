@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Plays through a real output device (or renders the same program to WAV) and analyses recordings of it. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Gamegrl.Audio/Gamegrl.Audio.csproj" />
+  </ItemGroup>
+</Project>

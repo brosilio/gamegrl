@@ -35,6 +35,16 @@ dotnet publish tests/Gamegrl.Tests -c Release -o artifacts/tests-aot-v3 -p:IlcIn
 ./artifacts/tests-aot-v3/Gamegrl.Tests math
 ./artifacts/tests-aot-v3/Gamegrl.Tests physics2d
 
+# Audio under NativeAOT: the ALSA interop must compile; render the smoke program offline and check its beats land
+# exactly one beat apart. GAMEGRL_AUDIO_DEVICE=1 also plays it on the default ALSA device (fails on underruns).
+echo "== audio (NativeAOT smoke)"
+dotnet publish tests/Gamegrl.AudioSmoke -c Release -o artifacts/audio-smoke -nologo -v q -m:1
+./artifacts/audio-smoke/Gamegrl.AudioSmoke --wav artifacts/audio-smoke/smoke.wav --layout 5.1 --seconds 2 > /dev/null
+./artifacts/audio-smoke/Gamegrl.AudioSmoke --analyze artifacts/audio-smoke/smoke.wav --expect-spacing 24000 | tail -1
+if [[ "${GAMEGRL_AUDIO_DEVICE:-0}" == "1" ]]; then
+    ./artifacts/audio-smoke/Gamegrl.AudioSmoke --seconds 2
+fi
+
 # Performance: scenarios under the profiler, gated against perf/baselines/<machine>.json (allocations exactly, times
 # within a tolerance). No baseline for this machine only warns. GAMEGRL_BENCH=0 skips this on a loaded machine.
 if [[ "${GAMEGRL_BENCH:-1}" == "1" ]]; then

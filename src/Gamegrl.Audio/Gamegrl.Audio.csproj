@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Hand-rolled audio: the real-time mixer, voices, buses, DSP, the beat clock, WAV, and our own device backends (ALSA first). -->
+  <ItemGroup>
+    <ProjectReference Include="../Gamegrl.Core/Gamegrl.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Gamegrl.Tests" />
+  </ItemGroup>
+</Project>
