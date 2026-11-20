@@ -16,14 +16,15 @@ public readonly record struct BusHandle(int Index);
 /// <summary>
 /// Where a positional voice is heard from, computed by the game once per frame (see <see cref="Spatial.Propagation"/>):
 /// the direction in listener space (+X right, +Y up, −Z forward), the linear gain (distance, directivity, HDR), how far
-/// it spreads over the speakers (0 a point, 1 everywhere), the Doppler factor, and per-band gains (air absorption,
-/// occlusion) for below 800 Hz, 800 Hz–8 kHz and above.
+/// it spreads over the speakers (0 a point, 1 everywhere), the Doppler factor, per-band gains (air absorption,
+/// occlusion) for below 800 Hz, 800 Hz–8 kHz and above, and its send to the room's reverb (its level before distance).
 /// </summary>
 public struct SpatialParams
 {
     public Vector3 Direction;
     public float Gain, Spread, Doppler;
     public float Low, Mid, High;
+    public float Reverb;
 
     public static SpatialParams Default => new() { Direction = -Vector3.UnitZ, Gain = 1, Doppler = 1, Low = 1, Mid = 1, High = 1 };
 }
@@ -274,6 +275,10 @@ public sealed class AudioEngine : IDisposable
         _voices[i].Rotation = rotation;
         if (Rendering(i)) Post(new Command { Kind = CommandKind.VoiceRotation, Target = _voices[i].Mixer, Rotation = rotation, Ramp = Frames(rampSeconds) });
     }
+
+    /// <summary>The room's late reverb (decay per band, level, pre-delay), usually from <see cref="Acoustics.ReverbEstimator"/>; ramps over <paramref name="rampSeconds"/>.</summary>
+    public void SetReverb(in Acoustics.ReverbParams reverb, float rampSeconds = 0.25f) =>
+        Post(new Command { Kind = CommandKind.Reverb, Reverb = reverb, Ramp = Frames(rampSeconds) });
 
     /// <summary>Whether the mixer is rendering a voice right now (rather than tracking it virtually).</summary>
     public bool IsRendered(VoiceHandle voice) => TryGet(voice, out int i) && Rendering(i);

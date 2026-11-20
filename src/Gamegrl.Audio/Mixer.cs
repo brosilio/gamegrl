@@ -5,7 +5,7 @@ using Gamegrl.Audio.Spatial;
 
 namespace Gamegrl.Audio;
 
-internal enum CommandKind : byte { Play, Stop, VoiceGain, VoicePan, VoicePitch, VoiceSpatial, VoiceRotation, BusCreate, BusGain }
+internal enum CommandKind : byte { Play, Stop, VoiceGain, VoicePan, VoicePitch, VoiceSpatial, VoiceRotation, BusCreate, BusGain, Reverb }
 
 /// <summary>A message from the game to the audio thread. Times are engine samples; ramps are in frames.</summary>
 internal struct Command
@@ -22,6 +22,7 @@ internal struct Command
     public Quaternion Rotation; // ambisonic voices: the field's rotation (the listener's inverse)
     public AudioClip? Clip;
     public float[]? Matrix;     // Play, multichannel clips: clip → bed gains, computed and cached on the game side
+    public Acoustics.ReverbParams Reverb;
 }
 
 internal enum AudioEventKind : byte { VoiceEnded }
@@ -90,6 +91,7 @@ internal sealed class Mixer
         public Ramp[] Matrix = null!; // bed channel o, input i at [o * Inputs + i]
         public int Inputs;            // clip channels, or 1 for positional voices (the clip mixed to mono)
         public BandEq3 Eq;
+        public Ramp ReverbSend;
         public SpatialParams Spatial;
         public Quaternion Rotation = Quaternion.Identity;
     }
@@ -107,6 +109,8 @@ internal sealed class Mixer
     private readonly Panner _panner;
     private readonly AmbisonicDecoder _ambisonics;
     private readonly BinauralVirtualizer? _binaural;
+    private readonly Fdn _reverb;
+    private readonly float[] _reverbInput = new float[MaxBlock];
     private readonly float[] _outBuffer;
     private readonly float[] _frame = new float[MaxClipChannels];
     private readonly float[] _scratch;
@@ -139,6 +143,7 @@ internal sealed class Mixer
         _panner = new Panner(_bed);
         _ambisonics = new AmbisonicDecoder(_bed);
         _binaural = headphones ? new BinauralVirtualizer(_bed, sampleRate) : null;
+        _reverb = new Fdn(_bed, sampleRate);
         _outBuffer = new float[_outChannels * MaxBlock];
         _scratch = new float[_bedChannels * MaxClipChannels];
         _limiter = limiter ? new Limiter(_outChannels, sampleRate, limiterCeilingDb) : null;
@@ -174,6 +179,7 @@ internal sealed class Mixer
             if (!bus.Used) continue;
             for (int c = 0; c < _bedChannels; c++) Array.Clear(bus.Buffer, c * MaxBlock, n);
         }
+        Array.Clear(_reverbInput, 0, n);
         foreach (var v in _voices) if (v.Active) RenderVoice(v, blockStart, n);
 
         // Children have higher indices than their parents: fold the tree from the leaves up.
@@ -189,6 +195,7 @@ internal sealed class Mixer
             }
         }
         var master = _buses[0].Buffer;
+        _reverb.Process(_reverbInput.AsSpan(0, n), master, MaxBlock, n);
         for (int f = 0; f < n; f++)
         {
             float g = _buses[0].Gain.Next();
@@ -226,7 +233,8 @@ internal sealed class Mixer
                 if (cmd.Ramp > 0) v.Gain.Set(cmd.Value, cmd.Ramp);
                 v.Inputs = v.Positional ? 1 : clip.Channels;
                 v.Eq.Init(_rate);
-                if (v.Positional) v.Eq.Set(cmd.Spatial.Low, cmd.Spatial.Mid, cmd.Spatial.High, 0);
+                v.ReverbSend = default;
+                if (v.Positional) { v.Eq.Set(cmd.Spatial.Low, cmd.Spatial.Mid, cmd.Spatial.High, 0); v.ReverbSend.Set(cmd.Spatial.Reverb, 0); }
                 SetMatrix(v, 0, cmd.Matrix);
                 break;
             }
@@ -263,6 +271,7 @@ internal sealed class Mixer
                 v.Doppler = cmd.Spatial.Doppler;
                 v.Step = StepFor(v);
                 v.Eq.Set(cmd.Spatial.Low, cmd.Spatial.Mid, cmd.Spatial.High, cmd.Ramp);
+                v.ReverbSend.Set(cmd.Spatial.Reverb, cmd.Ramp);
                 SetMatrix(v, cmd.Ramp, null);
                 break;
             }
@@ -283,6 +292,7 @@ internal sealed class Mixer
                 break;
             }
             case CommandKind.BusGain: _buses[cmd.Target].Gain.Set(cmd.Value, cmd.Ramp); break;
+            case CommandKind.Reverb: _reverb.Set(cmd.Reverb, cmd.Ramp); break;
         }
     }
 
@@ -384,7 +394,11 @@ internal sealed class Mixer
         }
 
         int count = f - first;
-        if (positional && count > 0) v.Eq.Process(block.AsSpan(first, count));
+        if (positional && count > 0)
+        {
+            v.Eq.Process(block.AsSpan(first, count));
+            AddRamped(_reverbInput.AsSpan(first, count), block.AsSpan(first, count), ref v.ReverbSend);
+        }
         if (count > 0)
         {
             var buffer = _buses[v.Bus].Buffer;

@@ -51,6 +51,17 @@ internal struct BandEq3
         }
     }
 
+    /// <summary>For filters run a sample at a time (the reverb's lines): advance the ramps and refresh the shelves for the next <paramref name="frames"/>.</summary>
+    public void Tick(int frames)
+    {
+        Low.Advance(frames); High.Advance(frames); Mid.Advance(frames);
+        Shelves();
+    }
+
+    /// <summary>One sample at the current coefficients (see <see cref="Tick"/>).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public float Sample(float x) => _high.Process(_low.Process(x)) * Mid.Current;
+
     private void Shelves()
     {
         float mid = MathF.Max(Mid.Current, MathF.Max(Low.Current, High.Current) * 1e-4f);

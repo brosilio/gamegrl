@@ -2,6 +2,7 @@ using System.Numerics;
 using Gamegrl.Assets;
 using Gamegrl.Audio;
 using Gamegrl.Audio.Acoustics;
+using Gamegrl.Audio.Dsp;
 using static Gamegrl.Tests.Harness;
 namespace Gamegrl.Tests;
 
@@ -31,6 +32,25 @@ internal static class AcousticsTests
             if (d > 1e-5f && d < best) best = d;
         }
         return best;
+    }
+
+    /// <summary>T60 from an impulse response's energy (summed over channels): Schroeder backward integration, a line fitted from −5 to −35 dB.</summary>
+    private static double SchroederT60(double[] energy, int rate)
+    {
+        var edc = new double[energy.Length];
+        double acc = 0;
+        for (int i = energy.Length - 1; i >= 0; i--) { acc += energy[i]; edc[i] = acc; }
+        double sx = 0, sy = 0, sxx = 0, sxy = 0; int n = 0;
+        for (int i = 0; i < edc.Length; i++)
+        {
+            double db = 10 * Math.Log10(edc[i] / edc[0]);
+            if (db > -5) continue;
+            if (db < -35) break;
+            double t = (double)i / rate;
+            sx += t; sy += db; sxx += t * t; sxy += t * db; n++;
+        }
+        double slope = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+        return -60 / slope;
     }
 
     public static void Register()
@@ -110,6 +130,122 @@ internal static class AcousticsTests
             }
             foreach (var m in new[] { AcousticMaterial.Generic, AcousticMaterial.Brick, AcousticMaterial.Concrete, AcousticMaterial.Carpet, AcousticMaterial.Glass, AcousticMaterial.Rock, AcousticMaterial.Water, AcousticMaterial.Foliage, AcousticMaterial.Fabric })
                 for (int b = 0; b < 3; b++) Assert.True(m.Absorption[b] is >= 0 and <= 1 && m.Transmission[b] is >= 0 and <= 1, "preset values are fractions");
+        });
+
+        Test("acoustics: ray-traced reverberation time in a shoebox matches Eyring; volume, surface and enclosure come out right", () =>
+        {
+            // 10 × 6 × 4 m: V = 240 m³, S = 248 m², fully scattering walls (a diffuse field). Eyring, T = 0.161·V / (−S·ln(1 − α)),
+            // assumes every reflection one mean free path apart; Kuttruff's refinement accounts for the spread of path
+            // lengths (relative variance γ² ≈ 0.4 in ordinary rooms): T = T_Eyring / (1 + γ²/2 · ln(1 − α)). Sabine is the upper bound.
+            foreach (float alpha in new[] { 0.2f, 0.5f })
+            {
+                var builder = new AcousticSceneBuilder();
+                builder.AddBox(Box(Vector3.Zero, new Vector3(10, 6, 4)), new AcousticMaterial(Bands3.All(alpha), 1, Bands3.All(0)));
+                var p = ReverbEstimator.Estimate(builder.Build(), new Vector3(1.3f, 0.4f, -0.7f), rays: 4096, bounces: 200, airAbsorption: false);
+                double eyring = 0.161 * 240 / (-248 * Math.Log(1 - alpha)), sabine = 0.161 * 240 / (248 * alpha);
+                double kuttruff = eyring / (1 + 0.2 * Math.Log(1 - alpha));
+                float t = p.DecaySeconds.Mid;
+                Assert.True(Math.Abs(t - kuttruff) < 0.05 * kuttruff && t > eyring && t < sabine,
+                    $"α {alpha}: T60 {t:0.000} s; Eyring {eyring:0.000}, Kuttruff {kuttruff:0.000}, Sabine {sabine:0.000}");
+                Assert.True(Math.Abs(p.Volume - 240) < 0.05 * 240, $"volume {p.Volume:0.0} m³");
+                Assert.True(Math.Abs(p.Surface - 248) < 0.12 * 248, $"surface {p.Surface:0.0} m² (from the mean free path)");
+                Assert.True(p.Enclosure == 1 && p.Level > 0, $"enclosed, level {p.Level:0.00}");
+            }
+            var bands = new AcousticSceneBuilder();
+            bands.AddBox(Box(Vector3.Zero, new Vector3(10, 6, 4)), new AcousticMaterial(new Bands3(0.1f, 0.3f, 0.6f), 0.5f, Bands3.All(0)));
+            var d = ReverbEstimator.Estimate(bands.Build(), Vector3.Zero, airAbsorption: false).DecaySeconds;
+            Assert.True(d.Low > d.Mid && d.Mid > d.High, $"absorbent highs decay faster: {d}");
+            // Out in the open on a big floor: half the rays escape, little reverb.
+            var floor = new AcousticSceneBuilder();
+            floor.AddBox(Box(new Vector3(0, -2, 0), new Vector3(200, 0.1f, 200)), AcousticMaterial.Concrete);
+            var open = ReverbEstimator.Estimate(floor.Build(), Vector3.Zero);
+            Assert.True(Math.Abs(open.Enclosure - 0.5f) < 0.02f && open.Level < 0.2f, $"open air: enclosure {open.Enclosure:0.00}, level {open.Level:0.00}");
+            Assert.True(ReverbEstimator.Estimate(AcousticScene.Empty, Vector3.Zero).IsSilent, "no geometry, no reverb");
+        });
+
+        Test("acoustics: the FDN reverb decays at its set time per band and puts out unit energy", () =>
+        {
+            var fdn = new Fdn(ChannelLayout.Stereo, Rate);
+            fdn.Set(new ReverbParams { DecaySeconds = Bands3.All(1), Level = 1 }, 0);
+            int frames = 3 * Rate;
+            var input = new float[512];
+            var bed = new float[2 * 512];
+            var energy = new double[frames];
+            double total = 0;
+            for (int f = 0; f < frames; f += 512)
+            {
+                Array.Clear(input); Array.Clear(bed);
+                if (f == 0) input[0] = 1;
+                fdn.Process(input, bed, 512, 512);
+                for (int i = 0; i < 512 && f + i < frames; i++) { double e = bed[i] * bed[i] + bed[512 + i] * bed[512 + i]; energy[f + i] = e; total += e; }
+            }
+            double t60 = SchroederT60(energy, Rate);
+            Assert.True(Math.Abs(t60 - 1) < 0.1, $"set to 1 s, measured {t60:0.000} s");
+            Assert.True(total > 0.7 && total < 1.4, $"a unit impulse's tail carries {total:0.00} of its energy");
+
+            // Low 2 s, high 0.5 s: the tail darkens.
+            var dark = new Fdn(ChannelLayout.Stereo, Rate);
+            dark.Set(new ReverbParams { DecaySeconds = new Bands3(2, 1, 0.5f), Level = 1 }, 0);
+            var lowE = new double[frames]; var highE = new double[frames];
+            var lp = Biquad.LowPass(300, Rate); var lp2 = Biquad.LowPass(10000, Rate);
+            for (int f = 0; f < frames; f += 512)
+            {
+                Array.Clear(input); Array.Clear(bed);
+                if (f == 0) input[0] = 1;
+                dark.Process(input, bed, 512, 512);
+                for (int i = 0; i < 512 && f + i < frames; i++)
+                {
+                    float x = bed[i];
+                    float low = lp.Process(x), high = x - lp2.Process(x);
+                    lowE[f + i] = low * low; highE[f + i] = high * high;
+                }
+            }
+            double tLow = SchroederT60(lowE, Rate), tHigh = SchroederT60(highE, Rate);
+            Assert.True(Math.Abs(tLow - 2) < 0.3 && tHigh < 0.8, $"low band {tLow:0.00} s (set 2), high band {tHigh:0.00} s (set 0.5)");
+        });
+
+        Test("acoustics: in a concrete room a burst leaves a tail decaying at the estimated time; in the open, none", () =>
+        {
+            double[] Run(bool room, out ReverbParams reverb)
+            {
+                var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));
+                using var app = b.Build();
+                var w = app.World;
+                var context = w.Resource<AudioContext>();
+                w.Resource<AudioEnvironment>().Hdr = false;
+                var burst = new AssetRef<AudioAsset>(Guid.NewGuid());
+                var noise = new Random(5);
+                context.Register(burst, AudioClip.Generate("burst", Rate, Rate / 10, _ => 0.5f * (float)(noise.NextDouble() * 2 - 1)));
+                w.Spawn(LocalTransform.Identity, new LocalToWorld(), AudioListener.Default);
+                if (room) w.Spawn(new LocalTransform { Position = new Vector3(0, 1, -1), Rotation = Quaternion.Identity, Scale = new Vector3(12, 5, 9) }, new LocalToWorld(), AcousticSurface.Box(AcousticMaterial.Concrete));
+                app.Tick(1 / 60.0); app.Tick(1 / 60.0); // geometry and the reverb estimate settle (and the reverb's level ramps in)
+                for (int i = 0; i < 20; i++) { app.Tick(1 / 60.0); context.Engine.Render(new float[Rate / 60 * 2]); }
+                w.Spawn(LocalTransform.At(new Vector3(2, 0, -3)), new LocalToWorld(), AudioSource.At(burst));
+                const int frame = Rate / 60;
+                var energy = new double[3 * Rate];
+                for (int f = 0; f < energy.Length; f += frame)
+                {
+                    app.Tick(1 / 60.0);
+                    var o = new float[frame * 2];
+                    context.Engine.Render(o);
+                    for (int i = 0; i < frame && f + i < energy.Length; i++) energy[f + i] = o[2 * i] * o[2 * i] + o[2 * i + 1] * o[2 * i + 1];
+                }
+                reverb = context.Reverb;
+                return energy;
+            }
+            var withRoom = Run(true, out var estimate);
+            var open = Run(false, out var none);
+            Assert.True(estimate.DecaySeconds.Mid > 1.5f && estimate.Enclosure == 1, $"concrete room: T60 {estimate.DecaySeconds}, enclosure {estimate.Enclosure}");
+            Assert.True(none.IsSilent, "no surfaces, no reverb");
+            double Sum(double[] e, int from, int to) { double s = 0; for (int i = from; i < to; i++) s += e[i]; return s; }
+            double burstEnergy = Sum(withRoom, 0, Rate / 8), tail = Sum(withRoom, Rate / 2, Rate);
+            Assert.True(tail > 1e-3 * burstEnergy && Sum(open, Rate / 2, Rate) < 1e-12,
+                $"between 0.5 and 1 s: room {tail / burstEnergy:0.0e0} of the burst's energy, open {Sum(open, Rate / 2, Rate):0.0e0}");
+            // The tail's decay, measured from the render after the burst (broadband, so between the low and high bands' times).
+            var after = withRoom.AsSpan(Rate / 8).ToArray();
+            double measured = SchroederT60(after, Rate);
+            Assert.True(measured > estimate.DecaySeconds.High * 0.8 && measured < estimate.DecaySeconds.Low * 1.25,
+                $"rendered tail decays in {measured:0.00} s; estimated {estimate.DecaySeconds}");
         });
 
         Test("acoustics: an entity behind a wall entity is heard through the wall's transmission", () =>

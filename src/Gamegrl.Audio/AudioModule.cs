@@ -96,10 +96,13 @@ public struct AudioEnvironment
     [Range(0, 140)] public float HdrFloorDb;
     /// <summary>How far below full scale the window's top plays, leaving room for sounds that overlap.</summary>
     [Range(0, 24)] public float HdrHeadroomDb;
+    /// <summary>The room's late reverb, estimated from the acoustic surfaces around the listener.</summary>
+    public bool Reverb;
 
     public static AudioEnvironment Default => new()
     {
         TemperatureC = 20, HumidityPercent = 50, DopplerScale = 1, Hdr = true, HdrRangeDb = 60, HdrReleaseDbPerSecond = 12, HdrFloorDb = 50, HdrHeadroomDb = 6,
+        Reverb = true,
     };
 }
 
@@ -126,6 +129,9 @@ public sealed class AudioContext : IDisposable
     public HdrWindow Hdr { get; } = new();
     /// <summary>The acoustic geometry, rebuilt from <see cref="AcousticSurface"/>s when they change.</summary>
     public AcousticScene Scene { get; internal set; } = AcousticScene.Empty;
+    /// <summary>The late reverb at the listener, as last estimated (see <see cref="ReverbEstimator"/>).</summary>
+    public ReverbParams Reverb { get; internal set; } = ReverbParams.None;
+    internal AcousticSimulator Simulator;
     /// <summary>The listener's world transform as of the last audio update (identity before one is found).</summary>
     public Matrix4x4 Listener { get; internal set; } = Matrix4x4.Identity;
     internal float ListenerGain = 1;
@@ -134,7 +140,11 @@ public sealed class AudioContext : IDisposable
     /// <summary>Reports a missing or broken clip, once per asset.</summary>
     public Action<string> Warn { get; set; } = message => Log.Warn("audio: " + message);
 
-    public AudioContext(AudioEngine engine) => Engine = engine;
+    public AudioContext(AudioEngine engine, bool inlineSimulation = false)
+    {
+        Engine = engine;
+        Simulator = new AcousticSimulator(inlineSimulation);
+    }
 
     internal void Bind(IAssetSource? assets)
     {
@@ -186,7 +196,9 @@ public sealed class AudioContext : IDisposable
         if (Environment.Hdr && spatial.Gain > 0)
         {
             if (starting) Hdr.Raise(loudness);
-            spatial.Gain = HdrGain(loudness, volume);
+            float hdr = HdrGain(loudness, volume);
+            spatial.Reverb *= hdr / spatial.Gain;
+            spatial.Gain = hdr;
         }
         return spatial;
     }
@@ -223,7 +235,10 @@ public sealed class AudioContext : IDisposable
         float heard = gain * volume * occlusion.Mid; // occlusion counts toward loudness (HDR, which voices render)
         loudness = heard > 0 ? emitter.LoudnessDb + 20 * MathF.Log10(heard) : float.NegativeInfinity;
         float spread = emitter.Radius > 0 ? Math.Clamp(emitter.Radius / MathF.Max(distance, 1e-3f), 0, 1) : 0;
-        return new SpatialParams { Direction = direction, Gain = gain * ListenerGain, Spread = spread, Doppler = doppler, Low = low, Mid = mid, High = high };
+        // The reverb hears the source at its own level, not its distance: the reverberant field is even through a room.
+        float send = env.Reverb ? Propagation.DistanceGain(MathF.Max(distance, emitter.MinDistance), emitter.MinDistance, float.MaxValue, emitter.Rolloff) : 0;
+        float reverb = send > 0 && distance < emitter.MaxDistance ? gain / send * ListenerGain : 0;
+        return new SpatialParams { Direction = direction, Gain = gain * ListenerGain, Spread = spread, Doppler = doppler, Low = low, Mid = mid, High = high, Reverb = reverb };
     }
 
     /// <summary>The direct path's per-band transmission from a source to the listener (all ones without geometry or with occlusion off).</summary>
@@ -249,6 +264,7 @@ public sealed class AudioContext : IDisposable
     public void Dispose()
     {
         if (_assets is not null) _assets.Changed -= OnChanged;
+        Simulator.Dispose();
         Engine.Dispose();
     }
 }
@@ -267,7 +283,8 @@ public sealed class AudioModule(AudioOutput output, string? device = null, bool 
     public void Build(EngineBuilder builder)
     {
         builder.AddModule<CoreModule>();
-        var audio = new AudioContext(CreateEngine());
+        var engine = CreateEngine();
+        var audio = new AudioContext(engine, inlineSimulation: engine.Device is null);
         builder.SetResource(audio, a => { a.Engine.StopAll(); a.OneShots.Clear(); return a; });
         builder.SetResource(AudioEnvironment.Default);
         builder.AddSystem(new AcousticGeometryUpdate());
@@ -348,6 +365,12 @@ internal sealed class AudioUpdate : ISystem
         engine.Update();
         float dt = world.HasResource<Time>() ? MathF.Max(world.Resource<Time>().Delta, 1e-4f) : 1 / 60f;
         UpdateListener(audio, dt);
+        if (env.Reverb)
+        {
+            audio.Simulator.Submit(audio.Scene, audio.Listener.Translation, env.TemperatureC, env.HumidityPercent);
+            if (audio.Simulator.TryTake(out var reverb)) { audio.Reverb = reverb; engine.SetReverb(reverb); }
+        }
+        else if (!audio.Reverb.IsSilent) { audio.Reverb = ReverbParams.None; engine.SetReverb(ReverbParams.None); }
         var orientation = Quaternion.CreateFromRotationMatrix(Orthonormal(audio.Listener));
         int stamp = ++_stamp;
         _pendingCount = 0;
@@ -431,7 +454,12 @@ internal sealed class AudioUpdate : ISystem
         for (int i = 0; i < _pendingCount; i++)
         {
             var p = _pendingParams[i];
-            if (env.Hdr && p.Gain > 0) p.Gain = audio.HdrGain(_pendingLoudness[i], _pendingVolume[i]);
+            if (env.Hdr && p.Gain > 0)
+            {
+                float hdr = audio.HdrGain(_pendingLoudness[i], _pendingVolume[i]);
+                p.Reverb *= hdr / p.Gain;
+                p.Gain = hdr;
+            }
             // Ramp over one frame, so each update lands just as the next arrives (a ramp longer than the frame would
             // restart before finishing and lag behind forever).
             engine.SetSpatial(_pending[i], p, rampSeconds: Math.Clamp(dt, 0.002f, 0.05f));
