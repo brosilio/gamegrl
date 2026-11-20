@@ -1,3 +1,4 @@
+using System.Numerics;
 using Gamegrl.Audio.Devices;
 
 namespace Gamegrl.Audio;
@@ -11,6 +12,21 @@ public readonly record struct VoiceHandle(int Value)
 
 /// <summary>A mixer bus. <see cref="AudioEngine.Master"/> is the root; every other bus feeds a parent.</summary>
 public readonly record struct BusHandle(int Index);
+
+/// <summary>
+/// Where a positional voice is heard from, computed by the game once per frame (see <see cref="Spatial.Propagation"/>):
+/// the direction in listener space (+X right, +Y up, −Z forward), the linear gain (distance, directivity, HDR), how far
+/// it spreads over the speakers (0 a point, 1 everywhere), the Doppler factor, and per-band gains (air absorption,
+/// occlusion) for below 800 Hz, 800 Hz–8 kHz and above.
+/// </summary>
+public struct SpatialParams
+{
+    public Vector3 Direction;
+    public float Gain, Spread, Doppler;
+    public float Low, Mid, High;
+
+    public static SpatialParams Default => new() { Direction = -Vector3.UnitZ, Gain = 1, Doppler = 1, Low = 1, Mid = 1, High = 1 };
+}
 
 public struct PlayOptions
 {
@@ -26,8 +42,13 @@ public struct PlayOptions
     public float FadeInSeconds;
     /// <summary>Where in the clip to start, in seconds.</summary>
     public double Offset;
+    /// <summary>Heard from a direction (<see cref="Spatial"/>, updated with <see cref="AudioEngine.SetSpatial"/>); the clip plays as mono.</summary>
+    public bool Positional;
+    public SpatialParams Spatial;
+    /// <summary>Ambisonic clips: the listener's orientation, so the sound field stays fixed in the world.</summary>
+    public Quaternion ListenerOrientation;
 
-    public static PlayOptions Default => new() { Gain = 1, Pitch = 1 };
+    public static PlayOptions Default => new() { Gain = 1, Pitch = 1, Spatial = SpatialParams.Default, ListenerOrientation = Quaternion.Identity };
 }
 
 public struct AudioEngineSettings
@@ -36,6 +57,8 @@ public struct AudioEngineSettings
     /// <summary>A lookahead peak limiter on the master bus, so nothing clips at the device.</summary>
     public bool Limiter;
     public float LimiterCeilingDb;
+    /// <summary>Render for headphones: mix into a virtual 7.1.4 bed heard through the spherical-head model (needs a stereo output).</summary>
+    public bool Headphones;
 
     public static AudioEngineSettings Default => new() { MaxVoices = 256, MaxBuses = 64, CommandCapacity = 4096, Limiter = true, LimiterCeilingDb = -1 };
 }
@@ -55,11 +78,16 @@ public sealed class AudioEngine : IDisposable
     private readonly bool[] _playing;
     private readonly int[] _free;
     private readonly int _maxBuses;
+    private readonly Dictionary<ChannelLayout, float[]> _matrices = [];
     private int _freeCount, _busCount = 1, _dropped;
     private IAudioDevice? _device;
 
     public int SampleRate => _mixer.SampleRate;
+    /// <summary>The output's layout.</summary>
     public ChannelLayout Layout => _mixer.Layout;
+    /// <summary>The layout everything mixes into: the output's, or the virtual 7.1.4 for headphones.</summary>
+    public ChannelLayout BedLayout => _mixer.Bed;
+    public bool Headphones => _mixer.Bed != _mixer.Layout;
     public BusHandle Master => new(0);
     /// <summary>The engine sample the audio thread renders next. Sounds scheduled at or after <c>Time + LatencyFrames</c> start exactly on time.</summary>
     public long Time => _mixer.Time;
@@ -76,8 +104,7 @@ public sealed class AudioEngine : IDisposable
         if (settings.MaxVoices is <= 0 or > 0xFFFF) throw new ArgumentOutOfRangeException(nameof(settings), "MaxVoices must be 1..65535");
         _commands = new SpscRing<Command>(settings.CommandCapacity);
         _events = new SpscRing<AudioEvent>(settings.MaxVoices * 2);
-        var limiter = settings.Limiter ? new Limiter(layout.Count, sampleRate, settings.LimiterCeilingDb) : null;
-        _mixer = new Mixer(sampleRate, layout, settings.MaxVoices, settings.MaxBuses, limiter, _commands, _events);
+        _mixer = new Mixer(sampleRate, layout, settings.Headphones, settings.MaxVoices, settings.MaxBuses, settings.Limiter, settings.LimiterCeilingDb, _commands, _events);
         _maxBuses = settings.MaxBuses;
         _generations = new int[settings.MaxVoices];
         _playing = new bool[settings.MaxVoices];
@@ -118,6 +145,8 @@ public sealed class AudioEngine : IDisposable
             Kind = CommandKind.Play, Target = handle.Value, Clip = clip, Bus = options.Bus.Index, Loop = options.Loop,
             Time = options.StartTime, Value = options.Gain, Pan = options.Pan, Pitch = options.Pitch <= 0 ? 1 : options.Pitch,
             Ramp = Frames(options.FadeInSeconds), Offset = (long)Math.Round(options.Offset * clip.SampleRate * 4294967296.0),
+            Positional = options.Positional, Spatial = options.Spatial, Rotation = Quaternion.Conjugate(Normalised(options.ListenerOrientation)),
+            Matrix = !options.Positional && clip.Channels > 1 && !clip.Layout.IsAmbisonic ? MatrixFor(clip.Layout) : null,
         });
         return handle;
     }
@@ -143,6 +172,26 @@ public sealed class AudioEngine : IDisposable
     public void SetPitch(VoiceHandle voice, float pitch)
     {
         if (IsPlaying(voice) && pitch > 0) Post(new Command { Kind = CommandKind.VoicePitch, Target = voice.Value, Value = pitch });
+    }
+
+    /// <summary>Moves a positional voice: direction, gain, spread, Doppler and band gains, ramped over <paramref name="rampSeconds"/>.</summary>
+    public void SetSpatial(VoiceHandle voice, in SpatialParams spatial, float rampSeconds = 0.02f)
+    {
+        if (IsPlaying(voice)) Post(new Command { Kind = CommandKind.VoiceSpatial, Target = voice.Value, Spatial = spatial, Ramp = Frames(rampSeconds) });
+    }
+
+    /// <summary>Ambisonic voices: the listener's current orientation, so the field stays fixed in the world as the head turns.</summary>
+    public void SetListenerOrientation(VoiceHandle voice, Quaternion orientation, float rampSeconds = 0.02f)
+    {
+        if (IsPlaying(voice)) Post(new Command { Kind = CommandKind.VoiceRotation, Target = voice.Value, Rotation = Quaternion.Conjugate(Normalised(orientation)), Ramp = Frames(rampSeconds) });
+    }
+
+    private static Quaternion Normalised(Quaternion q) => q.LengthSquared() < 1e-12f ? Quaternion.Identity : Quaternion.Normalize(q);
+
+    private float[] MatrixFor(ChannelLayout clip)
+    {
+        if (!_matrices.TryGetValue(clip, out var m)) _matrices[clip] = m = ChannelLayout.MixMatrix(clip, BedLayout);
+        return m;
     }
 
     /// <summary>A new bus feeding <paramref name="parent"/>. Buses live as long as the engine.</summary>

@@ -7,10 +7,11 @@ using Gamegrl.Audio.Devices;
 //
 //   Gamegrl.AudioSmoke [--device default] [--layout stereo|quad|5.1|7.1|7.1.4] [--seconds 4] [--period 256]
 //   Gamegrl.AudioSmoke --wav out.wav [--layout 5.1] [--seconds 4]      render offline instead
+//   Gamegrl.AudioSmoke --bench N                                       N moving positional voices, offline: real-time factor
 //   Gamegrl.AudioSmoke --analyze recording.wav [--expect-spacing N]     click onsets and their spacing (fails without 3 in a row N apart)
 
 string? device = null, wav = null, analyze = null;
-int expectSpacing = 0;
+int expectSpacing = 0, bench = 0;
 var layout = ChannelLayout.Stereo;
 double seconds = 4;
 int period = 256;
@@ -27,12 +28,14 @@ for (int i = 0; i < args.Length; i++)
         case "--period": period = int.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
         case "--wav": wav = Next(); break;
         case "--analyze": analyze = Next(); break;
+        case "--bench": bench = int.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
         case "--expect-spacing": expectSpacing = int.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
         default: throw new ArgumentException("unknown argument " + args[i]);
     }
 }
 
 if (analyze is not null) return Analyze(analyze, expectSpacing);
+if (bench > 0) { Bench(bench, headphones: false); Bench(bench, headphones: true); return 0; }
 
 const int Rate = 48000;
 AudioEngine engine;
@@ -148,4 +151,29 @@ static int Analyze(string path, int expectSpacing)
     for (int i = 1; i < onsets.Count; i++) { run = onsets[i] - onsets[i - 1] == expectSpacing ? run + 1 : 0; best = Math.Max(best, run); }
     Console.WriteLine($"longest run spaced exactly {expectSpacing}: {best}");
     return best >= 3 ? 0 : 1;
+}
+
+// N looping positional voices whose directions change every 60 Hz frame, rendered offline for 10 s.
+static void Bench(int voices, bool headphones)
+{
+    const int rate = 48000, seconds = 10, frame = rate / 60;
+    var engine = AudioEngine.Offline(rate, headphones ? ChannelLayout.Stereo : ChannelLayout.Surround71, AudioEngineSettings.Default with { Headphones = headphones, MaxVoices = Math.Max(256, voices) });
+    var clip = AudioClip.Sine(220, 1.37f, rate);
+    var handles = new VoiceHandle[voices];
+    var random = new Random(4);
+    for (int i = 0; i < voices; i++) handles[i] = engine.Play(clip, PlayOptions.Default with { Loop = true, Positional = true, Gain = 0.01f });
+    var block = new float[frame * engine.Layout.Count];
+    var watch = Stopwatch.StartNew();
+    for (int f = 0; f < seconds * 60; f++)
+    {
+        for (int i = 0; i < voices; i++)
+        {
+            float az = (f * 0.7f + i * 37) % 360;
+            engine.SetSpatial(handles[i], SpatialParams.Default with { Direction = Gamegrl.Audio.Spatial.Directions.FromAngles(az, (i % 7) * 10 - 20), Gain = 0.5f, Low = 1, Mid = 0.8f, High = 0.5f }, 1f / 60);
+        }
+        engine.Render(block);
+        engine.Update();
+    }
+    double elapsed = watch.Elapsed.TotalSeconds;
+    Console.WriteLine($"{voices} positional voices, {(headphones ? "headphones (7.1.4 bed, binaural)" : "7.1 speakers")}: {seconds / elapsed:0.0}× real time, {elapsed / (seconds * 60) * 1000:0.000} ms per 60 Hz frame of audio");
 }

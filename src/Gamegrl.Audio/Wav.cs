@@ -6,7 +6,8 @@ public enum WavSampleFormat : byte { Pcm16, Pcm24, Float32 }
 
 /// <summary>
 /// RIFF WAVE reading and writing: PCM 8, 16, 24 and 32-bit, float 32 and 64-bit, and WAVE_FORMAT_EXTENSIBLE with its
-/// channel mask (any layout up to 18 speakers).
+/// channel mask (any layout up to 18 speakers). Ambisonic clips carry a small "ambi" chunk (order, then ACN/SN3D
+/// implied), which other readers skip.
 /// </summary>
 public static class Wav
 {
@@ -22,6 +23,7 @@ public static class Wav
         ushort format = 0, channels = 0, bits = 0;
         int rate = 0;
         uint mask = 0;
+        int ambisonicOrder = 0;
         ReadOnlySpan<byte> data = default;
         bool haveFormat = false, haveData = false;
         while (pos + 8 <= file.Length)
@@ -45,11 +47,13 @@ public static class Wav
                 haveFormat = true;
             }
             else if (id.SequenceEqual("data"u8)) { data = body; haveData = true; }
+            else if (id.SequenceEqual("ambi"u8) && size >= 4) ambisonicOrder = body[0];
             pos += 8 + size + (size & 1);
         }
         if (!haveFormat || !haveData) throw new InvalidDataException("Missing fmt or data chunk");
         if (channels == 0 || rate <= 0) throw new InvalidDataException("Bad channel count or rate");
-        var layout = mask != 0 && System.Numerics.BitOperations.PopCount(mask) == channels ? ChannelLayout.FromMask(mask) : ChannelLayout.ForChannels(channels);
+        var layout = ambisonicOrder == 1 && channels == 4 ? ChannelLayout.AmbisonicFirstOrder
+            : mask != 0 && System.Numerics.BitOperations.PopCount(mask) == channels ? ChannelLayout.FromMask(mask) : ChannelLayout.ForChannels(channels);
 
         int bytes = bits / 8;
         int count = data.Length / bytes / channels * channels;
@@ -90,14 +94,15 @@ public static class Wav
         bool extensible = channels > 2;
         int fmtSize = extensible ? 40 : 16;
         int dataSize = interleaved.Length * bytes;
+        int ambiSize = layout.IsAmbisonic ? 12 : 0;
         ushort tag = format == WavSampleFormat.Float32 ? FormatFloat : FormatPcm;
 
-        Span<byte> header = stackalloc byte[12 + 8 + 40 + 8];
+        Span<byte> header = stackalloc byte[12 + 8 + 40 + 12 + 8];
         int p = 0;
         void Tag(Span<byte> h, ReadOnlySpan<byte> t) { t.CopyTo(h[p..]); p += 4; }
         void U32(Span<byte> h, uint v) { BinaryPrimitives.WriteUInt32LittleEndian(h[p..], v); p += 4; }
         void U16(Span<byte> h, ushort v) { BinaryPrimitives.WriteUInt16LittleEndian(h[p..], v); p += 2; }
-        Tag(header, "RIFF"u8); U32(header, (uint)(4 + 8 + fmtSize + 8 + dataSize + (dataSize & 1))); Tag(header, "WAVE"u8);
+        Tag(header, "RIFF"u8); U32(header, (uint)(4 + 8 + fmtSize + ambiSize + 8 + dataSize + (dataSize & 1))); Tag(header, "WAVE"u8);
         Tag(header, "fmt "u8); U32(header, (uint)fmtSize);
         U16(header, extensible ? FormatExtensible : tag); U16(header, (ushort)channels);
         U32(header, (uint)sampleRate); U32(header, (uint)(sampleRate * channels * bytes));
@@ -110,6 +115,7 @@ public static class Wav
             ReadOnlySpan<byte> guidTail = [0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71];
             guidTail.CopyTo(header[p..]); p += 12;
         }
+        if (layout.IsAmbisonic) { Tag(header, "ambi"u8); U32(header, 4); U32(header, 1); }
         Tag(header, "data"u8); U32(header, (uint)dataSize);
         stream.Write(header[..p]);
 

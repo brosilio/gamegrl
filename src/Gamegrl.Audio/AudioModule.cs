@@ -1,5 +1,7 @@
+using System.Numerics;
 using Gamegrl.Assets;
 using Gamegrl.Audio.Devices;
+using Gamegrl.Audio.Spatial;
 
 namespace Gamegrl.Audio;
 
@@ -14,10 +16,35 @@ public enum AudioOutput : byte
 }
 
 /// <summary>
-/// A sound on an entity: its clip, level, pitch and pan (mono clips; positions come with spatial audio). It starts when
-/// the entity first runs with <see cref="PlayOnStart"/>, or whenever gameplay sets <see cref="Play"/>; <see cref="Stop"/>
-/// fades it out. Despawning the entity or removing the component stops its voice. Changes to volume, pitch and pan
-/// apply while it plays, smoothed.
+/// How a positional sound carries: full level within <see cref="MinDistance"/>, −6 dB per doubling beyond it (scaled by
+/// <see cref="Rolloff"/>), silent past <see cref="MaxDistance"/>; how loud it is in the world (<see cref="LoudnessDb"/>
+/// at 1 m, for HDR mixing); a directivity cone along the entity's forward axis (−Z), whole angles in degrees; its size
+/// (<see cref="Radius"/>: near or large sources spread over the speakers); and how much Doppler it gets.
+/// </summary>
+public struct AudioEmitter
+{
+    [Range(0.01, 100)] public float MinDistance;
+    [Range(1, 10000)] public float MaxDistance;
+    [Range(0, 4)] public float Rolloff;
+    [Range(0, 200)] public float LoudnessDb;
+    [Range(0, 360)] public float ConeInner;
+    [Range(0, 360)] public float ConeOuter;
+    [Range(0, 1)] public float ConeOuterGain;
+    [Range(0, 50)] public float Radius;
+    [Range(0, 4)] public float DopplerScale;
+
+    public static AudioEmitter Default => new()
+    {
+        MinDistance = 1, MaxDistance = 500, Rolloff = 1, LoudnessDb = 80, ConeInner = 360, ConeOuter = 360, ConeOuterGain = 1, DopplerScale = 1,
+    };
+}
+
+/// <summary>
+/// A sound on an entity: its clip, level and pitch. Positional sources are heard from the entity's position (its
+/// <see cref="LocalToWorld"/>) by the <see cref="AudioListener"/>, shaped by <see cref="Emitter"/>; others play as is,
+/// mono clips panned by <see cref="Pan"/>. Ambisonic clips play as a sound field fixed in the world. It starts when the
+/// entity first runs with <see cref="PlayOnStart"/>, or whenever gameplay sets <see cref="Play"/>; <see cref="Stop"/>
+/// fades it out. Despawning the entity or removing the component stops its voice.
 /// </summary>
 public struct AudioSource : IComponent
 {
@@ -27,6 +54,8 @@ public struct AudioSource : IComponent
     [Range(-1, 1)] public float Pan;
     public bool Loop;
     public bool PlayOnStart;
+    public bool Positional;
+    public AudioEmitter Emitter;
     /// <summary>Set to start (or restart) the clip; the audio system clears it.</summary>
     public bool Play;
     /// <summary>Set to fade the clip out; the audio system clears it.</summary>
@@ -35,20 +64,68 @@ public struct AudioSource : IComponent
     [NoSerialize] public bool Started;
     [NoSerialize] public int Voice;
 
-    public static AudioSource Default => new() { Volume = 1, Pitch = 1, PlayOnStart = true };
+    public static AudioSource Default => new() { Volume = 1, Pitch = 1, PlayOnStart = true, Emitter = AudioEmitter.Default };
     public static AudioSource Of(AssetRef<AudioAsset> clip, bool loop = false) => Default with { Clip = clip, Loop = loop };
+    /// <summary>A positional source heard from its entity.</summary>
+    public static AudioSource At(AssetRef<AudioAsset> clip, bool loop = false) => Default with { Clip = clip, Loop = loop, Positional = true };
+}
+
+/// <summary>Where the game hears from: put it on the camera. The first one found is used.</summary>
+public struct AudioListener : IComponent
+{
+    [Range(0, 4)] public float Gain;
+
+    public static AudioListener Default => new() { Gain = 1 };
 }
 
 /// <summary>
-/// The audio resource: the <see cref="AudioEngine"/> and the clips loaded from the asset source (reloaded when their
-/// asset is reimported; voices already playing keep the clip they started with).
+/// The air and the mix: temperature and humidity set the speed of sound and air absorption (ISO 9613-1); Doppler can
+/// be scaled; HDR mixing (see <see cref="HdrWindow"/>) maps world loudness to the output with a moving window.
+/// </summary>
+public struct AudioEnvironment
+{
+    [Range(-30, 50)] public float TemperatureC;
+    [Range(0, 100)] public float HumidityPercent;
+    [Range(0, 4)] public float DopplerScale;
+    public bool Hdr;
+    [Range(10, 120)] public float HdrRangeDb;
+    [Range(1, 100)] public float HdrReleaseDbPerSecond;
+    [Range(0, 140)] public float HdrFloorDb;
+    /// <summary>How far below full scale the window's top plays, leaving room for sounds that overlap.</summary>
+    [Range(0, 24)] public float HdrHeadroomDb;
+
+    public static AudioEnvironment Default => new()
+    {
+        TemperatureC = 20, HumidityPercent = 50, DopplerScale = 1, Hdr = true, HdrRangeDb = 60, HdrReleaseDbPerSecond = 12, HdrFloorDb = 50, HdrHeadroomDb = 6,
+    };
+}
+
+/// <summary>
+/// The audio resource: the <see cref="AudioEngine"/>, the clips loaded from the asset source (reloaded when their asset
+/// is reimported; voices already playing keep the clip they started with), the listener as last seen, the HDR window,
+/// and positional one-shots.
 /// </summary>
 public sealed class AudioContext : IDisposable
 {
     private readonly Dictionary<Guid, AudioClip?> _clips = [];
     private IAssetSource? _assets;
 
+    internal struct OneShot
+    {
+        public VoiceHandle Voice;
+        public Vector3 Position;
+        public AudioEmitter Emitter;
+        public float Volume;
+    }
+    internal readonly List<OneShot> OneShots = [];
+
     public AudioEngine Engine { get; }
+    public HdrWindow Hdr { get; } = new();
+    /// <summary>The listener's world transform as of the last audio update (identity before one is found).</summary>
+    public Matrix4x4 Listener { get; internal set; } = Matrix4x4.Identity;
+    internal float ListenerGain = 1;
+    internal Vector3 ListenerVelocity;
+    internal AudioEnvironment Environment = AudioEnvironment.Default;
     /// <summary>Reports a missing or broken clip, once per asset.</summary>
     public Action<string> Warn { get; set; } = message => Log.Warn("audio: " + message);
 
@@ -82,6 +159,66 @@ public sealed class AudioContext : IDisposable
 
     public VoiceHandle PlayOneShot(AssetRef<AudioAsset> asset) => PlayOneShot(asset, PlayOptions.Default);
 
+    /// <summary>
+    /// Plays a clip from a point in the world (an impact, an explosion); it keeps sounding from there as the listener
+    /// moves, until it ends. <paramref name="options"/> sets volume, pitch and timing.
+    /// </summary>
+    public VoiceHandle PlayAt(AssetRef<AudioAsset> asset, Vector3 position, in AudioEmitter emitter, in PlayOptions options)
+    {
+        if (Clip(asset) is not { } clip) return default;
+        var spatial = Placed(position, Vector3.Zero, Vector3.Zero, emitter, options.Gain, starting: true);
+        var voice = Engine.Play(clip, options with { Positional = true, Spatial = spatial });
+        if (voice.IsValid) OneShots.Add(new OneShot { Voice = voice, Position = position, Emitter = emitter, Volume = options.Gain });
+        return voice;
+    }
+
+    public VoiceHandle PlayAt(AssetRef<AudioAsset> asset, Vector3 position) => PlayAt(asset, position, AudioEmitter.Default, PlayOptions.Default);
+
+    /// <summary>A voice starting now, fully placed: spatial parameters with HDR applied (a sound louder than the window raises it at once).</summary>
+    internal SpatialParams Placed(Vector3 position, Vector3 velocity, Vector3 forward, in AudioEmitter emitter, float volume, bool starting)
+    {
+        var spatial = Spatialize(position, velocity, forward, emitter, volume, out float loudness);
+        if (Environment.Hdr && spatial.Gain > 0)
+        {
+            if (starting) Hdr.Raise(loudness);
+            spatial.Gain = HdrGain(loudness, volume);
+        }
+        return spatial;
+    }
+
+    /// <summary>
+    /// The spatial gain under HDR: the window's gain for the voice's loudness, less its volume (the voice's own gain
+    /// applies that), times the listener's gain, less the headroom.
+    /// </summary>
+    internal float HdrGain(float loudness, float volume) =>
+        volume > 1e-6f ? Hdr.Gain(loudness) / volume * ListenerGain * MathF.Pow(10, -Environment.HdrHeadroomDb / 20) : 0;
+
+    /// <summary>
+    /// Direction, distance gain, air absorption, directivity and Doppler for a source as heard by the current listener.
+    /// <paramref name="loudness"/> is the source's level at the listener in dB (for HDR), counting <paramref name="volume"/>.
+    /// The gain returned excludes HDR. <paramref name="forward"/> is the source's facing (zero: no cone).
+    /// </summary>
+    internal SpatialParams Spatialize(Vector3 position, Vector3 velocity, Vector3 forward, in AudioEmitter emitter, float volume, out float loudness)
+    {
+        var env = Environment;
+        Matrix4x4.Invert(Listener, out var toListener);
+        var listenerPos = Listener.Translation;
+        var local = Vector3.Transform(position, toListener);
+        var offset = position - listenerPos;
+        float distance = offset.Length();
+        var direction = local.LengthSquared() > 1e-8f ? Vector3.Normalize(local) : -Vector3.UnitZ;
+        var away = distance > 1e-4f ? offset / distance : Vector3.Zero; // from the listener toward the source
+        float gain = Propagation.DistanceGain(distance, emitter.MinDistance, emitter.MaxDistance, emitter.Rolloff);
+        if (forward != Vector3.Zero && distance > 1e-4f)
+            gain *= Propagation.ConeGain(Vector3.Dot(Vector3.Normalize(forward), -away), emitter.ConeInner, emitter.ConeOuter, emitter.ConeOuterGain);
+        var (low, mid, high) = Propagation.AirBands(distance, env.TemperatureC, env.HumidityPercent);
+        // Doppler: speeds along the line between them (the source's away from the listener, the listener's toward the source).
+        float doppler = Propagation.Doppler(Vector3.Dot(velocity, away), Vector3.Dot(ListenerVelocity, away), Propagation.SpeedOfSound(env.TemperatureC), env.DopplerScale * emitter.DopplerScale);
+        loudness = gain * volume > 0 ? emitter.LoudnessDb + 20 * MathF.Log10(gain * volume) : float.NegativeInfinity;
+        float spread = emitter.Radius > 0 ? Math.Clamp(emitter.Radius / MathF.Max(distance, 1e-3f), 0, 1) : 0;
+        return new SpatialParams { Direction = direction, Gain = gain * ListenerGain, Spread = spread, Doppler = doppler, Low = low, Mid = mid, High = high };
+    }
+
     private AudioClip? Load(Guid guid)
     {
         if (_assets is null || !_assets.TryRead(guid, out var kind, out var bytes) || kind != AssetKind.Audio)
@@ -106,11 +243,13 @@ public sealed class AudioContext : IDisposable
 }
 
 /// <summary>
-/// Audio: adds the <see cref="AudioContext"/> resource (an engine on the output device) and the system that drives
-/// <see cref="AudioSource"/>s. <c>GAMEGRL_AUDIO</c> overrides the default device output: <c>null</c>, <c>offline</c>, or
-/// an ALSA device name such as <c>hw:1,0</c>. Leaving editor play mode stops every voice play started.
+/// Audio: adds the <see cref="AudioContext"/> and <see cref="AudioEnvironment"/> resources (an engine on the output
+/// device) and the system that drives <see cref="AudioSource"/>s as heard by the <see cref="AudioListener"/>.
+/// <c>GAMEGRL_AUDIO</c> overrides the default device output (<c>null</c>, <c>offline</c>, or an ALSA device name such as
+/// <c>hw:1,0</c>); <c>GAMEGRL_HEADPHONES=1</c> renders binaurally for headphones. Leaving editor play mode stops every
+/// voice play started.
 /// </summary>
-public sealed class AudioModule(AudioOutput output, string? device = null) : IModule
+public sealed class AudioModule(AudioOutput output, string? device = null, bool headphones = false) : IModule
 {
     public AudioModule() : this(AudioOutput.Device) { }
 
@@ -118,7 +257,8 @@ public sealed class AudioModule(AudioOutput output, string? device = null) : IMo
     {
         builder.AddModule<CoreModule>();
         var audio = new AudioContext(CreateEngine());
-        builder.SetResource(audio, a => { a.Engine.StopAll(); return a; });
+        builder.SetResource(audio, a => { a.Engine.StopAll(); a.OneShots.Clear(); return a; });
+        builder.SetResource(AudioEnvironment.Default);
         builder.AddSystem(new AudioUpdate());
         builder.OnStop(_ => audio.Dispose());
     }
@@ -127,35 +267,47 @@ public sealed class AudioModule(AudioOutput output, string? device = null) : IMo
     {
         var mode = output;
         string? name = device;
-        switch (output == AudioOutput.Device ? Environment.GetEnvironmentVariable("GAMEGRL_AUDIO") : null)
+        bool phones = headphones || System.Environment.GetEnvironmentVariable("GAMEGRL_HEADPHONES") == "1";
+        switch (output == AudioOutput.Device ? System.Environment.GetEnvironmentVariable("GAMEGRL_AUDIO") : null)
         {
             case null or "": break;
             case "null" or "none": mode = AudioOutput.Null; break;
             case "offline": mode = AudioOutput.Offline; break;
             case var other: mode = AudioOutput.Device; name = other; break;
         }
-        if (mode == AudioOutput.Offline) return AudioEngine.Offline(48000, ChannelLayout.Stereo);
+        var settings = AudioEngineSettings.Default with { Headphones = phones };
+        if (mode == AudioOutput.Offline) return AudioEngine.Offline(48000, ChannelLayout.Stereo, settings);
         if (mode == AudioOutput.Device && AlsaDevice.IsAvailable)
         {
-            try { return AudioEngine.Start(AlsaDevice.Open(AlsaDeviceOptions.Default with { Device = name ?? "default" })); }
+            try { return AudioEngine.Start(AlsaDevice.Open(AlsaDeviceOptions.Default with { Device = name ?? "default" }), settings); }
             catch (AudioDeviceException e) { Log.Warn($"audio: {e.Message}; using the null device"); }
         }
-        return AudioEngine.Start(new NullAudioDevice());
+        return AudioEngine.Start(new NullAudioDevice(), settings);
     }
 }
 
 /// <summary>
-/// Starts, updates and stops the voices of <see cref="AudioSource"/>s once per frame, after gameplay. Each voice slot
+/// Once per frame, after transforms: finds the listener, then starts, updates and stops the voices of
+/// <see cref="AudioSource"/>s and keeps positional voices (sources and one-shots) placed — direction, distance, air,
+/// directivity, Doppler from how far things moved since last frame, and HDR from everything audible. Each voice slot
 /// remembers its owner; owned voices not visited this frame lost their entity or component and are stopped, with no
 /// per-entity lookups.
 /// </summary>
 internal sealed class AudioUpdate : ISystem
 {
-    private Query _sources = null!;
+    private Query _sources = null!, _listeners = null!;
     private Entity[] _owner = [];
     private int[] _ownerVoice = [], _stamps = [];
     private float[] _sentVolume = [], _sentPitch = [], _sentPan = [];
-    private int _stamp;
+    private Vector3[] _lastPosition = [];
+    private bool[] _hasLast = [];
+    // This frame's positional voices: computed first, sent once the HDR window has moved.
+    private VoiceHandle[] _pending = [];
+    private SpatialParams[] _pendingParams = [];
+    private float[] _pendingLoudness = [], _pendingVolume = [];
+    private int _pendingCount, _stamp;
+    private Vector3 _lastListener;
+    private bool _haveListener;
 
     public string Name => "Audio.Update";
     public Phase Phase => Phase.PostUpdate;
@@ -164,28 +316,41 @@ internal sealed class AudioUpdate : ISystem
     public void Initialize(World world)
     {
         _sources = world.Query(new QueryDesc().With<AudioSource>());
+        _listeners = world.Query(new QueryDesc().With<AudioListener>().With<LocalToWorld>());
         int n = world.Resource<AudioContext>().Engine.MaxVoices;
         _owner = new Entity[n]; _ownerVoice = new int[n]; _stamps = new int[n];
         _sentVolume = new float[n]; _sentPitch = new float[n]; _sentPan = new float[n];
+        _lastPosition = new Vector3[n]; _hasLast = new bool[n];
+        _pending = new VoiceHandle[n]; _pendingParams = new SpatialParams[n]; _pendingLoudness = new float[n]; _pendingVolume = new float[n];
     }
 
     public void Run(World world)
     {
         var audio = world.Resource<AudioContext>();
         audio.Bind(world.HasResource<IAssetSource>() ? world.Resource<IAssetSource>() : null);
+        var env = audio.Environment = world.Resource<AudioEnvironment>();
+        audio.Hdr.RangeDb = env.HdrRangeDb; audio.Hdr.ReleaseDbPerSecond = env.HdrReleaseDbPerSecond; audio.Hdr.FloorDb = env.HdrFloorDb;
         var engine = audio.Engine;
         engine.Update();
+        float dt = world.HasResource<Time>() ? MathF.Max(world.Resource<Time>().Delta, 1e-4f) : 1 / 60f;
+        UpdateListener(audio, dt);
+        var orientation = Quaternion.CreateFromRotationMatrix(Orthonormal(audio.Listener));
         int stamp = ++_stamp;
+        _pendingCount = 0;
 
         foreach (var a in _sources.Archetypes)
         {
             var sources = a.GetSpan<AudioSource>();
+            var transforms = a.Has<LocalToWorld>() ? a.GetSpan<LocalToWorld>() : default;
             var entities = a.Entities;
             for (int r = 0; r < sources.Length; r++)
             {
                 ref var s = ref sources[r];
                 var voice = new VoiceHandle(s.Voice);
                 bool playing = engine.IsPlaying(voice);
+                bool positional = s.Positional && !transforms.IsEmpty;
+                var world4 = transforms.IsEmpty ? Matrix4x4.Identity : transforms[r].Value;
+                var forward = -ZAxis(world4);
                 if (s.Stop)
                 {
                     s.Stop = false;
@@ -198,15 +363,16 @@ internal sealed class AudioUpdate : ISystem
                     s.Started = true;
                     if (playing) { engine.Stop(voice); _owner[voice.Slot] = default; }
                     playing = false;
-                    voice = audio.Clip(s.Clip) is { } clip
-                        ? engine.Play(clip, PlayOptions.Default with { Gain = s.Volume, Pitch = s.Pitch, Pan = s.Pan, Loop = s.Loop })
-                        : default;
+                    var options = PlayOptions.Default with { Gain = s.Volume, Pitch = s.Pitch, Pan = s.Pan, Loop = s.Loop, ListenerOrientation = orientation };
+                    if (positional) options = options with { Positional = true, Spatial = audio.Placed(world4.Translation, Vector3.Zero, forward, s.Emitter, s.Volume, starting: true) };
+                    voice = audio.Clip(s.Clip) is { } clip ? engine.Play(clip, options) : default;
                     s.Voice = voice.Value;
                     if (voice.IsValid)
                     {
                         int slot = voice.Slot;
                         _owner[slot] = entities[r]; _ownerVoice[slot] = voice.Value;
                         _sentVolume[slot] = s.Volume; _sentPitch[slot] = s.Pitch; _sentPan[slot] = s.Pan;
+                        _lastPosition[slot] = world4.Translation; _hasLast[slot] = true;
                         playing = true;
                     }
                 }
@@ -216,10 +382,43 @@ internal sealed class AudioUpdate : ISystem
                     if (s.Volume != _sentVolume[slot]) { engine.SetGain(voice, s.Volume); _sentVolume[slot] = s.Volume; }
                     if (s.Pitch != _sentPitch[slot]) { engine.SetPitch(voice, s.Pitch); _sentPitch[slot] = s.Pitch; }
                     if (s.Pan != _sentPan[slot]) { engine.SetPan(voice, s.Pan); _sentPan[slot] = s.Pan; }
+                    if (positional)
+                    {
+                        var p = world4.Translation;
+                        var velocity = _hasLast[slot] ? (p - _lastPosition[slot]) / dt : Vector3.Zero;
+                        _lastPosition[slot] = p; _hasLast[slot] = true;
+                        Queue(voice, audio.Spatialize(p, velocity, forward, s.Emitter, s.Volume, out float loudness), loudness, s.Volume);
+                    }
+                    else engine.SetListenerOrientation(voice, orientation, rampSeconds: Math.Clamp(dt, 0.002f, 0.05f));
                 }
                 if (playing) _stamps[voice.Slot] = stamp;
                 s.IsPlaying = playing;
             }
+        }
+
+        // Positional one-shots: placed like sources until they end.
+        var shots = audio.OneShots;
+        for (int i = shots.Count - 1; i >= 0; i--)
+        {
+            var shot = shots[i];
+            if (!engine.IsPlaying(shot.Voice)) { shots[i] = shots[^1]; shots.RemoveAt(shots.Count - 1); continue; }
+            Queue(shot.Voice, audio.Spatialize(shot.Position, Vector3.Zero, Vector3.Zero, shot.Emitter, shot.Volume, out float loudness), loudness, shot.Volume);
+        }
+
+        // HDR: the window follows the loudest audible positional voice; then every one gets its gain.
+        if (env.Hdr)
+        {
+            float loudest = float.NegativeInfinity;
+            for (int i = 0; i < _pendingCount; i++) loudest = MathF.Max(loudest, _pendingLoudness[i]);
+            audio.Hdr.Update(loudest, dt);
+        }
+        for (int i = 0; i < _pendingCount; i++)
+        {
+            var p = _pendingParams[i];
+            if (env.Hdr && p.Gain > 0) p.Gain = audio.HdrGain(_pendingLoudness[i], _pendingVolume[i]);
+            // Ramp over one frame, so each update lands just as the next arrives (a ramp longer than the frame would
+            // restart before finishing and lag behind forever).
+            engine.SetSpatial(_pending[i], p, rampSeconds: Math.Clamp(dt, 0.002f, 0.05f));
         }
 
         for (int slot = 0; slot < _owner.Length; slot++)
@@ -228,5 +427,42 @@ internal sealed class AudioUpdate : ISystem
             engine.Stop(new VoiceHandle(_ownerVoice[slot]));
             _owner[slot] = default;
         }
+    }
+
+    private void Queue(VoiceHandle voice, in SpatialParams p, float loudness, float volume)
+    {
+        if (_pendingCount == _pending.Length) return;
+        _pending[_pendingCount] = voice; _pendingParams[_pendingCount] = p; _pendingLoudness[_pendingCount] = loudness; _pendingVolume[_pendingCount] = volume;
+        _pendingCount++;
+    }
+
+    private void UpdateListener(AudioContext audio, float dt)
+    {
+        foreach (var a in _listeners.Archetypes)
+        {
+            var transforms = a.GetSpan<LocalToWorld>();
+            if (transforms.Length == 0) continue;
+            var m = transforms[0].Value;
+            audio.Listener = m;
+            audio.ListenerGain = a.GetSpan<AudioListener>()[0].Gain;
+            audio.ListenerVelocity = _haveListener ? (m.Translation - _lastListener) / dt : Vector3.Zero;
+            _lastListener = m.Translation;
+            _haveListener = true;
+            return;
+        }
+        audio.ListenerVelocity = Vector3.Zero;
+    }
+
+    /// <summary>A world matrix's +Z axis (row 3); an entity faces along its negation.</summary>
+    private static Vector3 ZAxis(in Matrix4x4 m) => new(m.M31, m.M32, m.M33);
+
+    /// <summary>The rotation part of a world matrix with scale removed.</summary>
+    private static Matrix4x4 Orthonormal(in Matrix4x4 m)
+    {
+        var x = Vector3.Normalize(new Vector3(m.M11, m.M12, m.M13));
+        var y = Vector3.Normalize(new Vector3(m.M21, m.M22, m.M23));
+        var z = Vector3.Normalize(new Vector3(m.M31, m.M32, m.M33));
+        if (!float.IsFinite(x.X + y.Y + z.Z)) return Matrix4x4.Identity;
+        return new Matrix4x4(x.X, x.Y, x.Z, 0, y.X, y.Y, y.Z, 0, z.X, z.Y, z.Z, 0, 0, 0, 0, 1);
     }
 }

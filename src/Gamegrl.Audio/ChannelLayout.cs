@@ -18,8 +18,21 @@ public sealed class ChannelLayout
     private readonly Speaker[] _speakers;
     private readonly sbyte[] _index = new sbyte[18];
 
+    private readonly int _count;
+
     public ReadOnlySpan<Speaker> Speakers => _speakers;
-    public int Count => _speakers.Length;
+    public int Count => _count;
+    /// <summary>An ambisonic sound field (AmbiX: ACN order, SN3D) rather than speaker feeds; see <see cref="Spatial.Ambisonics"/>.</summary>
+    public bool IsAmbisonic { get; }
+
+    private ChannelLayout(string name, int ambisonicChannels)
+    {
+        Name = name;
+        _speakers = [];
+        _index.AsSpan().Fill(-1);
+        _count = ambisonicChannels;
+        IsAmbisonic = true;
+    }
 
     private ChannelLayout(string name, uint mask)
     {
@@ -34,6 +47,7 @@ public sealed class ChannelLayout
             list.Add((Speaker)bit);
         }
         _speakers = list.ToArray();
+        _count = _speakers.Length;
     }
 
     private static uint Bits(params Speaker[] s) { uint m = 0; foreach (var x in s) m |= 1u << (int)x; return m; }
@@ -44,6 +58,8 @@ public sealed class ChannelLayout
     public static readonly ChannelLayout Surround51 = new("5.1", Bits(Speaker.FrontLeft, Speaker.FrontRight, Speaker.FrontCenter, Speaker.Lfe, Speaker.BackLeft, Speaker.BackRight));
     public static readonly ChannelLayout Surround71 = new("7.1", Surround51.Mask | Bits(Speaker.SideLeft, Speaker.SideRight));
     public static readonly ChannelLayout Surround714 = new("7.1.4", Surround71.Mask | Bits(Speaker.TopFrontLeft, Speaker.TopFrontRight, Speaker.TopBackLeft, Speaker.TopBackRight));
+    /// <summary>First-order ambisonics, AmbiX (W, Y, Z, X; SN3D).</summary>
+    public static readonly ChannelLayout AmbisonicFirstOrder = new("FOA (AmbiX)", 4);
 
     /// <summary>The layout with exactly these speakers (a preset when one matches).</summary>
     public static ChannelLayout FromMask(uint mask)
@@ -73,6 +89,8 @@ public sealed class ChannelLayout
     /// </summary>
     public static float[] MixMatrix(ChannelLayout from, ChannelLayout to)
     {
+        if (to.IsAmbisonic) throw new ArgumentException("Can't mix speaker feeds into an ambisonic layout");
+        if (from.IsAmbisonic) return Spatial.Ambisonics.DecodeMatrix(to, System.Numerics.Quaternion.Identity);
         var m = new float[to.Count * from.Count];
         Span<Speaker> targets = stackalloc Speaker[2];
         for (int i = 0; i < from.Count; i++)

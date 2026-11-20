@@ -39,6 +39,8 @@ entity 40d94bd0154ef26d
     Radius = 34
     Height = 15
     Speed = 0.12
+  Gamegrl.Audio.AudioListener
+    Gain = 1
 
 entity 9f9d4e14f5141dee
   Gamegrl.LocalTransform

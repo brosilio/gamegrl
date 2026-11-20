@@ -134,8 +134,9 @@ public static partial class Gameplay
     }
 
     /// <summary>
-    /// A thock for each box that lands hard, right after the physics step: louder and a little higher for harder hits,
-    /// panned to where it hit. At most three start per tick, so a settling pile doesn't machine-gun.
+    /// A thock from each spot where a box lands hard, right after the physics step: the harder the hit, the louder it is
+    /// in the world (70–90 dB at 1 m; HDR mixing levels them) and the higher it rings. The shelf is the 2D physics plane
+    /// at z = −2. At most three start per tick, so a settling pile doesn't machine-gun.
     /// </summary>
     [System(Phase.FixedUpdate, Order = 1100)]
     private static void ImpactSounds([Res] in PhysicsWorld2D physics, [Res] in AudioContext audio, [Res] in Impacts impacts)
@@ -145,10 +146,8 @@ public static partial class Gameplay
         {
             if (contact.Speed < 1.5f) continue;
             float hardness = Math.Min(contact.Speed, 12) / 12;
-            audio.PlayOneShot(impacts.Clip, PlayOptions.Default with
-            {
-                Gain = 0.15f + 0.6f * hardness, Pitch = 0.85f + 0.3f * hardness, Pan = Math.Clamp(contact.Point.X / 5, -1, 1),
-            });
+            audio.PlayAt(impacts.Clip, new Vector3(contact.Point, -2), AudioEmitter.Default with { LoudnessDb = 70 + 20 * hardness },
+                PlayOptions.Default with { Pitch = 0.85f + 0.3f * hardness });
             if (++started == 3) break;
         }
     }
