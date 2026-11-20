@@ -603,19 +603,19 @@ internal sealed class AudioUpdate : ISystem
             if (audio.SampleProbes(audio.Listener.Translation, out var baked))
             {
                 // Inside a baked volume: interpolate the probes instead of tracing.
-                if (Differs(baked, audio.Reverb)) { audio.Reverb = baked; engine.SetReverb(baked, 0.1f); }
+                if (Differs(baked, audio.Reverb)) { audio.Reverb = baked; SendReverb(engine, baked, 0.1f); }
                 if (_report is not null) { _report.ReverbSource = ReverbSource.Baked; _report.Reverb = null; }
             }
             else
             {
                 audio.Simulator.Submit(audio.Scene, audio.Listener.Translation, env.TemperatureC, env.HumidityPercent);
-                if (audio.Simulator.TryTake(out var reverb)) { audio.Reverb = reverb; engine.SetReverb(reverb); }
+                if (audio.Simulator.TryTake(out var reverb)) { audio.Reverb = reverb; SendReverb(engine, reverb, 0.25f); }
                 if (_report is not null) { _report.ReverbSource = ReverbSource.Traced; _report.Reverb = audio.Simulator.LatestTrace; }
             }
         }
         else
         {
-            if (!audio.Reverb.IsSilent) { audio.Reverb = ReverbParams.None; engine.SetReverb(ReverbParams.None); }
+            if (!audio.Reverb.IsSilent) { audio.Reverb = ReverbParams.None; engine.SetReverb(ReverbParams.None); _room = ReverbParams.None; }
             if (_report is not null) { _report.ReverbSource = ReverbSource.None; _report.Reverb = null; }
         }
         var orientation = Quaternion.CreateFromRotationMatrix(Orthonormal(audio.Listener));
@@ -941,6 +941,27 @@ internal sealed class AudioUpdate : ISystem
             return;
         }
         audio.ListenerVelocity = Vector3.Zero;
+    }
+
+    private ReverbParams _room = ReverbParams.None; // the reverb as it was when the current room began
+
+    /// <summary>
+    /// Sends the listener's reverb, as a new room when it has drifted far from what the current one began as (decay half
+    /// as long or half again as long, 6 dB in level, or into or out of open air): what's already ringing then keeps the
+    /// old room's sound. Smaller changes, walking about a room, retune it in place.
+    /// </summary>
+    private void SendReverb(AudioEngine engine, in ReverbParams reverb, float ramp)
+    {
+        bool fresh = NewRoom(_room, reverb);
+        if (fresh) _room = reverb;
+        engine.SetReverb(reverb, ramp, newRoom: fresh);
+    }
+
+    internal static bool NewRoom(in ReverbParams before, in ReverbParams now)
+    {
+        if (before.IsSilent || now.IsSilent) return before.IsSilent != now.IsSilent;
+        float decay = now.DecaySeconds.Mid / before.DecaySeconds.Mid, level = now.Level / before.Level;
+        return decay > 1.5f || decay < 1 / 1.5f || level > 2 || level < 0.5f;
     }
 
     /// <summary>Whether two reverb settings differ enough (half a percent) to send the mixer new ones.</summary>

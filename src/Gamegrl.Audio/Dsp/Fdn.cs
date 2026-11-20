@@ -10,12 +10,24 @@ namespace Gamegrl.Audio.Dsp;
 /// decorrelated. Scaled so a unit impulse puts out unit energy (summed over the bed) whatever the decay time;
 /// <see cref="ReverbParams.Level"/> then sets the reverberant level. A focused reverb (another room heard through an
 /// opening) instead sums its lines to one signal and pans it with the gains <see cref="Focus"/> sets. Allocation-free once built.
+/// <para>
+/// Each <c>variant</c> has its own mutually prime line and diffuser lengths: two networks with the same structure fed the
+/// same sound (a source heard in this room and in the other) sum to a comb filter, which sweeps (flanges) as their
+/// pre-delays change.
+/// </para>
 /// </summary>
 internal sealed class Fdn
 {
     private const int Lines = 8;
-    private static readonly int[] BaseDelays = [1123, 1291, 1453, 1621, 1789, 1999, 2203, 2411]; // samples at 48 kHz, mutually prime
-    private static readonly int[] DiffuserDelays = [142, 107, 379, 277];
+    // Samples at 48 kHz; all primes, so every line is mutually prime with every other, in any variant.
+    private static readonly int[][] BaseDelays =
+    [
+        [1123, 1291, 1453, 1621, 1789, 1999, 2203, 2411],
+        [1063, 1237, 1409, 1597, 1823, 2039, 2251, 2459],
+        [1103, 1279, 1447, 1609, 1801, 1987, 2207, 2399],
+    ];
+    private static readonly int[][] DiffuserDelays = [[142, 107, 379, 277], [151, 113, 367, 251], [137, 103, 389, 271]];
+    public const int Variants = 3;
     private const float DiffuserGain = 0.6f;
 
     private readonly int _rate, _channels, _lfe;
@@ -33,8 +45,10 @@ internal sealed class Fdn
     private readonly Ramp[]? _focus;  // per bed channel, when focused
     private ReverbParams _params = ReverbParams.None;
 
-    public Fdn(ChannelLayout bed, int sampleRate, bool focused = false)
+    public Fdn(ChannelLayout bed, int sampleRate, bool focused = false, int variant = 0)
     {
+        var lineDelays = BaseDelays[variant];
+        var diffuserDelays = DiffuserDelays[variant];
         if (focused) _focus = new Ramp[bed.Count];
         _rate = sampleRate;
         _channels = bed.Count;
@@ -43,12 +57,12 @@ internal sealed class Fdn
         _lengths = new int[Lines];
         for (int j = 0; j < Lines; j++)
         {
-            _lengths[j] = Math.Max(16, BaseDelays[j] * sampleRate / 48000);
+            _lengths[j] = Math.Max(16, lineDelays[j] * sampleRate / 48000);
             _lines[j] = new float[_lengths[j]];
             _filters[j].Init(sampleRate);
         }
         _diffusers = new float[4][];
-        for (int i = 0; i < 4; i++) _diffusers[i] = new float[Math.Max(4, DiffuserDelays[i] * sampleRate / 48000)];
+        for (int i = 0; i < 4; i++) _diffusers[i] = new float[Math.Max(4, diffuserDelays[i] * sampleRate / 48000)];
         _preDelay = new float[sampleRate / 5 + 1];
         // Hadamard rows (Sylvester) for the output signs; LFE takes none.
         _signs = new sbyte[_channels, Lines];
@@ -63,6 +77,9 @@ internal sealed class Fdn
     }
 
     public bool Silent => _level.Current == 0 && _level.Remaining == 0;
+
+    /// <summary>The settings last given to <see cref="Set"/>.</summary>
+    public ReverbParams Params => _params;
 
     /// <summary>New decay times, level and pre-delay; the level and the decay filters ramp over <paramref name="ramp"/> frames.</summary>
     public void Set(in ReverbParams p, int ramp)
@@ -84,7 +101,8 @@ internal sealed class Fdn
         _focusNorm = t.Mid > 0 ? (float)Math.Sqrt(inverseEnergy / Lines) : 0;
         _level.Set(p.IsSilent ? 0 : p.Level, ramp);
         int length = Math.Clamp((int)(p.PreDelaySeconds * _rate), 1, _preDelay.Length - 1);
-        if (length != _preLength)
+        if (ramp == 0) { _preLength = length; _preFade = 0; }
+        else if (length != _preLength)
         {
             // Cross-fade from the old pre-delay to the new: a jump in where the line is read would click (and moving the
             // read point gradually would bend the pitch).

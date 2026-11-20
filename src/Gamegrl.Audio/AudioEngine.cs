@@ -321,9 +321,14 @@ public sealed class AudioEngine : IDisposable
         if (Rendering(i)) Post(new Command { Kind = CommandKind.VoiceRotation, Target = _voices[i].Mixer, Rotation = rotation, Ramp = Frames(rampSeconds) });
     }
 
-    /// <summary>The room's late reverb (decay per band, level, pre-delay), usually from <see cref="Acoustics.ReverbEstimator"/>; ramps over <paramref name="rampSeconds"/>.</summary>
-    public void SetReverb(in Acoustics.ReverbParams reverb, float rampSeconds = 0.25f) =>
-        Post(new Command { Kind = CommandKind.Reverb, Reverb = reverb, Ramp = Frames(rampSeconds) });
+    /// <summary>
+    /// The room's late reverb (decay per band, level, pre-delay), usually from <see cref="Acoustics.ReverbEstimator"/>; ramps
+    /// over <paramref name="rampSeconds"/>. With <paramref name="newRoom"/> (the listener walked into a different space)
+    /// new sound goes to a second reverb set for it, while the first rings out what's already in it on the old room's
+    /// settings: shots fired in a tunnel keep the tunnel's tail after you step into the cave.
+    /// </summary>
+    public void SetReverb(in Acoustics.ReverbParams reverb, float rampSeconds = 0.25f, bool newRoom = false) =>
+        Post(new Command { Kind = CommandKind.Reverb, Reverb = reverb, Ramp = Frames(rampSeconds), NewRoom = newRoom });
 
     /// <summary>
     /// The reverb of another room, heard through an opening: its decay, level and pre-delay, and where the opening is from the

@@ -405,6 +405,8 @@ public sealed class CaveHudModule(bool overlay = false) : IModule
                 }
             }
             if (d.RemoteActive) Cross(draw, d.RemoteOpening, 1f, new Vector4(0.3f, 1f, 1f, 1));
+            // Where the reverb now playing was estimated: it trails the listener by the estimate's latency.
+            if (d.Reverb is { } at) Cross(draw, at.Listener - new Vector3(0, 0.25f, 0), 0.4f, new Vector4(1f, 0.62f, 0.2f, 1));
         }
 
         private static void Cross(DebugDraw draw, Vector3 p, float size, Vector4 color)

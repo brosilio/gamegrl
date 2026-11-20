@@ -60,27 +60,39 @@ public static class ReverbEstimator
     public const float MaxSeconds = 4;
     private const float BinSeconds = 0.005f;
 
+    /// <summary>Rays are traced in this many fixed chunks (in parallel when asked), each with its own random stream, and summed in order: the same result however the threads run.</summary>
+    private const int Chunks = 16;
+
+    /// <summary>One chunk's tallies.</summary>
+    private sealed class Tally(int bins)
+    {
+        public readonly double[] Energy = new double[bins * 3]; // per band: energy alive during each bin
+        public readonly double[] Heard = new double[bins * 3];  // per band: fluence reaching the receiver in each bin, re direct at 1 m
+        public double Volume, PathSum, FirstKept;
+        public int FirstHits, Segments;
+        public readonly List<ReverbTrace.Segment> Traced = [];
+    }
+
+    private static readonly float Golden = MathF.PI * (3 - MathF.Sqrt(5));
+
+    private static Vector3 Direction(int r, int n)
+    {
+        float y = 1 - 2 * (r + 0.5f) / n, rad = MathF.Sqrt(1 - y * y), phi = Golden * r;
+        return new Vector3(MathF.Cos(phi) * rad, y, MathF.Sin(phi) * rad);
+    }
+
+    /// <param name="parallel">Trace the rays on the thread pool (a live estimate); false when the caller is already parallel (a bake).</param>
     public static ReverbParams Estimate(AcousticScene scene, Vector3 listener, int rays = 2048, int bounces = 64,
-        float temperatureC = 20, float humidityPercent = 50, bool airAbsorption = true, int seed = 1, ReverbTrace? trace = null)
+        float temperatureC = 20, float humidityPercent = 50, bool airAbsorption = true, int seed = 1, ReverbTrace? trace = null, bool parallel = true)
     {
         if (scene.TriangleCount == 0 || rays <= 0) return ReverbParams.None;
         float c = Propagation.SpeedOfSound(temperatureC);
         int bins = (int)(MaxSeconds / BinSeconds);
-        Span<double> energy = new double[bins * 3]; // per band: energy alive during each bin, summed over rays
-        Span<double> heard = new double[bins * 3];  // per band: fluence reaching the receiver in each bin, re direct at 1 m
         var air = airAbsorption
             ? new Bands3((float)Propagation.AirAbsorptionDbPerMetre(Bands.LowCenter, temperatureC, humidityPercent),
                 (float)Propagation.AirAbsorptionDbPerMetre(Bands.MidCenter, temperatureC, humidityPercent),
                 (float)Propagation.AirAbsorptionDbPerMetre(Bands.HighCenter, temperatureC, humidityPercent))
             : default;
-        uint state = (uint)seed * 2654435761u | 1;
-        float Random() { state ^= state << 13; state ^= state >> 17; state ^= state << 5; return (state >> 8) * (1f / 16777216f); }
-        float golden = MathF.PI * (3 - MathF.Sqrt(5));
-        Vector3 Direction(int r, int n)
-        {
-            float y = 1 - 2 * (r + 0.5f) / n, rad = MathF.Sqrt(1 - y * y), phi = golden * r;
-            return new Vector3(MathF.Cos(phi) * rad, y, MathF.Sin(phi) * rad);
-        }
 
         // The receiver: big enough to be crossed often (a few times per ray in a big room), small next to the space.
         // It stays within half the distance to the nearest surface, so it doesn't soak up one wall's return.
@@ -96,46 +108,67 @@ public static class ReverbEstimator
         float receiver = MathF.Min(Math.Clamp(0.15f * MathF.Cbrt((float)(4 * Math.PI / SizingRays * sizing)), 0.5f, 4), MathF.Max(0.2f, 0.5f * nearest));
         float r2 = receiver * receiver, fluence = 3 / (receiver * r2); // chord ÷ (4/3·π·R³), times 4π (direct fluence at 1 m is 1/4π)
 
-        double volume = 0, pathSum = 0, firstKept = 0;
-        int firstHits = 0, segments = 0;
         float maxPath = MaxSeconds * c;
         int traceEvery = trace is null ? 0 : Math.Max(1, rays / ReverbTrace.Rays);
-        for (int r = 0; r < rays; r++)
+        var tallies = new Tally[Chunks];
+        void Chunk(int k)
         {
-            var dir = Direction(r, rays);
-            var origin = listener;
-            var e = Bands3.All(1f / rays);
-            float travelled = 0;
-            bool traced = traceEvery > 0 && r % traceEvery == 0, scattered = false, specularLeg = true;
-            for (int b = 0; b < bounces; b++)
+            var t = tallies[k] = new Tally(bins);
+            Span<double> energy = t.Energy, heard = t.Heard;
+            for (int r = (int)((long)rays * k / Chunks), end = (int)((long)rays * (k + 1) / Chunks); r < end; r++)
             {
-                bool escaped = !scene.Raycast(origin, dir, maxPath - travelled, out var hit);
-                float length = escaped ? maxPath - travelled : hit.Distance;
-                if (traced && b < ReverbTrace.Bounces)
-                    trace!.Segments.Add(new ReverbTrace.Segment { A = origin, B = origin + dir * (escaped ? ReverbTrace.EscapeLength : length), Bounce = b, Escaped = escaped });
-                // A specular leg back past the listener: heard from the second order on (the first is local to where you
-                // stand, strong beside a wall, and arrives with the early sound), except all-specular paths of the first
-                // two orders (image sources' job). Scattered legs are counted at the bounce instead (below).
-                if (b > 1 && specularLeg && (scattered || b > 2)) Receive(heard, origin - listener, dir, length, travelled, e, air, c, r2, fluence, bins);
-                if (escaped) break; // through an opening (or out of time): its energy leaves the room
-                if (b == 0) { firstHits++; volume += hit.Distance * hit.Distance * hit.Distance / 3; }
-                else { pathSum += hit.Distance; segments++; }
-                Deposit(energy, travelled / c, (travelled + hit.Distance) / c, e, air, c, bins);
-                // Air absorption over the segment, then the surface.
-                if (airAbsorption) e = e * new Bands3(Pow10(-air.Low * hit.Distance / 10), Pow10(-air.Mid * hit.Distance / 10), Pow10(-air.High * hit.Distance / 10));
-                travelled += hit.Distance;
-                var material = scene.MaterialOf(hit.Triangle);
-                if (b == 0) firstKept += 1 - material.Absorption.Mid;
-                e = e * new Bands3(1 - material.Absorption.Low, 1 - material.Absorption.Mid, 1 - material.Absorption.High);
-                if (e.Low + e.Mid + e.High < 1e-9f / rays) break;
-                var normal = Vector3.Dot(hit.Normal, dir) > 0 ? -hit.Normal : hit.Normal; // facing the ray
-                origin = origin + dir * hit.Distance + normal * 1e-4f;
-                // The scattered share straight to the listener, if it can see the spot (from the second order on).
-                if (b >= 1 && material.Scattering > 0) Rain(scene, heard, origin, normal, listener, travelled, e * material.Scattering, air, c, r2, bins);
-                if (Random() < material.Scattering) { dir = CosineDirection(normal, Random(), Random()); scattered = true; specularLeg = false; }
-                else { dir = Vector3.Reflect(dir, normal); specularLeg = true; }
+                // Each ray its own random stream, so chunks are independent.
+                uint state = ((uint)seed * 2654435761u) ^ ((uint)r * 2246822519u) | 1;
+                float Random() { state ^= state << 13; state ^= state >> 17; state ^= state << 5; return (state >> 8) * (1f / 16777216f); }
+                var dir = Direction(r, rays);
+                var origin = listener;
+                var e = Bands3.All(1f / rays);
+                float travelled = 0;
+                bool traced = traceEvery > 0 && r % traceEvery == 0, scattered = false, specularLeg = true;
+                for (int b = 0; b < bounces; b++)
+                {
+                    bool escaped = !scene.Raycast(origin, dir, maxPath - travelled, out var hit);
+                    float length = escaped ? maxPath - travelled : hit.Distance;
+                    if (traced && b < ReverbTrace.Bounces)
+                        t.Traced.Add(new ReverbTrace.Segment { A = origin, B = origin + dir * (escaped ? ReverbTrace.EscapeLength : length), Bounce = b, Escaped = escaped });
+                    // A specular leg back past the listener: heard from the second order on (the first is local to where you
+                    // stand, strong beside a wall, and arrives with the early sound), except all-specular paths of the first
+                    // two orders (image sources' job). Scattered legs are counted at the bounce instead (below).
+                    if (b > 1 && specularLeg && (scattered || b > 2)) Receive(heard, origin - listener, dir, length, travelled, e, air, c, r2, fluence, bins);
+                    if (escaped) break; // through an opening (or out of time): its energy leaves the room
+                    if (b == 0) { t.FirstHits++; t.Volume += hit.Distance * hit.Distance * hit.Distance / 3; }
+                    else { t.PathSum += hit.Distance; t.Segments++; }
+                    Deposit(energy, travelled / c, (travelled + hit.Distance) / c, e, air, c, bins);
+                    // Air absorption over the segment, then the surface.
+                    if (airAbsorption) e = e * new Bands3(Pow10(-air.Low * hit.Distance / 10), Pow10(-air.Mid * hit.Distance / 10), Pow10(-air.High * hit.Distance / 10));
+                    travelled += hit.Distance;
+                    var material = scene.MaterialOf(hit.Triangle);
+                    if (b == 0) t.FirstKept += 1 - material.Absorption.Mid;
+                    e = e * new Bands3(1 - material.Absorption.Low, 1 - material.Absorption.Mid, 1 - material.Absorption.High);
+                    if (e.Low + e.Mid + e.High < 1e-9f / rays) break;
+                    var normal = Vector3.Dot(hit.Normal, dir) > 0 ? -hit.Normal : hit.Normal; // facing the ray
+                    origin = origin + dir * hit.Distance + normal * 1e-4f;
+                    // The scattered share straight to the listener, if it can see the spot (from the second order on).
+                    if (b >= 1 && material.Scattering > 0) Rain(scene, heard, origin, normal, listener, travelled, e * material.Scattering, air, c, r2, bins);
+                    if (Random() < material.Scattering) { dir = CosineDirection(normal, Random(), Random()); scattered = true; specularLeg = false; }
+                    else { dir = Vector3.Reflect(dir, normal); specularLeg = true; }
+                }
             }
         }
+        if (parallel) Parallel.For(0, Chunks, Chunk);
+        else for (int k = 0; k < Chunks; k++) Chunk(k);
+
+        // Sum the chunks in order.
+        Span<double> energy = tallies[0].Energy, heard = tallies[0].Heard;
+        double volume = tallies[0].Volume, pathSum = tallies[0].PathSum, firstKept = tallies[0].FirstKept;
+        int firstHits = tallies[0].FirstHits, segments = tallies[0].Segments;
+        for (int k = 1; k < Chunks; k++)
+        {
+            var t = tallies[k];
+            for (int i = 0; i < energy.Length; i++) { energy[i] += t.Energy[i]; heard[i] += t.Heard[i]; }
+            volume += t.Volume; pathSum += t.PathSum; firstKept += t.FirstKept; firstHits += t.FirstHits; segments += t.Segments;
+        }
+        if (trace is not null) foreach (var t in tallies) trace.Segments.AddRange(t.Traced);
 
         var result = new ReverbParams { Enclosure = (float)firstHits / rays };
         result.Volume = (float)(4 * Math.PI / rays * volume);

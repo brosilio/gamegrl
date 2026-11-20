@@ -37,7 +37,7 @@ internal sealed class ReflectionResult
 
 /// <summary>
 /// Runs the expensive acoustic estimates off the game thread: the game submits the scene and the listener every frame
-/// (cheap), and the simulator re-estimates the reverb when the scene changed, the listener moved more than half a metre,
+/// (cheap), and the simulator re-estimates the reverb when the scene changed, the listener moved more than 30 cm,
 /// or the air changed; the game picks up the newest result without waiting. Inline mode (offline engines, tests) does
 /// the work in <see cref="Submit"/> instead, deterministically.
 /// </summary>
@@ -58,7 +58,7 @@ internal sealed class AcousticSimulator : IDisposable
         public required ReflectionRequest[] Requests;
     }
 
-    private const float MoveThreshold = 0.5f, ReflectionMoveThreshold = 0.25f, RemoteMoveThreshold = 1;
+    private const float MoveThreshold = 0.3f, ReflectionMoveThreshold = 0.25f, RemoteMoveThreshold = 1;
     private Request? _pendingRemote;
     private ReverbParams _remote;
     private int _remoteVersion, _takenRemoteVersion;
@@ -142,13 +142,16 @@ internal sealed class AcousticSimulator : IDisposable
         {
             Keys = new int[n], Counts = new int[n], Paths = new ReflectionPath[n * k], Diffraction = new DiffractionPath[n], Diffracted = new bool[n],
         };
-        for (int i = 0; i < n; i++)
+        // Voices are independent, each writing its own slots: searched in parallel, the same result either way.
+        void Search(int i)
         {
             var source = job.Requests[i].Source;
             result.Keys[i] = job.Requests[i].Key;
             result.Counts[i] = ImageSources.Find(job.Scene, job.Listener, source, result.Paths.AsSpan(i * k, k));
             result.Diffracted[i] = Diffraction.Find(job.Scene, job.Listener, source, out result.Diffraction[i], job.SpeedOfSound);
         }
+        if (n > 1) Parallel.For(0, n, Search);
+        else if (n == 1) Search(0);
         return result;
     }
 

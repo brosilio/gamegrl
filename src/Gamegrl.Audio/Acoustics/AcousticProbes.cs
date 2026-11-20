@@ -83,7 +83,7 @@ public sealed class AcousticProbeGrid
             var at = grid.Position(x, y, z);
             if (!scene.InsideSolid(at))
             {
-                probes[i] = ReverbEstimator.Estimate(scene, at, rays, bounces, temperatureC, humidityPercent);
+                probes[i] = ReverbEstimator.Estimate(scene, at, rays, bounces, temperatureC, humidityPercent, parallel: false);
                 valid[i] = true;
             }
             int n = Interlocked.Increment(ref done);

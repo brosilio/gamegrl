@@ -81,6 +81,8 @@ public sealed class AudioDiagnostics
         Line($"HDR: window top {audio.Hdr.TopDb:0.0} dB, range {env.HdrRangeDb:0} dB, release {env.HdrReleaseDbPerSecond:0} dB/s, floor {env.HdrFloorDb:0} dB, headroom {env.HdrHeadroomDb:0} dB");
         sb.AppendLine();
         Reverb(sb, "reverb", audio.Reverb, ReverbSource.ToString().ToLowerInvariant());
+        if (this.Reverb is { } trace)
+            Line($"    estimated at {V(trace.Listener)}, {Vector3.Distance(trace.Listener, Listener.Translation):0.00} m from the listener now (receiver {trace.Receiver:0.00} m)");
         Reverb(sb, "other room", audio.RemoteReverb, RemoteActive ? "heard from " + V(RemoteOpening) : "inactive");
         sb.AppendLine();
         Line($"positional voices ({Voices.Count}):");

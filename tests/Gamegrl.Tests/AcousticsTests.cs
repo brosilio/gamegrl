@@ -163,6 +163,71 @@ internal static class AcousticsTests
             Assert.True(ReverbEstimator.Estimate(AcousticScene.Empty, Vector3.Zero).IsSilent, "no geometry, no reverb");
         });
 
+        Test("acoustics: the reverbs' structures differ — the same sound through two of them doesn't comb (no flanging as pre-delays move)", () =>
+        {
+            // The same impulse through each variant; with one structure, their outputs would match sample for sample at
+            // the pre-delay offset and sum to a comb filter.
+            float[] Tail(int variant, float preDelay)
+            {
+                var fdn = new Fdn(ChannelLayout.Mono, Rate, variant: variant);
+                fdn.Set(new ReverbParams { DecaySeconds = Bands3.All(1.5f), Level = 1, PreDelaySeconds = preDelay }, 0);
+                var output = new float[Rate];
+                var input = new float[512];
+                var bed = new float[512];
+                for (int f = 0; f < output.Length; f += 512)
+                {
+                    Array.Clear(input); Array.Clear(bed);
+                    if (f == 0) input[0] = 1;
+                    fdn.Process(input, bed, 512, 512);
+                    bed.AsSpan(0, Math.Min(512, output.Length - f)).CopyTo(output.AsSpan(f));
+                }
+                return output;
+            }
+            static double Correlation(float[] a, float[] b, int lag)
+            {
+                double ab = 0, aa = 0, bb = 0;
+                for (int i = 0; i + lag < a.Length; i++) { ab += a[i + lag] * b[i]; aa += a[i + lag] * a[i + lag]; bb += b[i] * b[i]; }
+                return ab / Math.Sqrt(aa * bb);
+            }
+            var same = Correlation(Tail(0, 0.047f), Tail(0, 0.042f), 0);
+            var aligned = Correlation(Tail(0, 0.047f), Tail(0, 0.042f), (int)(0.005f * Rate));
+            Assert.True(aligned > 0.99, $"one structure twice: correlated {aligned:0.000} at the pre-delay offset (a comb; {same:0.00} unaligned)");
+            for (int a = 0; a < Fdn.Variants; a++)
+            for (int b = a + 1; b < Fdn.Variants; b++)
+            {
+                var x = Tail(a, 0.047f); var y = Tail(b, 0.042f);
+                double worst = 0;
+                for (int lag = 0; lag < 0.02f * Rate; lag++) worst = Math.Max(worst, Math.Max(Math.Abs(Correlation(x, y, lag)), Math.Abs(Correlation(y, x, lag))));
+                Assert.True(worst < 0.15, $"variants {a} and {b}: correlated up to {worst:0.000} within 20 ms");
+            }
+        });
+
+        Test("acoustics: a new room — what's ringing keeps the old room's decay, new sound gets the new room's", () =>
+        {
+            double TailAfter(bool newRoom)
+            {
+                using var engine = AudioEngine.Offline(Rate, ChannelLayout.Stereo);
+                engine.SetReverb(new ReverbParams { DecaySeconds = Bands3.All(2), Level = 1, PreDelaySeconds = 0.02f }, 0);
+                var click = AudioClip.Generate("click", Rate, 1, _ => 1);
+                engine.Play(click, PlayOptions.Default with { Positional = true, Spatial = SpatialParams.Default with { Reverb = 1 } });
+                var block = new float[Rate / 5 * 2];
+                engine.Render(block); // 0.2 s into a 2 s hall
+                engine.SetReverb(new ReverbParams { DecaySeconds = Bands3.All(0.3f), Level = 1, PreDelaySeconds = 0.01f }, 0.05f, newRoom);
+                var tail = new float[Rate * 2];
+                engine.Render(tail);
+                double late = 0;
+                for (int i = Rate * 2 / 2; i < Rate * 2 * 3 / 4; i++) late += tail[i] * tail[i]; // 0.5 to 0.75 s after the change
+                return late;
+            }
+            double kept = TailAfter(true), retuned = TailAfter(false);
+            // 0.5 s into a 2 s decay is −15 dB; into a 0.3 s one, −100 dB.
+            Assert.True(kept > 1e4 * retuned && kept > 1e-4, $"the hall's tail after walking out: {kept:0.0e0} kept against {retuned:0.0e0} retuned");
+            Assert.True(!AudioUpdate.NewRoom(new ReverbParams { DecaySeconds = Bands3.All(2), Level = 0.2f }, new ReverbParams { DecaySeconds = Bands3.All(2.4f), Level = 0.25f })
+                && AudioUpdate.NewRoom(new ReverbParams { DecaySeconds = Bands3.All(0.55f), Level = 0.4f }, new ReverbParams { DecaySeconds = Bands3.All(2.4f), Level = 0.16f })
+                && AudioUpdate.NewRoom(new ReverbParams { DecaySeconds = Bands3.All(2.4f), Level = 0.16f }, ReverbParams.None),
+                "walking about a room retunes it; a tunnel into a cave, or out into the open, is a new room");
+        });
+
         Test("acoustics: the FDN reverb decays at its set time per band and puts out unit energy", () =>
         {
             var fdn = new Fdn(ChannelLayout.Stereo, Rate);

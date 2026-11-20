@@ -23,6 +23,7 @@ internal struct Command
     public AudioClip? Clip;
     public float[]? Matrix;     // Play, multichannel clips: clip → bed gains, computed and cached on the game side
     public Acoustics.ReverbParams Reverb;
+    public bool NewRoom;        // Reverb: a different room (see AudioEngine.SetReverb)
     public ReflectionTaps Taps;
     public int TapCount;
     public Acoustics.Bands3 Tone;
@@ -122,8 +123,12 @@ internal sealed class Mixer
     private readonly Panner _panner;
     private readonly AmbisonicDecoder _ambisonics;
     private readonly BinauralVirtualizer? _binaural;
-    private readonly Fdn _reverb, _remote;
-    private readonly float[] _reverbInput = new float[MaxBlock], _remoteInput = new float[MaxBlock];
+    // The listener's room: two reverbs, one taking the sound while the other rings out the room before (see SetReverb).
+    private readonly Fdn[] _reverbs = new Fdn[2];
+    private readonly long[] _reverbIdle = new long[2]; // frames since each last took sound
+    private int _reverb;                               // the one taking sound
+    private readonly Fdn _remote;
+    private readonly float[] _reverbInput = new float[MaxBlock], _remoteInput = new float[MaxBlock], _silence = new float[MaxBlock];
     private readonly float[] _outBuffer;
     private readonly float[] _frame = new float[MaxClipChannels];
     private readonly float[] _scratch;
@@ -166,8 +171,9 @@ internal sealed class Mixer
         _panner = new Panner(_bed);
         _ambisonics = new AmbisonicDecoder(_bed);
         _binaural = headphones ? new BinauralVirtualizer(_bed, sampleRate) : null;
-        _reverb = new Fdn(_bed, sampleRate);
-        _remote = new Fdn(_bed, sampleRate, focused: true);
+        _reverbs[0] = new Fdn(_bed, sampleRate, variant: 0);
+        _reverbs[1] = new Fdn(_bed, sampleRate, variant: 2);
+        _remote = new Fdn(_bed, sampleRate, focused: true, variant: 1);
         _outBuffer = new float[_outChannels * MaxBlock];
         _scratch = new float[_bedChannels * MaxClipChannels];
         _panScratch = new float[_bedChannels];
@@ -270,7 +276,15 @@ internal sealed class Mixer
             }
         }
         var master = _buses[0].Buffer;
-        _reverb.Process(_reverbInput.AsSpan(0, n), master, MaxBlock, n);
+        _reverbs[_reverb].Process(_reverbInput.AsSpan(0, n), master, MaxBlock, n);
+        // The room before rings out on its own settings, until it's had time to decay well below hearing.
+        var resting = _reverbs[_reverb ^ 1];
+        var before = resting.Params;
+        if (_reverbIdle[_reverb ^ 1] < (long)((2 * MathF.Max(before.DecaySeconds.Low, before.DecaySeconds.Mid) + before.PreDelaySeconds) * _rate))
+        {
+            resting.Process(_silence.AsSpan(0, n), master, MaxBlock, n);
+            _reverbIdle[_reverb ^ 1] += n;
+        }
         _remote.Process(_remoteInput.AsSpan(0, n), master, MaxBlock, n);
         for (int f = 0; f < n; f++)
         {
@@ -402,7 +416,16 @@ internal sealed class Mixer
                 break;
             }
             case CommandKind.BusGain: _buses[cmd.Target].Gain.Set(cmd.Value, cmd.Ramp); break;
-            case CommandKind.Reverb: _reverb.Set(cmd.Reverb, cmd.Ramp); break;
+            case CommandKind.Reverb:
+                if (cmd.NewRoom)
+                {
+                    // New sound goes to the other reverb, set for the new room; this one rings out as it was.
+                    _reverbIdle[_reverb] = 0;
+                    _reverb ^= 1;
+                    _reverbs[_reverb].Set(cmd.Reverb, Math.Min(cmd.Ramp, 256));
+                }
+                else _reverbs[_reverb].Set(cmd.Reverb, cmd.Ramp);
+                break;
             case CommandKind.RemoteReverb:
             {
                 _remote.Set(cmd.Reverb, cmd.Ramp);
