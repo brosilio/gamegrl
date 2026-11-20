@@ -199,6 +199,47 @@ internal sealed class Mixer
             RenderBlock(interleaved.Slice(done * _outChannels, n * _outChannels), n);
             done += n;
         }
+        var history = Volatile.Read(ref _history);
+        if (history is not null)
+        {
+            // A ring of interleaved frames; the count written so far says where the newest is.
+            int samples = frames * _outChannels, at = (int)(_historyWritten * _outChannels % history.Length);
+            var source = interleaved[..samples];
+            while (source.Length > 0)
+            {
+                int n = Math.Min(source.Length, history.Length - at);
+                source[..n].CopyTo(history.AsSpan(at));
+                source = source[n..];
+                at = 0;
+            }
+            Volatile.Write(ref _historyWritten, _historyWritten + frames);
+        }
+    }
+
+    private float[]? _history;
+    private long _historyWritten;
+
+    /// <summary>Game thread: starts (or with null stops) keeping the output in a ring.</summary>
+    internal void SetHistory(float[]? ring)
+    {
+        Volatile.Write(ref _historyWritten, 0);
+        Volatile.Write(ref _history, ring);
+    }
+
+    /// <summary>Game thread: the ring's contents, oldest first.</summary>
+    internal float[] CopyHistory()
+    {
+        var history = Volatile.Read(ref _history);
+        if (history is null) return [];
+        long written = Volatile.Read(ref _historyWritten);
+        int frames = history.Length / _outChannels;
+        int have = (int)Math.Min(written, frames);
+        var copy = new float[have * _outChannels];
+        int start = (int)((written - have) * _outChannels % history.Length);
+        int first = Math.Min(copy.Length, history.Length - start);
+        history.AsSpan(start, first).CopyTo(copy);
+        history.AsSpan(0, copy.Length - first).CopyTo(copy.AsSpan(first));
+        return copy;
     }
 
     private void RenderBlock(Span<float> output, int n)
@@ -432,7 +473,9 @@ internal sealed class Mixer
             float g = tap.Gain * v.Spatial.Gain;
             int r = k >= instantFrom ? 0 : ramp; // new taps start at their level; existing ones glide
             for (int o = 0; o < _bedChannels; o++) v.TapGains[k * _bedChannels + o].Set(pan[o] * g, r);
-            if (delays) v.TapDelay[k].Set(DelaySamples(tap.Delay), Math.Max(ramp, 1));
+            // A tap now playing a different reflection jumps to its delay (its level comes up from silence); the same
+            // reflection glides, which is its Doppler shift as source or listener move.
+            if (delays) v.TapDelay[k].Set(DelaySamples(tap.Delay), tap.Restart ? 0 : Math.Max(ramp, 1));
         }
     }
 

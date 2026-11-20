@@ -39,6 +39,8 @@ public struct Reflection
 {
     public Vector3 Direction;
     public float Delay, Gain;
+    /// <summary>A different reflection from the one this tap played before: its delay is set at once rather than glided to.</summary>
+    public bool Restart;
 }
 
 /// <summary>Up to <see cref="Count"/> reflections, inline (no allocation).</summary>
@@ -355,6 +357,21 @@ public sealed class AudioEngine : IDisposable
         Post(new Command { Kind = CommandKind.BusGain, Target = bus.Index, Value = gain, Ramp = Frames(rampSeconds) });
 
     public bool IsPlaying(VoiceHandle voice) => TryGet(voice, out _);
+
+    /// <summary>The clip a voice plays (null when it has ended).</summary>
+    public AudioClip? ClipOf(VoiceHandle voice) => TryGet(voice, out int i) ? _voices[i].Clip : null;
+
+    /// <summary>
+    /// Keeps the last <paramref name="seconds"/> of the output (0 stops), for captures (<see cref="History"/>). The audio
+    /// thread writes it as it renders; it costs a copy per block.
+    /// </summary>
+    public void KeepHistory(float seconds) => _mixer.SetHistory(seconds > 0 ? new float[(int)(seconds * SampleRate) * Layout.Count] : null);
+
+    /// <summary>
+    /// The output kept by <see cref="KeepHistory"/>, oldest first (empty when none is kept). Read while the audio thread
+    /// writes, so the newest few milliseconds may be torn; for diagnostics.
+    /// </summary>
+    public AudioClip History() => new("history", SampleRate, Layout, _mixer.CopyHistory());
 
     /// <summary>Fades out every playing voice (leaving play mode, changing levels).</summary>
     public void StopAll(float fadeSeconds = 0.005f)

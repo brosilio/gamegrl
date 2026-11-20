@@ -1,3 +1,4 @@
+using System.Globalization;
 using CaveGunfight;
 using Gamegrl;
 using Gamegrl.Audio;
@@ -7,45 +8,63 @@ using Gamegrl.Rendering;
 using Gamegrl.Rhi.Vulkan;
 
 // Cave Gunfight: walk into a cave under fire and hear it.
-//   CaveGunfight [--seconds N]                       the game, in a window (GAMEGRL_HEADPHONES=1 for binaural)
-//   CaveGunfight --tour                              the same walk as --wav, in the window, hands off
-//   CaveGunfight --wav walk.wav [--headphones]       a scripted 52 s walk rendered offline, for listening
+//   CaveGunfight [--tour] [--overlay] [--seconds N] [--capture-at T,...]   the game in a window (GAMEGRL_HEADPHONES=1
+//                                                                for binaural); --tour plays the scripted walk hands off,
+//                                                                --overlay starts with the acoustic overlay (F1) on
+//   CaveGunfight --wav walk.wav [--headphones] [--capture-at T,...]   the scripted walk rendered offline
+// F12 (or each --capture-at time, in seconds) writes a capture to artifacts/captures/<time>/: the last 12 s of output,
+// a report of every voice's paths, taps and gains and of the reverb estimate, and its decay curves.
 
-if (args.Length > 0 && args[0] == "--wav")
+const string Usage = "Usage: CaveGunfight [--tour] [--overlay] [--seconds N] [--capture-at T,...] | --wav walk.wav [--headphones] [--capture-at T,...]";
+string? wav = null;
+bool tour = false, phones = false, overlay = false;
+double limit = 0;
+var captures = new CaveCaptures();
+for (int i = 0; i < args.Length; i++)
 {
-    if (args.Length < 2) { Console.Error.WriteLine("Usage: CaveGunfight --wav walk.wav [--headphones]"); return 1; }
-    bool phones = args.Contains("--headphones");
-    using var tour = EngineBuilder.Create()
+    switch (args[i])
+    {
+        case "--wav" when i + 1 < args.Length: wav = args[++i]; break;
+        case "--headphones": phones = true; break;
+        case "--tour": tour = true; break;
+        case "--overlay": overlay = true; break;
+        case "--seconds" when i + 1 < args.Length && double.TryParse(args[i + 1], CultureInfo.InvariantCulture, out limit) && limit > 0: i++; break;
+        case "--capture-at" when i + 1 < args.Length:
+            var times = args[++i].Split(',');
+            captures.At = new double[times.Length];
+            for (int k = 0; k < times.Length; k++)
+                if (!double.TryParse(times[k], CultureInfo.InvariantCulture, out captures.At[k])) { Console.Error.WriteLine(Usage); return 1; }
+            Array.Sort(captures.At);
+            break;
+        default: Console.Error.WriteLine(Usage); return 1;
+    }
+}
+
+if (wav is not null)
+{
+    using var walk = EngineBuilder.Create()
         .AddModule(new AudioModule(AudioOutput.Offline, headphones: phones))
-        .AddModule(new CaveModule(tour: true))
+        .AddModule(new CaveModule(tour: true, captures: captures))
         .Build();
-    var engine = tour.World.Resource<AudioContext>().Engine;
+    var engine = walk.World.Resource<AudioContext>().Engine;
     const int seconds = 54, rate = 48000, frame = rate / 60;
     var samples = new float[seconds * rate * 2];
     for (int f = 0; f + frame <= seconds * rate; f += frame)
     {
-        tour.Tick(1.0 / 60);
+        walk.Tick(1.0 / 60);
         engine.Render(samples.AsSpan(f * 2, frame * 2));
     }
-    Wav.Write(args[1], new AudioClip("cave walk", rate, ChannelLayout.Stereo, samples));
-    Console.WriteLine($"Recorded the cave walk to {args[1]}{(phones ? " (binaural)" : "")}");
+    Wav.Write(wav, new AudioClip("cave walk", rate, ChannelLayout.Stereo, samples));
+    Console.WriteLine($"Recorded the cave walk to {wav}{(phones ? " (binaural)" : "")}");
     return 0;
 }
 
-double limit = 0;
-bool watch = args.Contains("--tour");
-var rest = args.Where(a => a != "--tour").ToArray();
-if (rest.Length != 0 && !(rest is ["--seconds", var value] && double.TryParse(value, System.Globalization.CultureInfo.InvariantCulture, out limit) && limit > 0))
-{
-    Console.Error.WriteLine("Usage: CaveGunfight [--tour] [--seconds N] | --wav walk.wav [--headphones]");
-    return 1;
-}
 using var app = EngineBuilder.Create()
     .AddModule(new Sdl3PlatformModule(WindowDesc.Default("Cave Gunfight")))
     .AddModule<VulkanModule>()
     .AddModule(new RenderingModule(vsync: true))
-    .AddModule(new CaveModule(tour: watch, quitAfter: limit))
-    .AddModule(new CaveHudModule())
+    .AddModule(new CaveModule(tour: tour, quitAfter: limit, captures: captures))
+    .AddModule(new CaveHudModule(overlay))
     .Build();
 var audio = app.World.Resource<AudioContext>().Engine;
 Console.WriteLine($"Cave Gunfight on {audio.Device?.Name ?? "offline"}{(audio.Headphones ? ", binaural" : "")}");

@@ -52,6 +52,9 @@ public sealed class RenderContext : IDisposable
     /// </summary>
     public bool DrawMainCamera { get; set; } = true;
 
+    /// <summary>Draws <see cref="Debug"/>'s lines in the main camera's view too (a game's debug overlay; the editor's Scene view always does).</summary>
+    public bool MainCameraDebugLines { get; set; }
+
     /// <summary>The local-space bounds of a mesh (loading it if needed), for picking and framing.</summary>
     public bool TryGetBounds(AssetRef<MeshAsset> mesh, out Vector3 min, out Vector3 max)
     {

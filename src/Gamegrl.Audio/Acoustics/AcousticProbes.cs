@@ -25,7 +25,8 @@ public struct AcousticProbeVolume : IComponent
 public sealed class AcousticProbeGrid
 {
     private const uint Magic = 0x50414747; // "GGAP"
-    private const int ProbeBytes = 1 + 8 * 4;
+    private const int Floats = 11, ProbeBytes = 1 + Floats * 4;
+    private const uint Version = 2;
 
     public Matrix4x4 Transform { get; }
     public int CountX { get; }
@@ -114,6 +115,7 @@ public sealed class AcousticProbeGrid
             if (w <= 0) continue;
             ref readonly var r = ref _probes[i];
             sum.DecaySeconds = sum.DecaySeconds + r.DecaySeconds * w;
+            sum.LateDecaySeconds = sum.LateDecaySeconds + r.LateDecaySeconds * w;
             sum.Level += r.Level * w; sum.PreDelaySeconds += r.PreDelaySeconds * w;
             sum.Volume += r.Volume * w; sum.Surface += r.Surface * w; sum.Enclosure += r.Enclosure * w;
             weight += w;
@@ -122,7 +124,7 @@ public sealed class AcousticProbeGrid
         float s = 1 / weight;
         reverb = new ReverbParams
         {
-            DecaySeconds = sum.DecaySeconds * s, Level = sum.Level * s, PreDelaySeconds = sum.PreDelaySeconds * s,
+            DecaySeconds = sum.DecaySeconds * s, LateDecaySeconds = sum.LateDecaySeconds * s, Level = sum.Level * s, PreDelaySeconds = sum.PreDelaySeconds * s,
             Volume = sum.Volume * s, Surface = sum.Surface * s, Enclosure = sum.Enclosure * s,
         };
         return true;
@@ -132,7 +134,7 @@ public sealed class AcousticProbeGrid
     {
         var b = new byte[8 + 64 + 12 + _probes.Length * ProbeBytes];
         BinaryPrimitives.WriteUInt32LittleEndian(b, Magic);
-        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), Version);
         var m = Transform;
         ReadOnlySpan<float> matrix = [m.M11, m.M12, m.M13, m.M14, m.M21, m.M22, m.M23, m.M24, m.M31, m.M32, m.M33, m.M34, m.M41, m.M42, m.M43, m.M44];
         for (int i = 0; i < 16; i++) BinaryPrimitives.WriteSingleLittleEndian(b.AsSpan(8 + 4 * i), matrix[i]);
@@ -144,8 +146,9 @@ public sealed class AcousticProbeGrid
         {
             b[o] = _valid[i] ? (byte)1 : (byte)0;
             ref readonly var r = ref _probes[i];
-            ReadOnlySpan<float> f = [r.DecaySeconds.Low, r.DecaySeconds.Mid, r.DecaySeconds.High, r.Level, r.PreDelaySeconds, r.Volume, r.Surface, r.Enclosure];
-            for (int k = 0; k < 8; k++) BinaryPrimitives.WriteSingleLittleEndian(b.AsSpan(o + 1 + 4 * k), f[k]);
+            ReadOnlySpan<float> f = [r.DecaySeconds.Low, r.DecaySeconds.Mid, r.DecaySeconds.High, r.Level, r.PreDelaySeconds, r.Volume, r.Surface, r.Enclosure,
+                r.LateDecaySeconds.Low, r.LateDecaySeconds.Mid, r.LateDecaySeconds.High];
+            for (int k = 0; k < Floats; k++) BinaryPrimitives.WriteSingleLittleEndian(b.AsSpan(o + 1 + 4 * k), f[k]);
         }
         return b;
     }
@@ -153,6 +156,7 @@ public sealed class AcousticProbeGrid
     public static AcousticProbeGrid FromBytes(ReadOnlySpan<byte> b)
     {
         if (b.Length < 84 || BinaryPrimitives.ReadUInt32LittleEndian(b) != Magic) throw new InvalidDataException("Not an acoustic probe grid");
+        if (BinaryPrimitives.ReadUInt32LittleEndian(b[4..]) != Version) throw new InvalidDataException("Acoustic probe grid from another version; bake it again");
         Span<float> m = stackalloc float[16];
         for (int i = 0; i < 16; i++) m[i] = BinaryPrimitives.ReadSingleLittleEndian(b[(8 + 4 * i)..]);
         var transform = new Matrix4x4(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
@@ -161,12 +165,13 @@ public sealed class AcousticProbeGrid
         var probes = new ReverbParams[nx * ny * nz];
         var valid = new bool[probes.Length];
         int o = 84;
-        Span<float> f = stackalloc float[8];
+        Span<float> f = stackalloc float[Floats];
         for (int i = 0; i < probes.Length; i++, o += ProbeBytes)
         {
             valid[i] = b[o] != 0;
-            for (int k = 0; k < 8; k++) f[k] = BinaryPrimitives.ReadSingleLittleEndian(b[(o + 1 + 4 * k)..]);
-            probes[i] = new ReverbParams { DecaySeconds = new Bands3(f[0], f[1], f[2]), Level = f[3], PreDelaySeconds = f[4], Volume = f[5], Surface = f[6], Enclosure = f[7] };
+            for (int k = 0; k < Floats; k++) f[k] = BinaryPrimitives.ReadSingleLittleEndian(b[(o + 1 + 4 * k)..]);
+            probes[i] = new ReverbParams { DecaySeconds = new Bands3(f[0], f[1], f[2]), Level = f[3], PreDelaySeconds = f[4], Volume = f[5], Surface = f[6], Enclosure = f[7],
+                LateDecaySeconds = new Bands3(f[8], f[9], f[10]) };
         }
         return new AcousticProbeGrid(transform, nx, ny, nz, probes, valid);
     }

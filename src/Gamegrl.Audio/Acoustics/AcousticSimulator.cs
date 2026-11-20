@@ -179,9 +179,9 @@ internal sealed class AcousticSimulator : IDisposable
         return true;
     }
 
-    private void PublishRemote(in ReverbParams result)
+    private void PublishRemote((ReverbParams Result, ReverbTrace? Trace) estimate)
     {
-        lock (_wake) _remote = result;
+        lock (_wake) { _remote = estimate.Result; _remoteTrace = estimate.Trace; }
         Interlocked.Increment(ref _remoteVersion);
     }
 
@@ -195,11 +195,24 @@ internal sealed class AcousticSimulator : IDisposable
         return true;
     }
 
-    private ReverbParams Compute(Request r) => ReverbEstimator.Estimate(r.Scene, r.Listener, Rays, Bounces, r.Temperature, r.Humidity);
+    /// <summary>Whether estimates keep a <see cref="ReverbTrace"/> (rays and decay curve), for diagnostics.</summary>
+    public bool Tracing { get => _tracing; set => _tracing = value; }
+    private volatile bool _tracing;
+    private ReverbTrace? _trace, _remoteTrace;
 
-    private void Publish(in ReverbParams result)
+    /// <summary>The traces of the latest reverb and remote estimates (null unless <see cref="Tracing"/> was on for them).</summary>
+    public ReverbTrace? LatestTrace { get { lock (_wake) return _trace; } }
+    public ReverbTrace? LatestRemoteTrace { get { lock (_wake) return _remoteTrace; } }
+
+    private (ReverbParams, ReverbTrace?) Compute(Request r)
     {
-        lock (_wake) _result = result;
+        var trace = _tracing ? new ReverbTrace() : null;
+        return (ReverbEstimator.Estimate(r.Scene, r.Listener, Rays, Bounces, r.Temperature, r.Humidity, trace: trace), trace);
+    }
+
+    private void Publish((ReverbParams Result, ReverbTrace? Trace) estimate)
+    {
+        lock (_wake) { _result = estimate.Result; _trace = estimate.Trace; }
         Interlocked.Increment(ref _resultVersion);
     }
 

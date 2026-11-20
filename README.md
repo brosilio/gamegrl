@@ -53,6 +53,13 @@ acoustics (reverb, reflections, diffraction, the other room) off and on, **Escap
 walk in from the field and back out; `--wav` renders that walk offline (binaural with `--headphones`). Set
 `GAMEGRL_HEADPHONES=1` for binaural in the game.
 
+**F1** shows the acoustic overlay: the reverb estimate's sample rays (amber where they hit, blue where they escape to
+open sky), each voice's direct line, its path round an edge and its reflections, the decay curves and the voice list
+(`--overlay` starts with it on). **F12** writes a capture to `artifacts/captures/<time>/`: the last 12 s of output
+(`output.wav`), what every voice and the reverb estimate were doing (`report.txt`), and the decay curves
+(`decay.csv`). `--capture-at 3,9.5,27` takes captures at those times, in the game or along the offline walk. When
+something sounds wrong, press F12 and share the folder.
+
 The desktop editor uses DejaVu Sans Mono on Linux; set `GAMEGRL_FONT` to another TrueType font path if needed.
 Right-drag orbits the Scene camera, middle-drag pans, the wheel zooms, and F frames the selection.
 Click a mesh to select it; drag its colored axis handles to move it. Project prefab rows instantiate prefabs.

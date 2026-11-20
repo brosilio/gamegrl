@@ -133,33 +133,46 @@ public sealed class AudioContext : IDisposable
         public Vector3 Position;
         public AudioEmitter Emitter;
         public float Volume;
+        /// <summary>The entity it moves with (<see cref="PlayOn"/>), at <see cref="Offset"/> in its space.</summary>
+        public Entity Follow;
+        public Vector3 Offset;
     }
+
+    /// <summary>The world whose entities one-shots can follow.</summary>
+    internal World? World;
 
     /// <summary>The direct distance's gain under an emitter's distance law (for scaling reflections relative to it).</summary>
     internal static float DistanceLaw(float distance, in AudioEmitter emitter) =>
         Propagation.DistanceGain(MathF.Max(distance, emitter.MinDistance), emitter.MinDistance, float.MaxValue, emitter.Rolloff);
 
     /// <summary>
-    /// Reflection paths as taps for a listener: direction from each path's last reflection point (listener space), delay
-    /// and gain relative to the direct sound; and the surfaces' tone from the strongest. Returns how many taps.
+    /// Reflection paths as taps for a listener, from each path's image of the source where it is now: direction toward
+    /// the image (listener space; the line to it passes through the last reflection point), delay and gain relative to
+    /// the direct sound; and the surfaces' tone from the strongest. Returns how many taps; <paramref name="keys"/>, when
+    /// given, gets each tap's path key.
     /// </summary>
-    internal static int Taps(ReadOnlySpan<ReflectionPath> paths, Vector3 source, in Matrix4x4 listener, in AudioEmitter emitter, float speedOfSound, Span<Reflection> taps, out Bands3 tone)
+    internal static int Taps(ReadOnlySpan<ReflectionPath> paths, Vector3 source, in Matrix4x4 listener, in AudioEmitter emitter, float speedOfSound,
+        Span<Reflection> taps, out Bands3 tone, Span<int> keys = default)
     {
         tone = Bands3.All(1);
         Matrix4x4.Invert(listener, out var toListener);
-        float direct = Vector3.Distance(source, listener.Translation);
+        var at = listener.Translation;
+        float direct = Vector3.Distance(source, at);
         float directLaw = DistanceLaw(direct, emitter);
         int n = 0;
         foreach (ref readonly var path in paths)
         {
             if (n == taps.Length) break;
-            float delay = (path.Length - direct) / speedOfSound;
+            var image = path.ImageOf(source);
+            float length = Vector3.Distance(image, at);
+            float delay = (length - direct) / speedOfSound;
             if (delay <= 0 || delay > Mixer.MaxReflectionDelaySeconds) continue;
-            var dir = Vector3.Transform(path.Point, toListener);
+            var dir = Vector3.TransformNormal(image - at, toListener);
+            if (!keys.IsEmpty) keys[n] = path.Key;
             taps[n++] = new Reflection
             {
                 Direction = dir.LengthSquared() > 1e-8f ? Vector3.Normalize(dir) : -Vector3.UnitZ, Delay = delay,
-                Gain = DistanceLaw(path.Length, emitter) / MathF.Max(directLaw, 1e-6f) * path.Surfaces.Mid,
+                Gain = DistanceLaw(length, emitter) / MathF.Max(directLaw, 1e-6f) * path.Surfaces.Mid,
             };
         }
         if (n > 0)
@@ -173,6 +186,8 @@ public sealed class AudioContext : IDisposable
 
     public AudioEngine Engine { get; }
     public HdrWindow Hdr { get; } = new();
+    /// <summary>What the last update did, voice by voice (fill it by setting <see cref="AudioDiagnostics.Enabled"/>).</summary>
+    public AudioDiagnostics Diagnostics { get; } = new();
     /// <summary>The acoustic geometry, rebuilt from <see cref="AcousticSurface"/>s when they change.</summary>
     public AcousticScene Scene { get; internal set; } = AcousticScene.Empty;
     /// <summary>The late reverb at the listener, as last estimated (see <see cref="ReverbEstimator"/>).</summary>
@@ -276,6 +291,24 @@ public sealed class AudioContext : IDisposable
     }
 
     public VoiceHandle PlayAt(AssetRef<AudioAsset> asset, Vector3 position) => PlayAt(asset, position, AudioEmitter.Default, PlayOptions.Default);
+
+    /// <summary>
+    /// Plays a clip from an entity (a gun in a hand, a shout, a footstep): it moves with the entity, at
+    /// <paramref name="offset"/> in the entity's space, until it ends. If the entity goes, the sound stays where it last was.
+    /// </summary>
+    public VoiceHandle PlayOn(Entity entity, AssetRef<AudioAsset> asset, Vector3 offset, in AudioEmitter emitter, in PlayOptions options)
+    {
+        if (Clip(asset) is not { } clip) return default;
+        var position = FollowPoint(entity, offset, offset);
+        var spatial = Placed(position, Vector3.Zero, Vector3.Zero, emitter, options.Gain, Occlusion(position, emitter), starting: true);
+        var voice = Engine.Play(clip, options with { Positional = true, Spatial = spatial });
+        if (voice.IsValid) OneShots.Add(new OneShot { Voice = voice, Position = position, Emitter = emitter, Volume = options.Gain, Follow = entity, Offset = offset });
+        return voice;
+    }
+
+    /// <summary>Where a point fixed to an entity is now (<paramref name="fallback"/> if the entity or its transform is gone).</summary>
+    internal Vector3 FollowPoint(Entity entity, Vector3 offset, Vector3 fallback) =>
+        World is { } w && !entity.IsNull && w.IsAlive(entity) && w.Has<LocalToWorld>(entity) ? Vector3.Transform(offset, w.Get<LocalToWorld>(entity).Value) : fallback;
 
     /// <summary>A voice starting now, fully placed: spatial parameters with HDR applied (a sound louder than the window raises it at once).</summary>
     internal SpatialParams Placed(Vector3 position, Vector3 velocity, Vector3 forward, in AudioEmitter emitter, float volume, Bands3 occlusion, bool starting)
@@ -409,6 +442,7 @@ public sealed class AudioModule(AudioOutput output, string? device = null, bool 
         }
         // Clips can be asked for before the first audio update (a fixed-step system playing a sound): know the assets now.
         if (builder.World.HasResource<IAssetSource>()) audio.Bind(builder.World.Resource<IAssetSource>());
+        audio.World = builder.World;
         builder.SetResource(audio, a => { a.Silence(); return a; });
         builder.SetResource(builder.World.HasResource<AudioEnvironment>() ? builder.World.Resource<AudioEnvironment>() : AudioEnvironment.Default);
         builder.AddSystem(new AcousticGeometryUpdate());
@@ -447,6 +481,57 @@ public sealed class AudioModule(AudioOutput output, string? device = null, bool 
 /// remembers its owner; owned voices not visited this frame lost their entity or component and are stopped, with no
 /// per-entity lookups.
 /// </summary>
+/// <summary>
+/// Keeps each reflection in the same mixer tap from frame to frame. Paths come back from each search strongest first,
+/// so their order shuffles as the listener moves; a tap that switched paths would glide from one delay to another, a
+/// pitch sweep (heard as chorusing). A path keeps its tap while it lasts; a tap whose path is gone fades out and rests
+/// two updates before a new path takes it, which then starts at its own delay.
+/// </summary>
+internal sealed class TapSlots(int voices)
+{
+    private const int K = ReflectionTaps.Count, Rest = 2;
+    private readonly int[] _voice = new int[voices];
+    private readonly int[] _key = new int[voices * K], _resting = new int[voices * K];
+    private readonly Reflection[] _last = new Reflection[voices * K];
+
+    /// <summary>Forgets a voice's taps (it left the reflecting set): next time they all start afresh.</summary>
+    public void Forget(VoiceHandle voice) { if (_voice[voice.Slot] == voice.Value) _voice[voice.Slot] = 0; }
+
+    /// <summary>Places this frame's taps (strongest first, with their path keys) into slots; returns how many slots to send.</summary>
+    public int Assign(VoiceHandle voice, ReadOnlySpan<Reflection> taps, ReadOnlySpan<int> keys, Span<Reflection> slots)
+    {
+        int b = voice.Slot * K;
+        var key = _key.AsSpan(b, K); var resting = _resting.AsSpan(b, K); var last = _last.AsSpan(b, K);
+        if (_voice[voice.Slot] != voice.Value)
+        {
+            _voice[voice.Slot] = voice.Value;
+            key.Clear(); resting.Clear();
+        }
+        Span<bool> placed = stackalloc bool[K];
+        for (int k = 0; k < K; k++)
+        {
+            slots[k] = default;
+            if (key[k] == 0) { if (resting[k] > 0) { resting[k]--; slots[k] = last[k] with { Gain = 0, Restart = false }; } continue; }
+            int j = keys.IndexOf(key[k]);
+            if (j < 0) { key[k] = 0; resting[k] = Rest; slots[k] = last[k] with { Gain = 0, Restart = false }; continue; } // fades out where it was
+            slots[k] = last[k] = taps[j];
+            placed[j] = true;
+        }
+        for (int j = 0; j < taps.Length; j++)
+        {
+            if (placed[j]) continue;
+            int free = -1;
+            for (int k = 0; k < K && free < 0; k++) if (key[k] == 0 && resting[k] == 0) free = k;
+            if (free < 0) break; // weaker paths wait for a free tap
+            key[free] = keys[j];
+            slots[free] = last[free] = taps[j] with { Restart = true };
+        }
+        int count = 0;
+        for (int k = 0; k < K; k++) if (key[k] != 0 || resting[k] > 0) count = k + 1;
+        return count;
+    }
+}
+
 internal sealed class AudioUpdate : ISystem
 {
     private Query _sources = null!, _listeners = null!, _volumes = null!;
@@ -470,6 +555,8 @@ internal sealed class AudioUpdate : ISystem
     private readonly ReflectionRequest[] _requests = new ReflectionRequest[ReflectionVoices * 2];
     private readonly int[] _requestIndex = new int[ReflectionVoices];
     private readonly List<VoiceHandle> _reflecting = [];
+    private TapSlots _slots = null!;
+    private AudioDiagnostics? _report; // this frame's, when diagnostics are on
     private ReflectionResult? _paths;
     private readonly ReflectionPath[] _quick = new ReflectionPath[ReflectionTaps.Count];
     private Vector3 _lastListener;
@@ -490,6 +577,7 @@ internal sealed class AudioUpdate : ISystem
         _lastPosition = new Vector3[n]; _hasLast = new bool[n]; _occlusion = new Bands3[n]; _occlusionVoice = new int[n];
         _pending = new VoiceHandle[n]; _pendingParams = new SpatialParams[n]; _pendingLoudness = new float[n]; _pendingVolume = new float[n];
         _pendingPosition = new Vector3[n]; _pendingEmitter = new AudioEmitter[n]; _pendingBlocked = new float[n];
+        _slots = new TapSlots(n);
     }
 
     public void Run(World world)
@@ -503,6 +591,9 @@ internal sealed class AudioUpdate : ISystem
         _diffraction = env.Diffraction;
         float dt = world.HasResource<Time>() ? MathF.Max(world.Resource<Time>().Delta, 1e-4f) : 1 / 60f;
         UpdateListener(audio, dt);
+        _report = audio.Diagnostics.Enabled ? audio.Diagnostics : null;
+        audio.Simulator.Tracing = _report is not null;
+        _report?.Begin(audio.Listener);
         audio.Grids.Clear();
         foreach (var a in _volumes.Archetypes)
             foreach (ref readonly var volume in a.GetSpan<AcousticProbeVolume>())
@@ -513,14 +604,20 @@ internal sealed class AudioUpdate : ISystem
             {
                 // Inside a baked volume: interpolate the probes instead of tracing.
                 if (Differs(baked, audio.Reverb)) { audio.Reverb = baked; engine.SetReverb(baked, 0.1f); }
+                if (_report is not null) { _report.ReverbSource = ReverbSource.Baked; _report.Reverb = null; }
             }
             else
             {
                 audio.Simulator.Submit(audio.Scene, audio.Listener.Translation, env.TemperatureC, env.HumidityPercent);
                 if (audio.Simulator.TryTake(out var reverb)) { audio.Reverb = reverb; engine.SetReverb(reverb); }
+                if (_report is not null) { _report.ReverbSource = ReverbSource.Traced; _report.Reverb = audio.Simulator.LatestTrace; }
             }
         }
-        else if (!audio.Reverb.IsSilent) { audio.Reverb = ReverbParams.None; engine.SetReverb(ReverbParams.None); }
+        else
+        {
+            if (!audio.Reverb.IsSilent) { audio.Reverb = ReverbParams.None; engine.SetReverb(ReverbParams.None); }
+            if (_report is not null) { _report.ReverbSource = ReverbSource.None; _report.Reverb = null; }
+        }
         var orientation = Quaternion.CreateFromRotationMatrix(Orthonormal(audio.Listener));
         int stamp = ++_stamp;
         _pendingCount = 0;
@@ -589,15 +686,24 @@ internal sealed class AudioUpdate : ISystem
             }
         }
 
-        // Positional one-shots: placed like sources until they end.
+        // Positional one-shots: placed like sources until they end; those on an entity move with it.
         var shots = audio.OneShots;
+        audio.World = world;
         for (int i = shots.Count - 1; i >= 0; i--)
         {
             var shot = shots[i];
             if (!engine.IsPlaying(shot.Voice)) { shots[i] = shots[^1]; shots.RemoveAt(shots.Count - 1); continue; }
+            var velocity = Vector3.Zero;
+            if (!shot.Follow.IsNull)
+            {
+                var now = audio.FollowPoint(shot.Follow, shot.Offset, shot.Position);
+                velocity = (now - shot.Position) / dt;
+                shot.Position = now;
+                shots[i] = shot;
+            }
             var occluded = Occluded(audio, shot.Voice, shot.Position, shot.Emitter);
             bool around = TryDiffraction(shot.Voice, occluded, out var diffraction);
-            Queue(shot.Voice, audio.Spatialize(shot.Position, Vector3.Zero, Vector3.Zero, shot.Emitter, shot.Volume, occluded, around, diffraction, out float loudness), loudness, shot.Volume, shot.Position, shot.Emitter, occluded.Mid);
+            Queue(shot.Voice, audio.Spatialize(shot.Position, velocity, Vector3.Zero, shot.Emitter, shot.Volume, occluded, around, diffraction, out float loudness), loudness, shot.Volume, shot.Position, shot.Emitter, occluded.Mid);
         }
 
         RemoteRoom(audio, env, dt);
@@ -624,9 +730,18 @@ internal sealed class AudioUpdate : ISystem
             // Ramp over one frame, so each update lands just as the next arrives (a ramp longer than the frame would
             // restart before finishing and lag behind forever).
             engine.SetSpatial(_pending[i], p, rampSeconds: Math.Clamp(dt, 0.002f, 0.05f));
+            if (_report is not null)
+            {
+                bool around = TryDiffraction(_pending[i], Bands3.All(_pendingBlocked[i]), out var path);
+                _report.Voices.Add(new VoiceReport
+                {
+                    Voice = _pending[i], Clip = engine.ClipOf(_pending[i]), Position = _pendingPosition[i], LoudnessDb = _pendingLoudness[i], Spatial = p,
+                    Transmission = _pendingBlocked[i], Rendered = engine.IsRendered(_pending[i]), Diffracted = around, Diffraction = path,
+                });
+            }
         }
 
-        Reflections(audio, env);
+        Reflections(audio, env, dt);
 
         for (int slot = 0; slot < _owner.Length; slot++)
         {
@@ -698,6 +813,11 @@ internal sealed class AudioUpdate : ISystem
         if (anchor >= 0) _remoteHold = 1.2f * MathF.Max(room.DecaySeconds.Low, room.DecaySeconds.Mid);
         else _remoteHold -= dt; // the room keeps ringing after its sources stop
         bool active = !room.IsSilent && (anchor >= 0 || _remoteHold > 0);
+        if (_report is not null)
+        {
+            _report.RemoteActive = active; _report.RemoteOpening = _remoteOpening;
+            _report.Remote = active ? audio.Simulator.LatestRemoteTrace : null;
+        }
         if (!active)
         {
             if (_remoteActive) { engine.SetRemoteReverb(ReverbParams.None, -Vector3.UnitZ, 0); audio.RemoteReverb = ReverbParams.None; }
@@ -725,7 +845,7 @@ internal sealed class AudioUpdate : ISystem
     /// that come back become taps in listener space every frame (directions follow the head as it turns). Voices that
     /// drop out of the set lose theirs.
     /// </summary>
-    private void Reflections(AudioContext audio, in AudioEnvironment env)
+    private void Reflections(AudioContext audio, in AudioEnvironment env, float dt)
     {
         var engine = audio.Engine;
         int count = 0;
@@ -773,11 +893,13 @@ internal sealed class AudioUpdate : ISystem
 
         float c = Propagation.SpeedOfSound(env.TemperatureC);
         Span<Reflection> taps = stackalloc Reflection[ReflectionTaps.Count];
+        Span<Reflection> slots = stackalloc Reflection[ReflectionTaps.Count];
+        Span<int> keys = stackalloc int[ReflectionTaps.Count];
         foreach (var held in _reflecting)
         {
             bool still = false;
             for (int k = 0; k < count && !still; k++) still = _pending[_requestIndex[k]] == held;
-            if (!still) engine.SetReflections(held, default, Bands3.All(1));
+            if (!still) { engine.SetReflections(held, default, Bands3.All(1)); _slots.Forget(held); }
         }
         _reflecting.Clear();
         int quickSearches = 0;
@@ -794,10 +916,13 @@ internal sealed class AudioUpdate : ISystem
                 paths = _quick.AsSpan(0, ImageSources.Find(audio.Scene, audio.Listener.Translation, _pendingPosition[i], _quick, maxOrder: 1, maxPlanes: 16));
             }
             if (paths.IsEmpty) continue;
-            int n = AudioContext.Taps(paths, _pendingPosition[i], audio.Listener, _pendingEmitter[i], c, taps, out var tone);
-            if (n == 0) continue;
-            engine.SetReflections(voice, taps[..n], tone);
+            int n = AudioContext.Taps(paths, _pendingPosition[i], audio.Listener, _pendingEmitter[i], c, taps, out var tone, keys);
+            int sent = _slots.Assign(voice, taps[..n], keys[..n], slots);
+            if (sent == 0) continue;
+            // Ramped over one frame, like the direct sound: each tap's delay then glides at its true Doppler rate.
+            engine.SetReflections(voice, slots[..sent], tone, Math.Clamp(dt, 0.002f, 0.05f));
             _reflecting.Add(voice);
+            if (_report is not null) _report.SetPaths(i, paths, slots[..sent]);
         }
     }
 

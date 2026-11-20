@@ -83,8 +83,19 @@ internal sealed class Fdn
         _norm = t.Mid > 0 ? (float)Math.Sqrt(inverseEnergy / Lines) / MathF.Sqrt(speakers) : 0;
         _focusNorm = t.Mid > 0 ? (float)Math.Sqrt(inverseEnergy / Lines) : 0;
         _level.Set(p.IsSilent ? 0 : p.Level, ramp);
-        _preLength = Math.Clamp((int)(p.PreDelaySeconds * _rate), 1, _preDelay.Length - 1);
+        int length = Math.Clamp((int)(p.PreDelaySeconds * _rate), 1, _preDelay.Length - 1);
+        if (length != _preLength)
+        {
+            // Cross-fade from the old pre-delay to the new: a jump in where the line is read would click (and moving the
+            // read point gradually would bend the pitch).
+            _preOld = _preFade > 0 ? _preOld : _preLength;
+            _preLength = length;
+            _preFade = PreFadeFrames;
+        }
     }
+
+    private const int PreFadeFrames = 1024;
+    private int _preOld, _preFade;
 
     /// <summary>A focused reverb's pan gains over the bed (power-normalised, e.g. from VBAP), ramped.</summary>
     public void Focus(ReadOnlySpan<float> gains, int ramp)
@@ -105,6 +116,13 @@ internal sealed class Fdn
             _preDelay[_prePos] = input[f];
             int read = _prePos - _preLength; if (read < 0) read += _preDelay.Length;
             float x = _preDelay[read];
+            if (_preFade > 0)
+            {
+                int old = _prePos - _preOld; if (old < 0) old += _preDelay.Length;
+                float w = (float)_preFade / PreFadeFrames;
+                x += (_preDelay[old] - x) * w;
+                _preFade--;
+            }
             _prePos = _prePos + 1 == _preDelay.Length ? 0 : _prePos + 1;
             for (int i = 0; i < 4; i++)
             {

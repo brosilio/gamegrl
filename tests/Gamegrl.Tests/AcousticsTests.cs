@@ -144,7 +144,7 @@ internal static class AcousticsTests
                 var p = ReverbEstimator.Estimate(builder.Build(), new Vector3(1.3f, 0.4f, -0.7f), rays: 4096, bounces: 200, airAbsorption: false);
                 double eyring = 0.161 * 240 / (-248 * Math.Log(1 - alpha)), sabine = 0.161 * 240 / (248 * alpha);
                 double kuttruff = eyring / (1 + 0.2 * Math.Log(1 - alpha));
-                float t = p.DecaySeconds.Mid;
+                float t = p.LateDecaySeconds.Mid;
                 Assert.True(Math.Abs(t - kuttruff) < 0.05 * kuttruff && t > eyring && t < sabine,
                     $"α {alpha}: T60 {t:0.000} s; Eyring {eyring:0.000}, Kuttruff {kuttruff:0.000}, Sabine {sabine:0.000}");
                 Assert.True(Math.Abs(p.Volume - 240) < 0.05 * 240, $"volume {p.Volume:0.0} m³");
@@ -632,5 +632,137 @@ internal static class AcousticsTests
             w.Destroy(wall);
             Assert.True(Math.Abs(Level() / clear - 1) < 0.01, "removing the wall clears the path");
         });
+        Test("acoustics: reflections glide at their Doppler rate as the listener walks past walls (no jumps when paths are found again, no taps swapping)", () =>
+        {
+            var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));
+            using var app = b.Build();
+            var w = app.World;
+            var context = w.Resource<AudioContext>();
+            var env = w.Resource<AudioEnvironment>();
+            env.Hdr = false; env.Reverb = false; env.Diffraction = false;
+            context.Diagnostics.Enabled = true;
+            var tone = new AssetRef<AudioAsset>(Guid.NewGuid());
+            context.Register(tone, AudioClip.Generate("tone", Rate, Rate, i => MathF.Sin(i * 0.05f)));
+            // A concrete room 20 × 6 × 10 m; the listener walks 9 m along it at 4.5 m/s past a fixed source.
+            w.Spawn(new LocalTransform { Position = new Vector3(0, 1, 0), Rotation = Quaternion.Identity, Scale = new Vector3(20, 6, 10) }, new LocalToWorld(), AcousticSurface.Room(AcousticMaterial.Concrete));
+            w.Spawn(LocalTransform.At(new Vector3(1, 0.5f, -2)), new LocalToWorld(), AudioSource.At(tone, loop: true));
+            var listener = w.Spawn(LocalTransform.At(new Vector3(-4.5f, 0, 1)), new LocalToWorld(), AudioListener.Default);
+            const float speed = 4.5f, dt = 1 / 60f;
+            float c = Gamegrl.Audio.Spatial.Propagation.SpeedOfSound(20);
+            var previous = new float[ReflectionTaps.Count];
+            var previousStep = new float[ReflectionTaps.Count];
+            var had = new bool[ReflectionTaps.Count];
+            var stepped = new bool[ReflectionTaps.Count];
+            int compared = 0, restarts = 0;
+            float worst = 0;
+            for (int f = 0; f < 120; f++)
+            {
+                w.Get<LocalTransform>(listener).Position.X = -4.5f + speed * dt * f;
+                app.Tick(dt);
+                context.Engine.Render(new float[Rate / 60 * 2]);
+                var d = context.Diagnostics;
+                Assert.True(d.Voices.Count == 1, "one voice");
+                var v = d.Voices[0];
+                var has = new bool[ReflectionTaps.Count];
+                var steps = new bool[ReflectionTaps.Count];
+                for (int k = 0; k < v.TapCount; k++)
+                {
+                    var tap = d.Taps[v.TapStart + k];
+                    if (tap.Gain <= 0) continue;
+                    has[k] = true;
+                    if (tap.Restart) { restarts++; }
+                    else if (had[k])
+                    {
+                        // A reflection's path changes by at most twice the listener's step (toward one image, away from the
+                        // source), and at constant speed its rate of change drifts slowly: successive steps are nearly
+                        // equal. (Delays recomputed only when a search lands step small, small, small, then big.)
+                        float step = tap.Delay - previous[k];
+                        Assert.True(MathF.Abs(step) <= 2 * speed * dt / c + 2e-6f, $"frame {f}, tap {k}: delay moved {step * 1000:0.000} ms in a frame (at most {2 * speed * dt / c * 1000:0.000})");
+                        if (stepped[k])
+                        {
+                            float change = MathF.Abs(step - previousStep[k]);
+                            worst = MathF.Max(worst, change);
+                            Assert.True(change < 3e-5f, $"frame {f}, tap {k}: delay step went from {previousStep[k] * 1000:0.000} to {step * 1000:0.000} ms");
+                            compared++;
+                        }
+                        previousStep[k] = step;
+                        steps[k] = true;
+                    }
+                    previous[k] = tap.Delay;
+                }
+                had = has;
+                stepped = steps;
+            }
+            Assert.True(compared > 500 && restarts < 40, $"{compared} tap steps compared, {restarts} restarts; worst change of step {worst * 1000:0.0000} ms");
+        });
+
+        Test("audio: a one-shot played on an entity moves with it; one played at a point stays behind", () =>
+        {
+            var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));
+            using var app = b.Build();
+            var w = app.World;
+            var context = w.Resource<AudioContext>();
+            w.Resource<AudioEnvironment>().Hdr = false;
+            context.Diagnostics.Enabled = true;
+            var shot = new AssetRef<AudioAsset>(Guid.NewGuid());
+            context.Register(shot, AudioClip.Generate("shot", Rate, Rate, i => MathF.Sin(i * 0.05f)));
+            var walker = w.Spawn(LocalTransform.Identity, new LocalToWorld(), AudioListener.Default);
+            app.Tick(1 / 60.0);
+            var offset = new Vector3(0.2f, -0.3f, -0.6f);
+            var held = context.PlayOn(walker, shot, offset, AudioEmitter.Default, PlayOptions.Default);
+            var dropped = context.PlayAt(shot, Vector3.Transform(offset, w.Get<LocalToWorld>(walker).Value), AudioEmitter.Default, PlayOptions.Default);
+            for (int f = 1; f <= 30; f++)
+            {
+                w.Get<LocalTransform>(walker).Position = new Vector3(5f * f / 60, 0, 0); // 5 m/s to the right
+                app.Tick(1 / 60.0);
+                context.Engine.Render(new float[Rate / 60 * 2]);
+            }
+            VoiceReport On = default, At = default;
+            foreach (var v in context.Diagnostics.Voices) { if (v.Voice == held) On = v; if (v.Voice == dropped) At = v; }
+            var expected = new Vector3(2.5f, 0, 0) + offset;
+            Assert.True(Vector3.Distance(On.Position, expected) < 1e-4f, $"the held shot is at {On.Position}, expected {expected}");
+            Assert.True(MathF.Abs(On.Spatial.Doppler - 1) < 1e-4f && On.Spatial.Direction.X > 0.2f, $"moving together: no Doppler ({On.Spatial.Doppler:0.0000}), still to the right ({On.Spatial.Direction})");
+            Assert.True(At.Spatial.Doppler < 0.99f && At.Spatial.Direction.X < -0.5f, $"left behind: lower ({At.Spatial.Doppler:0.0000}) and to the left ({At.Spatial.Direction})");
+        });
+
+        Test("acoustics: the reverb is what comes back — a shoebox's level matches 16π/R; in the open before a cliff it's short and faint", () =>
+        {
+            // 10 × 6 × 4 m, α = 0.2, fully scattering: R = S·α/(1 − α) = 62 m².
+            var room = new AcousticSceneBuilder();
+            room.AddRoom(Box(Vector3.Zero, new Vector3(10, 6, 4)), new AcousticMaterial(Bands3.All(0.2f), 1, Bands3.All(0)));
+            var inside = ReverbEstimator.Estimate(room.Build(), new Vector3(1.3f, 0.4f, -0.7f), airAbsorption: false);
+            float theory = MathF.Sqrt(16 * MathF.PI / 62);
+            Assert.True(MathF.Abs(inside.Level - theory) < 0.1f * theory, $"level {inside.Level:0.000}, diffuse-field theory {theory:0.000}");
+            Assert.True(MathF.Abs(inside.DecaySeconds.Mid - inside.LateDecaySeconds.Mid) < 0.12f * inside.LateDecaySeconds.Mid,
+                $"a diffuse room's early decay is its late decay: EDT {inside.DecaySeconds.Mid:0.000} s, T30 {inside.LateDecaySeconds.Mid:0.000} s");
+            // Gravel ground and a rock cliff 12 m ahead with a 6 m doorway; behind it solid hill, or a rock chamber whose
+            // energy rings on (a long late decay) while little of it comes back out to where the listener stands.
+            static AcousticSceneBuilder Cliff()
+            {
+                var b = new AcousticSceneBuilder();
+                b.AddBox(Box(new Vector3(0, -1, 0), new Vector3(200, 2, 200)), AcousticMaterial.Gravel);
+                b.AddBox(Box(new Vector3(-23, 7, -14), new Vector3(40, 14, 4)), AcousticMaterial.Rock);
+                b.AddBox(Box(new Vector3(23, 7, -14), new Vector3(40, 14, 4)), AcousticMaterial.Rock);
+                b.AddBox(Box(new Vector3(0, 10, -14), new Vector3(6, 8, 4)), AcousticMaterial.Rock);
+                return b;
+            }
+            var solid = Cliff();
+            solid.AddBox(Box(new Vector3(0, 8, -36), new Vector3(40, 16, 40)), AcousticMaterial.Rock);
+            var hill = solid.Build();
+            var carved = Cliff(); // a chamber x ∈ [−15, 15], y ∈ [0, 10], z ∈ [−52, −16]
+            carved.AddBox(Box(new Vector3(0, -0.99f, -34), new Vector3(30, 2, 36)), AcousticMaterial.Rock);
+            carved.AddBox(Box(new Vector3(-20, 7, -34), new Vector3(10, 14, 36)), AcousticMaterial.Rock);
+            carved.AddBox(Box(new Vector3(20, 7, -34), new Vector3(10, 14, 36)), AcousticMaterial.Rock);
+            carved.AddBox(Box(new Vector3(0, 7, -57), new Vector3(50, 14, 10)), AcousticMaterial.Rock);
+            carved.AddBox(Box(new Vector3(0, 12, -34), new Vector3(30, 4, 36)), AcousticMaterial.Rock);
+            var hollow = carved.Build();
+            var open = ReverbEstimator.Estimate(hill, new Vector3(0, 1.7f, 0));
+            var cave = ReverbEstimator.Estimate(hollow, new Vector3(0, 1.7f, -30));
+            var outside = ReverbEstimator.Estimate(hollow, new Vector3(0, 1.7f, 0));
+            Assert.True(open.Level < 0.05f && open.DecaySeconds.Mid < 0.6f, $"before a cliff: level {20 * MathF.Log10(open.Level):0} dB, EDT {open.DecaySeconds.Mid:0.00} s");
+            Assert.True(cave.Level > 0.1f && cave.DecaySeconds.Mid > 1.5f, $"in the chamber: level {20 * MathF.Log10(cave.Level):0} dB, EDT {cave.DecaySeconds.Mid:0.00} s");
+            Assert.True(outside.Level < 0.3f * cave.Level && outside.LateDecaySeconds.Mid > 1, $"outside its doorway: level {20 * MathF.Log10(outside.Level):0} dB against {20 * MathF.Log10(cave.Level):0} inside (late T30 {outside.LateDecaySeconds.Mid:0.0} s)");
+        });
+
     }
 }

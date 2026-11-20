@@ -350,7 +350,7 @@ public sealed class MainCameraSystem : ISystem
         var ctx = world.Resource<RenderContext>();
         if (!ctx.HasFrame || !ctx.DrawMainCamera) return;
         var frame = ctx.Frame;
-        var view = new ViewDesc { Color = frame.Backbuffer, Depth = ctx.Depth, Sprites = true, ClearColor = new Vector4(0.05f, 0.06f, 0.09f, 1) };
+        var view = new ViewDesc { Color = frame.Backbuffer, Depth = ctx.Depth, Sprites = true, ClearColor = new Vector4(0.05f, 0.06f, 0.09f, 1), DebugLines = ctx.MainCameraDebugLines };
         if (TryMainCamera(_cameras, frame.Backbuffer.Width / (float)Math.Max(1, frame.Backbuffer.Height), out var viewProj, out var clear))
         {
             view.ViewProjection = viewProj;

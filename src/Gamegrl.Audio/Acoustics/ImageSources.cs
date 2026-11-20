@@ -6,6 +6,11 @@ namespace Gamegrl.Audio.Acoustics;
 /// A specular reflection path from a source to the listener: its total length, the reflection point nearest the
 /// listener (where it's heard from), how many surfaces it met, and its per-band amplitude factor from those surfaces
 /// (√((1 − absorption)·(1 − scattering)) each: the energy reflected specularly).
+/// <para>
+/// It also keeps the planes it reflects in, so its image source can follow a moving source and listener between
+/// searches (<see cref="ImageOf"/>): the length and direction heard are then exact every frame, and a reflection's
+/// delay changes smoothly, at the true Doppler rate, rather than jumping when a new search lands.
+/// </para>
 /// </summary>
 public struct ReflectionPath
 {
@@ -15,6 +20,15 @@ public struct ReflectionPath
     public Vector3 First;
     public int Order;
     public Bands3 Surfaces;
+    /// <summary>The image source when it was found (the source mirrored in each plane in turn).</summary>
+    public Vector3 Image;
+    /// <summary>The planes, nearest the source first (the same twice for first order).</summary>
+    public AcousticPlane FirstPlane, LastPlane;
+    /// <summary>Which planes, in order: the same path from one search to the next has the same key (never 0).</summary>
+    public int Key;
+
+    /// <summary>The image of a source at <paramref name="source"/> in this path's planes.</summary>
+    public readonly Vector3 ImageOf(Vector3 source) => Order == 1 ? FirstPlane.Mirror(source) : LastPlane.Mirror(FirstPlane.Mirror(source));
 }
 
 /// <summary>
@@ -71,7 +85,8 @@ public static class ImageSources
             var image = plane.Mirror(source);
             if (!LegHits(scene, pa, listener, image, out var point, out var bands)) continue;
             if (scene.Blocked(Off(point, plane, source), source)) continue;
-            Keep(new ReflectionPath { Length = Vector3.Distance(listener, image), Point = point, First = point, Order = 1, Surfaces = bands }, paths);
+            Keep(new ReflectionPath { Length = Vector3.Distance(listener, image), Point = point, First = point, Order = 1, Surfaces = bands,
+                Image = image, FirstPlane = plane, LastPlane = plane, Key = pa + 1 }, paths);
         }
         if (maxOrder < 2) return Sort(paths[..count]);
 
@@ -90,7 +105,8 @@ public static class ImageSources
             if (!SameSide(first, point2, source)) continue;
             if (!LegHits(scene, pa, Off(point2, second, listener), image1, out var point1, out var bands1)) continue;
             if (scene.Blocked(Off(point1, first, source), source)) continue;
-            Keep(new ReflectionPath { Length = Vector3.Distance(listener, image2), Point = point2, First = point1, Order = 2, Surfaces = bands1 * bands2 }, paths);
+            Keep(new ReflectionPath { Length = Vector3.Distance(listener, image2), Point = point2, First = point1, Order = 2, Surfaces = bands1 * bands2,
+                Image = image2, FirstPlane = first, LastPlane = second, Key = (pa + 1) | ((pb + 1) << 16) }, paths);
         }
         return Sort(paths[..count]);
     }
