@@ -222,7 +222,7 @@ public sealed class AudioEngine : IDisposable
         var handle = new VoiceHandle((gen << 16) | (i + 1));
         // Render at once if there's room, or if it outranks the weakest rendered voice.
         float key = Key(in v);
-        if (key > float.MinValue)
+        if (key > float.MinValue && _mixerFreeCount > 0)
         {
             if (_realCount < _maxReal) Promote(i, exact: true);
             else
@@ -236,7 +236,7 @@ public sealed class AudioEngine : IDisposable
                     float k = Key(in _voices[o]) + StickinessDb;
                     if (k < weakestKey) { weakestKey = k; weakest = o; }
                 }
-                if (weakest >= 0 && key > weakestKey && _mixerFreeCount > 0) { Demote(weakest); Promote(i, exact: true); }
+                if (weakest >= 0 && key > weakestKey) { Demote(weakest); Promote(i, exact: true); }
             }
         }
         return handle;

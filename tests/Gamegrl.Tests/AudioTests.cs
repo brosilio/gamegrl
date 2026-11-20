@@ -155,6 +155,22 @@ internal static class AudioTests
             Assert.True(output[2 * 1100] == 0 && !engine.IsPlaying(cue), "the stop survives promotion");
         });
 
+        Test("audio: new cues wait if every mixer slot is still fading out", () =>
+        {
+            using var engine = AudioEngine.Offline(Rate, ChannelLayout.Mono,
+                AudioEngineSettings.Default with { MaxRealVoices = 1 });
+            var clip = Dc();
+            var cue = default(VoiceHandle);
+            for (int priority = 0; priority <= 32; priority++)
+                cue = engine.Play(clip, PlayOptions.Default with { Priority = priority });
+            engine.SetGain(cue, 0);
+            engine.Update();
+            var next = engine.Play(clip, PlayOptions.Default with { Priority = 100 });
+            Assert.True(engine.IsPlaying(next) && !engine.IsRendered(next), "wait virtually while slots drain");
+            Render(engine, 1024);
+            Assert.True(engine.IsRendered(next), "the waiting cue gets a slot");
+        });
+
         Test("audio: resampling keeps pitch — a 44.1 kHz clip plays at its own pitch at 48 kHz; pitch 1.5 raises a fifth", () =>
         {
             var e = Engine(ChannelLayout.Mono);
