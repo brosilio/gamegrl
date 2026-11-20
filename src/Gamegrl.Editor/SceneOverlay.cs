@@ -82,6 +82,8 @@ internal sealed partial class EditorHost
                 _render.Debug.Line(new Vector3(-20, 0, i), new Vector3(20, 0, i), color);
             }
 
+        DrawAcousticPaths();
+
         bool overGizmo = false;
         if (hasTransform)
         {

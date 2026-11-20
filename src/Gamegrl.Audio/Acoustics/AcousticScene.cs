@@ -90,6 +90,20 @@ public sealed class AcousticScene
 
     public AcousticMaterial MaterialOf(int triangle) => _palette[_materials[triangle]];
 
+    /// <summary>The absorption averaged over all surfaces, weighted by area (what Sabine's and Eyring's formulas take).</summary>
+    public Bands3 MeanAbsorption()
+    {
+        var sum = default(Bands3);
+        float area = 0;
+        for (int t = 0; t < _a.Length; t++)
+        {
+            float a = 0.5f * Vector3.Cross(_e1[t], _e2[t]).Length();
+            sum = sum + _palette[_materials[t]].Absorption * a;
+            area += a;
+        }
+        return area > 0 ? sum * (1 / area) : default;
+    }
+
     /// <summary>The plane a triangle lies in (an index into <see cref="Planes"/>).</summary>
     public int PlaneOf(int triangle) { _ = Planes; return _planeOf[triangle]; }
 
@@ -341,6 +355,9 @@ public sealed class AcousticSceneBuilder
     private readonly List<AcousticMaterial> _palette = [];
 
     public void Clear() { _vertices.Clear(); _materials.Clear(); _instances.Clear(); _solid.Clear(); _palette.Clear(); }
+
+    /// <summary>Boxes and meshes added so far.</summary>
+    public int Count => _solid.Count;
 
     /// <summary>A solid box: the unit cube from −0.5 to 0.5 through <paramref name="transform"/>, twelve triangles with outward normals.</summary>
     public void AddBox(Matrix4x4 transform, in AcousticMaterial material)

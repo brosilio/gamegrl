@@ -131,6 +131,37 @@ public sealed class AudioContext : IDisposable
     /// <summary>The direct distance's gain under an emitter's distance law (for scaling reflections relative to it).</summary>
     internal static float DistanceLaw(float distance, in AudioEmitter emitter) =>
         Propagation.DistanceGain(MathF.Max(distance, emitter.MinDistance), emitter.MinDistance, float.MaxValue, emitter.Rolloff);
+
+    /// <summary>
+    /// Reflection paths as taps for a listener: direction from each path's last reflection point (listener space), delay
+    /// and gain relative to the direct sound; and the surfaces' tone from the strongest. Returns how many taps.
+    /// </summary>
+    internal static int Taps(ReadOnlySpan<ReflectionPath> paths, Vector3 source, in Matrix4x4 listener, in AudioEmitter emitter, float speedOfSound, Span<Reflection> taps, out Bands3 tone)
+    {
+        tone = Bands3.All(1);
+        Matrix4x4.Invert(listener, out var toListener);
+        float direct = Vector3.Distance(source, listener.Translation);
+        float directLaw = DistanceLaw(direct, emitter);
+        int n = 0;
+        foreach (ref readonly var path in paths)
+        {
+            if (n == taps.Length) break;
+            float delay = (path.Length - direct) / speedOfSound;
+            if (delay <= 0 || delay > Mixer.MaxReflectionDelaySeconds) continue;
+            var dir = Vector3.Transform(path.Point, toListener);
+            taps[n++] = new Reflection
+            {
+                Direction = dir.LengthSquared() > 1e-8f ? Vector3.Normalize(dir) : -Vector3.UnitZ, Delay = delay,
+                Gain = DistanceLaw(path.Length, emitter) / MathF.Max(directLaw, 1e-6f) * path.Surfaces.Mid,
+            };
+        }
+        if (n > 0)
+        {
+            var s = paths[0].Surfaces;
+            if (s.Mid > 0) tone = new Bands3(s.Low / s.Mid, 1, s.High / s.Mid);
+        }
+        return n;
+    }
     internal readonly List<OneShot> OneShots = [];
 
     public AudioEngine Engine { get; }
@@ -171,6 +202,13 @@ public sealed class AudioContext : IDisposable
         clip = Load(asset.Guid);
         _clips[asset.Guid] = clip;
         return clip;
+    }
+
+    /// <summary>Fades out everything playing and forgets positional one-shots.</summary>
+    public void Silence()
+    {
+        Engine.StopAll();
+        OneShots.Clear();
     }
 
     /// <summary>Supplies a clip for an asset reference directly (generated sounds, tests).</summary>
@@ -291,13 +329,21 @@ public sealed class AudioModule(AudioOutput output, string? device = null, bool 
     public void Build(EngineBuilder builder)
     {
         builder.AddModule<CoreModule>();
-        var engine = CreateEngine();
-        var audio = new AudioContext(engine, inlineSimulation: engine.Device is null);
-        builder.SetResource(audio, a => { a.Engine.StopAll(); a.OneShots.Clear(); return a; });
-        builder.SetResource(AudioEnvironment.Default);
+        // Rebuilding over a world that already has audio (the editor reloading game code) keeps its engine and device.
+        var audio = builder.World.HasResource<AudioContext>() ? builder.World.Resource<AudioContext>() : null;
+        if (audio is null)
+        {
+            var engine = CreateEngine();
+            audio = new AudioContext(engine, inlineSimulation: engine.Device is null);
+        }
+        // Clips can be asked for before the first audio update (a fixed-step system playing a sound): know the assets now.
+        if (builder.World.HasResource<IAssetSource>()) audio.Bind(builder.World.Resource<IAssetSource>());
+        builder.SetResource(audio, a => { a.Silence(); return a; });
+        builder.SetResource(builder.World.HasResource<AudioEnvironment>() ? builder.World.Resource<AudioEnvironment>() : AudioEnvironment.Default);
         builder.AddSystem(new AcousticGeometryUpdate());
         builder.AddSystem(new AudioUpdate());
-        builder.OnStop(_ => audio.Dispose());
+        // Stopping (the app, or the editor's play mode) silences; the world disposes the context, closing the device, when it goes.
+        builder.OnStop(_ => audio.Silence());
     }
 
     private AudioEngine CreateEngine()
@@ -544,8 +590,6 @@ internal sealed class AudioUpdate : ISystem
             if (audio.Simulator.TryTakeReflections(out var result)) _paths = result;
         }
 
-        Matrix4x4.Invert(audio.Listener, out var toListener);
-        var listenerPos = audio.Listener.Translation;
         float c = Propagation.SpeedOfSound(env.TemperatureC);
         Span<Reflection> taps = stackalloc Reflection[ReflectionTaps.Count];
         foreach (var held in _reflecting)
@@ -561,24 +605,8 @@ internal sealed class AudioUpdate : ISystem
             var voice = _pending[i];
             var paths = _paths is null ? default : _paths.For(voice.Value);
             if (paths.IsEmpty) continue;
-            ref readonly var emitter = ref _pendingEmitter[i];
-            float direct = Vector3.Distance(_pendingPosition[i], listenerPos);
-            float directLaw = AudioContext.DistanceLaw(direct, emitter);
-            int n = 0;
-            foreach (ref readonly var path in paths)
-            {
-                float delay = (path.Length - direct) / c;
-                if (delay <= 0 || delay > Mixer.MaxReflectionDelaySeconds) continue;
-                var dir = Vector3.Transform(path.Point, toListener);
-                taps[n++] = new Reflection
-                {
-                    Direction = dir.LengthSquared() > 1e-8f ? Vector3.Normalize(dir) : -Vector3.UnitZ, Delay = delay,
-                    Gain = AudioContext.DistanceLaw(path.Length, emitter) / MathF.Max(directLaw, 1e-6f) * path.Surfaces.Mid,
-                };
-            }
+            int n = AudioContext.Taps(paths, _pendingPosition[i], audio.Listener, _pendingEmitter[i], c, taps, out var tone);
             if (n == 0) continue;
-            var s = paths[0].Surfaces;
-            var tone = s.Mid > 0 ? new Bands3(s.Low / s.Mid, 1, s.High / s.Mid) : Bands3.All(1);
             engine.SetReflections(voice, taps[..n], tone);
             _reflecting.Add(voice);
         }

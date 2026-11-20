@@ -7,10 +7,12 @@ using Gamegrl.Audio.Devices;
 //
 //   Gamegrl.AudioSmoke [--device default] [--layout stereo|quad|5.1|7.1|7.1.4] [--seconds 4] [--period 256]
 //   Gamegrl.AudioSmoke --wav out.wav [--layout 5.1] [--seconds 4]      render offline instead
+//   Gamegrl.AudioSmoke --room out.wav [--headphones]                    a clap and a gunshot in open air, a carpeted room, a concrete hall, a cave
 //   Gamegrl.AudioSmoke --bench N                                       N moving positional voices in a room (reverb, 8 × 8 reflections), offline
 //   Gamegrl.AudioSmoke --analyze recording.wav [--expect-spacing N]     click onsets and their spacing (fails without 3 in a row N apart)
 
-string? device = null, wav = null, analyze = null;
+string? device = null, wav = null, analyze = null, room = null;
+bool phones = false;
 int expectSpacing = 0, bench = 0;
 var layout = ChannelLayout.Stereo;
 double seconds = 4;
@@ -28,6 +30,8 @@ for (int i = 0; i < args.Length; i++)
         case "--period": period = int.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
         case "--wav": wav = Next(); break;
         case "--analyze": analyze = Next(); break;
+        case "--room": room = Next(); break;
+        case "--headphones": phones = true; break;
         case "--bench": bench = int.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
         case "--expect-spacing": expectSpacing = int.Parse(Next(), System.Globalization.CultureInfo.InvariantCulture); break;
         default: throw new ArgumentException("unknown argument " + args[i]);
@@ -36,6 +40,7 @@ for (int i = 0; i < args.Length; i++)
 
 if (analyze is not null) return Analyze(analyze, expectSpacing);
 if (bench > 0) { Bench(bench, headphones: false); Bench(bench, headphones: true); return 0; }
+if (room is not null) return Rooms(room, phones);
 
 const int Rate = 48000;
 AudioEngine engine;
@@ -181,4 +186,43 @@ static void Bench(int voices, bool headphones)
     }
     double elapsed = watch.Elapsed.TotalSeconds;
     Console.WriteLine($"{voices} positional voices ({engine.RealVoices} rendered), {(headphones ? "headphones (7.1.4 bed, binaural)" : "7.1 speakers")}: {seconds / elapsed:0.0}× real time, {elapsed / (seconds * 60) * 1000:0.000} ms per 60 Hz frame of audio");
+}
+
+// A clap and a gunshot in four spaces, one after another, rendered through the acoustics pipeline for listening.
+static int Rooms(string path, bool headphones)
+{
+    const int rate = 48000;
+    var spaces = new (string Name, Gamegrl.Audio.Acoustics.AcousticScene Scene)[4];
+    var open = new Gamegrl.Audio.Acoustics.AcousticSceneBuilder();
+    open.AddBox(System.Numerics.Matrix4x4.CreateScale(400, 0.2f, 400) * System.Numerics.Matrix4x4.CreateTranslation(0, -1.7f, 0), Gamegrl.Audio.Acoustics.AcousticMaterial.Gravel);
+    spaces[0] = ("open air over gravel", open.Build());
+    Gamegrl.Audio.Acoustics.AcousticScene Box(float x, float y, float z, Gamegrl.Audio.Acoustics.AcousticMaterial m)
+    {
+        var b = new Gamegrl.Audio.Acoustics.AcousticSceneBuilder();
+        b.AddBox(System.Numerics.Matrix4x4.CreateScale(x, y, z) * System.Numerics.Matrix4x4.CreateTranslation(0, y / 2 - 1.7f, -z / 4), m);
+        return b.Build();
+    }
+    spaces[1] = ("a carpeted living room", Box(5, 2.6f, 4, Gamegrl.Audio.Acoustics.AcousticMaterial.Carpet));
+    spaces[2] = ("a concrete hall", Box(16, 6, 24, Gamegrl.Audio.Acoustics.AcousticMaterial.Concrete));
+    spaces[3] = ("a rock cave", Box(30, 12, 50, Gamegrl.Audio.Acoustics.AcousticMaterial.Rock));
+    var output = new List<float>();
+    var layout = ChannelLayout.Stereo;
+    foreach (var (name, scene) in spaces)
+    {
+        foreach (var sound in new[] { TestSounds.Clap(rate), TestSounds.Gunshot(rate) })
+        {
+            var setup = Gamegrl.Audio.Acoustics.AuralizeSetup.For(scene, System.Numerics.Matrix4x4.Identity, new System.Numerics.Vector3(3, 0, -6)) with { Headphones = headphones, TailSeconds = 2.5f };
+            var clip = Gamegrl.Audio.Acoustics.Auralizer.Render(sound, setup);
+            output.AddRange(clip.Samples);
+            output.AddRange(new float[rate / 2 * layout.Count]);
+            Console.WriteLine($"  {sound.Name} in {name}");
+        }
+    }
+    float peak = 0;
+    foreach (var x in output) peak = MathF.Max(peak, MathF.Abs(x));
+    var samples = output.ToArray();
+    if (peak > 0.9f) for (int i = 0; i < samples.Length; i++) samples[i] *= 0.9f / peak;
+    Wav.Write(path, new AudioClip("rooms", rate, layout, samples));
+    Console.WriteLine($"wrote {path}: {samples.Length / layout.Count / (double)rate:0.0} s{(headphones ? ", binaural" : "")}");
+    return 0;
 }

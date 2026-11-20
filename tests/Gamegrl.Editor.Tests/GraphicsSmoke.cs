@@ -150,6 +150,26 @@ internal static class GraphicsSmoke
         Check(!editor.PaletteOpen && editor.DockArea(DockRegion.Left).W == 0, "Palette command did not run");
         Command("view.sidebar");
         editor.Docks.Move("console", DockRegion.Bottom, 1); editor.Docks.Select(DockRegion.Left, "hierarchy"); Frame();
+        // Acoustics: a concrete room around the scene's listener (the camera) with a source in it; measure, listen, export.
+        var listenerAt = Vector3.Zero;
+        foreach (var a in app.World.Query(new QueryDesc().With<Gamegrl.Audio.AudioListener>().With<LocalToWorld>()).Archetypes)
+            if (a.Count > 0) listenerAt = a.GetSpan<LocalToWorld>()[0].Value.Translation;
+        app.World.Spawn(new LocalTransform { Position = listenerAt, Rotation = Quaternion.Identity, Scale = new Vector3(12, 5, 9) }, new LocalToWorld(),
+            Gamegrl.Audio.Acoustics.AcousticSurface.Box(Gamegrl.Audio.Acoustics.AcousticMaterial.Concrete));
+        var gun = app.World.Spawn(LocalTransform.At(listenerAt + new Vector3(2, -1, -3)), new LocalToWorld(), new Name("Gun"));
+        Frame();
+        editor.Document.Selected = gun;
+        Command("acoustics.show"); Command("acoustics.measure");
+        Wait(() => !editor.Jobs.Busy && editor.Measurement is not null);
+        var measured = editor.Measurement!;
+        Check(editor.Docks.Selected(DockRegion.Bottom) == "acoustics", "Acoustics panel did not open");
+        Check(measured.DirectTransmission.Mid == 1 && measured.T30.Mid > 1 && measured.Paths.Length > 0 && measured.Reverb.Volume > 400,
+            $"Acoustic measurement is off: T30 {measured.T30}, {measured.Paths.Length} paths, volume {measured.Reverb.Volume}");
+        for (int i = 0; i < 3; i++) Frame();
+        Command("acoustics.clap"); Wait(() => !editor.Jobs.Busy);
+        Command("acoustics.export"); Wait(() => !editor.Jobs.Busy);
+        string impulse = Path.Combine(root, "Library", "Acoustics", "impulse-response.wav");
+        Check(File.Exists(impulse) && Gamegrl.Audio.Wav.Read(impulse).Frames > 48000, "Impulse response export missing");
         Command("file.new"); Check(app.World.EntityCount == 0 && editor.Files.CurrentPath is null && editor.Document.Dirty, "New failed");
         Command("file.save"); Check(editor.Files.Dialog == SceneFileDialog.SaveAs, "Missing Save As dialog");
         Button("destination");
@@ -170,7 +190,7 @@ internal static class GraphicsSmoke
         }
         string finalBuild = editor.GameAssemblyPath!; editor.Dispose(); GC.Collect(); GC.WaitForPendingFinalizers(); editor.DrainBuildCleanupAsync().GetAwaiter().GetResult();
         Check(!File.Exists(finalBuild), "Shutdown cleanup failed");
-        Console.Error.WriteLine((terminalMode ? "Terminal" : "Desktop") + " cell editor smoke passed: real viewports, editing, play/stop, reload/rollback, focus, docking, file dialogs and cleanup.");
+        Console.Error.WriteLine((terminalMode ? "Terminal" : "Desktop") + " cell editor smoke passed: real viewports, editing, play/stop, reload/rollback, focus, docking, acoustics, file dialogs and cleanup.");
         return 0;
     }
     private static bool HasPreview(Surface surface, Rect area)

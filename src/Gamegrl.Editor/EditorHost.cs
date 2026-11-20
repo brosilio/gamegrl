@@ -72,6 +72,8 @@ internal sealed partial class EditorHost : IDisposable
         _render.DrawMainCamera = false;
         _ui = new CellUi(ascii);
         _terminal = terminal;
+        // Load the audio engine before any game code, so game code that uses it shares the editor's copy (and its types).
+        System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(typeof(Gamegrl.Audio.AudioContext).TypeHandle);
         if (terminal is null)
         {
             _renderer = new CellRenderer(_render.Device, _render.Swapchain.Format, fontPath ?? throw new ArgumentNullException(nameof(fontPath)));
@@ -403,6 +405,7 @@ internal sealed partial class EditorHost : IDisposable
         if (_disposed) return;
         _disposed = true;
         Jobs.Dispose();
+        _auditionEngine?.Dispose();
         try { _game.Stop(_app); } catch (Exception e) { Log.Error("Game stop during shutdown: " + e.Message); }
         _app.World.Clear();
         _game.Unload(_app);

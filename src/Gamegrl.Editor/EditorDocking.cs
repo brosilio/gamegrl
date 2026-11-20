@@ -38,6 +38,7 @@ internal sealed partial class EditorHost
         Registry.AddCommand("profiler.pause", "Profiler: Pause or resume recording", _ => ToggleProfilerPause(), "F9");
         Registry.AddCommand("profiler.export", "Profiler: Export trace (Perfetto)", _ => ExportProfile());
         Registry.AddCommand("profiler.enable", "Profiler: Turn on or off", _ => Profiler.Enabled = !Profiler.Enabled);
+        RegisterAcoustics();
         Registry.AddCommand("file.new", "File: New scene", _ => Files.RequestNew(), "Ctrl+N");
         Registry.AddCommand("file.save", "File: Save", _ => Files.Save(), "Ctrl+S");
         Registry.AddCommand("file.saveAs", "File: Save as…", _ => Files.SaveAs(), "Ctrl+Shift+S");

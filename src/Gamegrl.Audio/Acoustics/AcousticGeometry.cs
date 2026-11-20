@@ -67,25 +67,38 @@ internal sealed class AcousticGeometryUpdate : ISystem
     private AcousticScene Build(World world)
     {
         _builder.Clear();
-        var assets = world.HasResource<IAssetSource>() ? world.Resource<IAssetSource>() : null;
-        foreach (var a in _surfaces.Archetypes)
+        AcousticGeometry.Gather(world, _builder, world.HasResource<IAssetSource>() ? world.Resource<IAssetSource>() : null, _meshes);
+        return _builder.Build();
+    }
+}
+
+/// <summary>Reading acoustic geometry out of a world.</summary>
+public static class AcousticGeometry
+{
+    /// <summary>
+    /// Adds every <see cref="AcousticSurface"/> in a world (with its current <see cref="LocalToWorld"/>) to a builder:
+    /// what the scene is made of right now. Reads the world, so call it on the world's thread; build on any thread.
+    /// <paramref name="meshes"/> caches mesh assets' triangles between calls.
+    /// </summary>
+    public static void Gather(World world, AcousticSceneBuilder builder, IAssetSource? assets, Dictionary<Guid, Vector3[]?> meshes)
+    {
+        foreach (var a in world.Query(new QueryDesc().With<AcousticSurface>().With<LocalToWorld>()).Archetypes)
         {
             var surfaces = a.GetSpan<AcousticSurface>();
             var transforms = a.GetSpan<LocalToWorld>();
             for (int r = 0; r < surfaces.Length; r++)
             {
-                if (surfaces[r].Shape == AcousticShape.Box) _builder.AddBox(transforms[r].Value, surfaces[r].Material);
-                else if (MeshTriangles(surfaces[r].Mesh, assets) is { } local) _builder.AddMesh(local, transforms[r].Value, surfaces[r].Material);
+                if (surfaces[r].Shape == AcousticShape.Box) builder.AddBox(transforms[r].Value, surfaces[r].Material);
+                else if (MeshTriangles(surfaces[r].Mesh, assets, meshes) is { } local) builder.AddMesh(local, transforms[r].Value, surfaces[r].Material);
             }
         }
-        return _builder.Build();
     }
 
     /// <summary>A mesh asset's triangles in its own space, three vertices each (cached; null when missing).</summary>
-    private Vector3[]? MeshTriangles(AssetRef<MeshAsset> mesh, IAssetSource? assets)
+    private static Vector3[]? MeshTriangles(AssetRef<MeshAsset> mesh, IAssetSource? assets, Dictionary<Guid, Vector3[]?> cache)
     {
         if (mesh.IsNone) return null;
-        if (_meshes.TryGetValue(mesh.Guid, out var cached)) return cached;
+        if (cache.TryGetValue(mesh.Guid, out var cached)) return cached;
         Vector3[]? tris = null;
         if (assets is not null && assets.TryRead(mesh.Guid, out var kind, out var bytes) && kind == AssetKind.Mesh)
         {
@@ -94,7 +107,7 @@ internal sealed class AcousticGeometryUpdate : ISystem
             for (int i = 0; i < tris.Length; i++) tris[i] = data.Vertices[data.Indices[i]].Position;
         }
         else Log.Warn($"audio: no mesh asset {mesh.Guid:N} for an acoustic surface");
-        _meshes[mesh.Guid] = tris;
+        cache[mesh.Guid] = tris;
         return tris;
     }
 }

@@ -330,6 +330,67 @@ internal static class AcousticsTests
             Assert.True(context.Scene.Planes.Length == 6, "the room's six walls");
         });
 
+        Test("acoustics: measurement — the echogram is calibrated (free field and a mirror floor), T30 follows Kuttruff, clarity follows absorption", () =>
+        {
+            // Free field: just the direct sound, 1/(4πr²).
+            var none = AcousticMeasurement.Measure(AcousticScene.Empty, new Vector3(0, 0, -4), Vector3.Zero, MeasureOptions.Default);
+            // (Air takes its share over the 4 m, too: about 0.05 dB in the mid band.)
+            float free = 1 / (4 * MathF.PI * 16) * MathF.Pow(10, -(float)Gamegrl.Audio.Spatial.Propagation.AirAbsorptionDbPerMetre(Gamegrl.Audio.Spatial.Bands.MidCenter) * 4 / 10);
+            Assert.True(MathF.Abs(none.DirectEnergy.Mid - free) < 1e-3f * free && none.Mid.Sum() == 0, $"free field: {none.DirectEnergy.Mid} W/m², expected {free}");
+            // A mirror floor 2 m below both: its image is 4 m down, so the reflection carries (1 − α)/(4π·(√(4² + 4²))²).
+            var floor = new AcousticSceneBuilder();
+            floor.AddBox(Box(new Vector3(0, -2.05f, 0), new Vector3(400, 0.1f, 400)), new AcousticMaterial(Bands3.All(0.2f), 0, Bands3.All(0)));
+            var mirror = AcousticMeasurement.Measure(floor.Build(), new Vector3(0, 0, -4), Vector3.Zero, MeasureOptions.Default with { Rays = 200000, ReceiverRadius = 0.3f, TemperatureC = 20, HumidityPercent = 100 });
+            float expected = 0.8f / (4 * MathF.PI * 32);
+            float got = mirror.Mid.Sum();
+            Assert.True(MathF.Abs(got - expected) < 0.15f * expected, $"floor reflection: ray-counted {got:0.0000e0}, image source {expected:0.0000e0}");
+            Assert.True(mirror.Paths.Length == 1 && mirror.Paths[0].Order == 1, $"one image path ({mirror.Paths.Length})");
+
+            var room = new AcousticSceneBuilder();
+            room.AddBox(Box(Vector3.Zero, new Vector3(10, 6, 4)), new AcousticMaterial(Bands3.All(0.2f), 1, Bands3.All(0)));
+            var m = AcousticMeasurement.Measure(room.Build(), new Vector3(-2.5f, 1.1f, -0.9f), new Vector3(1.3f, 0.4f, -0.7f), MeasureOptions.Default);
+            double kuttruff = 0.161 * 240 / (-248 * Math.Log(0.8)) / (1 + 0.2 * Math.Log(0.8));
+            Assert.True(Math.Abs(m.T30.Mid - kuttruff) < 0.1 * kuttruff, $"T30 {m.T30.Mid:0.000} s, Kuttruff {kuttruff:0.000}");
+            Assert.True(MathF.Abs(m.SabineSeconds - 0.779f) < 0.05f && MathF.Abs(m.EyringSeconds - 0.698f) < 0.05f, $"predictions: Sabine {m.SabineSeconds:0.000}, Eyring {m.EyringSeconds:0.000}");
+            Assert.True(m.Edt.Mid > 0.3f && m.Paths.Length > 0 && m.InitialGapSeconds > 0, $"EDT {m.Edt.Mid:0.00}, {m.Paths.Length} paths, gap {m.InitialGapSeconds * 1000:0.0} ms");
+
+            AcousticMeasurement In(AcousticMaterial material, Vector3 source)
+            {
+                var b = new AcousticSceneBuilder();
+                b.AddBox(Box(Vector3.Zero, new Vector3(10, 4, 8)), material);
+                return AcousticMeasurement.Measure(b.Build(), source, Vector3.Zero, MeasureOptions.Default with { Rays = 8000 });
+            }
+            var hard = In(AcousticMaterial.Concrete, new Vector3(3, 0, -2));
+            var soft = In(AcousticMaterial.Carpet, new Vector3(3, 0, -2));
+            var near = In(AcousticMaterial.Concrete, new Vector3(0.8f, 0, -0.6f));
+            Assert.True(soft.C50.Mid > hard.C50.Mid + 5, $"carpet is clearer for speech: C50 {soft.C50.Mid:0.0} dB against concrete {hard.C50.Mid:0.0}");
+            Assert.True(soft.T30.Mid < hard.T30.Mid / 3, $"and much less reverberant: {soft.T30.Mid:0.00} s against {hard.T30.Mid:0.00}");
+            Assert.True(near.DirectToReverberantDb > hard.DirectToReverberantDb + 6, $"closer, more direct: DRR {near.DirectToReverberantDb:0.0} dB against {hard.DirectToReverberantDb:0.0}");
+            Assert.True(hard.CriticalDistance > 0.3f && hard.CriticalDistance < 3, $"critical distance {hard.CriticalDistance:0.00} m");
+        });
+
+        Test("acoustics: the auralizer renders dry, room and binaural versions; the room's impulse response decays as estimated", () =>
+        {
+            var builder = new AcousticSceneBuilder();
+            builder.AddBox(Box(new Vector3(0, 1, -1), new Vector3(12, 5, 9)), AcousticMaterial.Concrete);
+            var scene = builder.Build();
+            var setup = AuralizeSetup.For(scene, Matrix4x4.Identity, new Vector3(2, 0, -3)) with { TailSeconds = 2.5f };
+            var dry = Auralizer.ImpulseResponse(setup with { Dry = true });
+            var wet = Auralizer.ImpulseResponse(setup);
+            double Energy(AudioClip c, int from, int to) { double e = 0; for (int i = from * c.Channels; i < Math.Min(to, c.Frames) * c.Channels; i++) e += c.Samples[i] * c.Samples[i]; return e; }
+            Assert.True(Energy(dry, 10, dry.Frames) < 1e-9 && Energy(dry, 0, 10) > 0, "dry: one click and nothing after");
+            Assert.True(Energy(wet, 2000, wet.Frames) > 1e-3 * Energy(wet, 0, 10), "room: reflections and a tail after the click");
+            var energy = new double[wet.Frames];
+            for (int f = 0; f < wet.Frames; f++) energy[f] = wet.Samples[2 * f] * wet.Samples[2 * f] + wet.Samples[2 * f + 1] * wet.Samples[2 * f + 1];
+            double t60 = SchroederT60(energy, 48000);
+            var estimate = ReverbEstimator.Estimate(scene, Vector3.Zero, 4096, 128);
+            Assert.True(t60 > estimate.DecaySeconds.High && t60 < estimate.DecaySeconds.Low * 1.25, $"impulse response decays in {t60:0.00} s; estimated {estimate.DecaySeconds}");
+            var phones = Auralizer.Render(TestSounds.Clap(), setup with { Headphones = true, TailSeconds = 0.5f });
+            Assert.True(phones.Layout == ChannelLayout.Stereo && phones.Frames == (int)((0.1 + 0.5) * 48000), $"binaural stereo, clap plus tail ({phones.Frames} frames)");
+            var gun = TestSounds.Gunshot();
+            Assert.True(gun.Duration > 0.3 && gun.Samples.Max(MathF.Abs) <= 0.951f, "the gunshot is 0.4 s and normalised");
+        });
+
         Test("acoustics: an entity behind a wall entity is heard through the wall's transmission", () =>
         {
             var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));

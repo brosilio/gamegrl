@@ -467,9 +467,12 @@ public sealed unsafe class World : IDisposable
 
     // ------------------------------------------------------------------ resources
 
-    private sealed class ResourceBox<T>
+    private interface IResourceBox { object? Boxed { get; } }
+
+    private sealed class ResourceBox<T> : IResourceBox
     {
         public T Value = default!;
+        public object? Boxed => Value;
     }
 
     private static class ResourceId<T>
@@ -621,10 +624,16 @@ public sealed unsafe class World : IDisposable
 
     private static void ThrowNoResource(Type t) => throw new InvalidOperationException($"The world has no {t.Name} resource.");
 
+    /// <summary>Frees the entity storage and disposes every resource that's <see cref="IDisposable"/> (the world owns its resources).</summary>
     public void Dispose()
     {
         foreach (var a in _archetypes) a.Dispose();
         _archetypes.Clear();
         _bySet.Clear();
+        var disposed = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        foreach (var box in _resources)
+            if ((box as IResourceBox)?.Boxed is IDisposable d && disposed.Add(d))
+                try { d.Dispose(); } catch (Exception e) { Log.Error($"Disposing resource {d.GetType().Name} failed: {e.Message}"); }
+        Array.Clear(_resources);
     }
 }

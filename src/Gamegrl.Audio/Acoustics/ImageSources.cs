@@ -11,6 +11,8 @@ public struct ReflectionPath
 {
     public float Length;
     public Vector3 Point;
+    /// <summary>The reflection point nearest the source (the same as <see cref="Point"/> for first order).</summary>
+    public Vector3 First;
     public int Order;
     public Bands3 Surfaces;
 }
@@ -69,7 +71,7 @@ public static class ImageSources
             var image = plane.Mirror(source);
             if (!LegHits(scene, pa, listener, image, out var point, out var bands)) continue;
             if (scene.Blocked(Off(point, plane, source), source)) continue;
-            Keep(new ReflectionPath { Length = Vector3.Distance(listener, image), Point = point, Order = 1, Surfaces = bands }, paths);
+            Keep(new ReflectionPath { Length = Vector3.Distance(listener, image), Point = point, First = point, Order = 1, Surfaces = bands }, paths);
         }
         if (maxOrder < 2) return Sort(paths[..count]);
 
@@ -88,7 +90,7 @@ public static class ImageSources
             if (!SameSide(first, point2, source)) continue;
             if (!LegHits(scene, pa, Off(point2, second, listener), image1, out var point1, out var bands1)) continue;
             if (scene.Blocked(Off(point1, first, source), source)) continue;
-            Keep(new ReflectionPath { Length = Vector3.Distance(listener, image2), Point = point2, Order = 2, Surfaces = bands1 * bands2 }, paths);
+            Keep(new ReflectionPath { Length = Vector3.Distance(listener, image2), Point = point2, First = point1, Order = 2, Surfaces = bands1 * bands2 }, paths);
         }
         return Sort(paths[..count]);
     }
