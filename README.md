@@ -34,6 +34,25 @@ Click squares to rewrite the score while it plays. Click a frog or press **A**, 
 for new calls. **Escape** closes the player. The WAV command records the opening four bars in stereo and runs
 without a display or audio device.
 
+### Cave Gunfight
+
+Walk into a cave under fire and hear it. Outside on gravel at the foot of a cliff, a tunnel leads into a rock
+chamber with a pillar and a pool. Someone fires from deep in the chamber, behind the pillar from the tunnel, so you
+hear the shots bend round the rock, and from outside you hear the chamber ring out of the tunnel mouth. Someone
+else fires in the open field. Water drips into the pool, wind moves across the mouth, and HDR mixing lets the drips
+vanish under gunfire and come back. All the sounds are generated.
+
+```sh
+dotnet run --project samples/CaveGunfight/Player
+dotnet run --project samples/CaveGunfight/Player -- --tour
+dotnet run --project samples/CaveGunfight/Player -- --wav cave-walk.wav --headphones
+```
+
+**WASD** walks, **arrows** or **Q**/**E** turn, right-drag looks, **Space** or a click fires, **R** switches the room
+acoustics (reverb, reflections, diffraction, the other room) off and on, **Escape** quits. `--tour` plays a scripted
+walk in from the field and back out; `--wav` renders that walk offline (binaural with `--headphones`). Set
+`GAMEGRL_HEADPHONES=1` for binaural in the game.
+
 The desktop editor uses DejaVu Sans Mono on Linux; set `GAMEGRL_FONT` to another TrueType font path if needed.
 Right-drag orbits the Scene camera, middle-drag pans, the wheel zooms, and F frames the selection.
 Click a mesh to select it; drag its colored axis handles to move it. Project prefab rows instantiate prefabs.
@@ -95,6 +114,7 @@ dotnet run --project tests/Gamegrl.Editor.Tests -c Release -- --bench --tree # e
 | `tests/Gamegrl.Editor.Tests` | Headless editor tests, optional SDL/Vulkan interaction smoke, editor benchmarks (`--bench`) |
 | `tests/Gamegrl.Bench` | Engine benchmark scenarios under the profiler (NativeAOT); baselines in `perf/baselines` |
 | `samples/BogOpera` | Interactive frog choir, sample-timed sequencer, and offline WAV player |
+| `samples/CaveGunfight` | First-person cave walk under fire: geometric acoustics, diffraction, HDR, offline tour |
 | `samples/Spinners` | `Game` (library), `Player` (NativeAOT), `Build` (dev tool), `Assets/` |
 
 Editor-only extensions implement `IEditorExtension.Register(EditorRegistry)`. Register panels with

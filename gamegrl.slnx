@@ -24,6 +24,8 @@
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/BogOpera/Game/BogOpera.Game.csproj" />
+    <Project Path="samples/CaveGunfight/Game/CaveGunfight.Game.csproj" />
+    <Project Path="samples/CaveGunfight/Player/CaveGunfight.csproj" />
     <Project Path="samples/BogOpera/Player/BogOpera.csproj" />
     <Project Path="samples/Spinners/Game/Spinners.Game.csproj" />
     <Project Path="samples/Spinners/Player/Spinners.csproj" />

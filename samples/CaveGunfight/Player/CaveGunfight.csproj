@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Gamegrl.Platform.Sdl3/Gamegrl.Platform.Sdl3.csproj" />
+    <ProjectReference Include="../../../src/Gamegrl.Rhi.Vulkan/Gamegrl.Rhi.Vulkan.csproj" />
+    <ProjectReference Include="../Game/CaveGunfight.Game.csproj" />
+  </ItemGroup>
+</Project>

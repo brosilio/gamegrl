@@ -30,7 +30,9 @@ public struct ReverbParams
 /// <item>Size: first-hit distances give the volume visible from the point, V = (4π/N)·Σ r³/3; the mean free path
 /// l = 4V/S then gives the surface S. The fraction of first rays that hit something is the enclosure.</item>
 /// <item>Level: the room constant R = S·ᾱ/(1 − ᾱ), with ᾱ from the measured decay by Eyring, puts the reverberant
-/// energy at 16π/R times a source's direct energy at 1 m, scaled by the enclosure.</item>
+/// energy at 16π/R times a source's direct energy at 1 m, for a closed room. Where energy escapes early (open air, a cliff,
+/// a cave mouth) the decay's tail can be long while little energy is left in it, so the energy is scaled by how long
+/// it actually stays, ∫E dt, against a closed room's T/13.8.</item>
 /// </list>
 /// Deterministic for given inputs (a fixed random seed).
 /// </summary>
@@ -97,7 +99,11 @@ public static class ReverbEstimator
             float alpha = 1 - MathF.Exp(-0.161f * result.Volume / (result.Surface * t));
             alpha = Math.Clamp(alpha, 1e-4f, 0.999f);
             float roomConstant = result.Surface * alpha / (1 - alpha);
-            result.Level = MathF.Sqrt(16 * MathF.PI / roomConstant) * result.Enclosure;
+            // How long the energy really stays (the decay curve's integral, from 1 at the start) against a closed room's.
+            double stays = 0, start = energy[bins];
+            for (int b = 0; b < bins && start > 0; b++) stays += energy[bins + b] / start * BinSeconds;
+            float kept = start > 0 ? (float)Math.Min(1, stays / (t / 13.8)) : 0;
+            result.Level = MathF.Sqrt(16 * MathF.PI / roomConstant * kept);
         }
         return result;
     }
