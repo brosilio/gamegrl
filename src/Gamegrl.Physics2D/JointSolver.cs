@@ -187,23 +187,40 @@ public sealed partial class PhysicsWorld2D
     /// <summary>The joint's motor force (or torque, for revolute and wheel) in the last step.</summary>
     public float JointMotorForce(int j) => _joints[j].MotorImpulse * _invH;
 
-    /// <summary>The force (and torque) the joint applied in the last step.</summary>
+    /// <summary>
+    /// The force and torque the joint applied to body B in the last step (in world space; body A felt the opposite).
+    /// Revolute torque and prismatic force include the spring's, which Box2D leaves out.
+    /// </summary>
     public (Vector2 Force, float Torque) JointConstraintForce(int j)
     {
         ref readonly var joint = ref _joints[j];
         float invH = _invH;
         switch (joint.Def.Type)
         {
+            case JointType2D.Distance:
+            {
+                var xfA = BodyTransform(joint.A); var xfB = BodyTransform(joint.B);
+                var axis = SimMath.Normalize(xfB.Apply(joint.Def.LocalFrameB.P) - xfA.Apply(joint.Def.LocalFrameA.P));
+                return (invH * (joint.Impulse + joint.LowerImpulse - joint.UpperImpulse + joint.MotorImpulse) * axis, 0);
+            }
+            case JointType2D.Prismatic:
+            {
+                var axis = Rot.Mul(BodyTransform(joint.A).Q, joint.Def.LocalFrameA.Q).Rotate(Vector2.UnitX);
+                float axial = joint.SpringImpulse + joint.MotorImpulse + joint.LowerImpulse - joint.UpperImpulse;
+                return (invH * (joint.Linear.X * LeftPerp(axis) + axial * axis), invH * joint.Linear.Y);
+            }
+            case JointType2D.Wheel:
+            {
+                var axis = Rot.Mul(BodyTransform(joint.A).Q, joint.Def.LocalFrameA.Q).Rotate(Vector2.UnitX);
+                float axial = joint.SpringImpulse + joint.LowerImpulse - joint.UpperImpulse;
+                return (invH * (joint.Perp * LeftPerp(axis) + axial * axis), invH * joint.MotorImpulse);
+            }
             case JointType2D.Revolute: return (invH * joint.Linear, invH * (joint.SpringImpulse + joint.MotorImpulse + joint.LowerImpulse - joint.UpperImpulse));
             case JointType2D.Weld: return (invH * joint.Linear, invH * joint.Angular);
             case JointType2D.Motor: return (invH * (joint.Linear + joint.LinearSpring), invH * (joint.Angular + joint.AngularSpring));
             case JointType2D.Mover: return (invH * joint.Linear, 0);
             case JointType2D.Pogo: return (invH * joint.Impulse * joint.Def.Normal, 0);
-            default:
-            {
-                Reaction(joint, invH, out float force, out float torque);
-                return (new Vector2(force, 0), torque);
-            }
+            default: return (Vector2.Zero, 0);
         }
     }
 
@@ -548,7 +565,9 @@ public sealed partial class PhysicsWorld2D
         }
         if (IsDynamicNow(joint.A)) { sa.V = vA; sa.W = wA; }
         if (IsDynamicNow(joint.B)) { sb.V = vB; sb.W = wB; }
-        if (useBias && !joint.ThresholdHit && (joint.Def.ForceThreshold < float.MaxValue || joint.Def.TorqueThreshold < float.MaxValue))
+        // Box2D checks in the biased solve, when a soft joint has yet to build up its full impulse; after the relax
+        // pass the measure matches what JointConstraintForce reports.
+        if (!useBias && !joint.ThresholdHit && (joint.Def.ForceThreshold < float.MaxValue || joint.Def.TorqueThreshold < float.MaxValue))
         {
             Reaction(joint, _invH, out float force, out float torque);
             if (force >= joint.Def.ForceThreshold || torque >= joint.Def.TorqueThreshold) joint.ThresholdHit = true;

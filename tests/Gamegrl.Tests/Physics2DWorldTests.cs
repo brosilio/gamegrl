@@ -257,5 +257,148 @@ internal static class Physics2DWorldTests
             w.Step(1 / 60f);
             Assert.True(MathF.Abs(w.GetRotation(pusher).Angle - 0.2f) < 2e-3f, $"turned to {w.GetRotation(pusher).Angle}");
         });
+
+        Test("physics2d world: wheel joints sag to g/ω² on their spring, stop at limits, and their motor turns the wheel", () =>
+        {
+            var w = World(sleep: false);
+            int chassis = w.CreateBody(default, BodyDef2D.Static(new Vector2(0, 5)));
+            w.CreateShape(chassis, default, Shape.Box(3, 0.2f), ShapeDef2D.Default);
+            int Wheel(float x, JointDef2D def, out int joint)
+            {
+                int b = Dynamic(w, new Vector2(x, 5), Shape.Circle(0.4f, Vector2.Zero));
+                joint = w.CreateJoint(default, chassis, b, def);
+                return b;
+            }
+            // Vertical suspension: the spring's stiffness is the wheel's mass × ω², so it sags g/ω² whatever the mass.
+            var suspension = JointDef2D.Wheel(new Vector2(-2, 0), Vector2.Zero, Vector2.UnitY) with { Hertz = 1, DampingRatio = 0.7f };
+            int free = Wheel(-2, suspension, out int jFree);
+            Wheel(0, suspension with { LocalFrameA = new Transform2D(Vector2.Zero, suspension.LocalFrameA.Q), EnableLimit = true, Lower = -0.1f, Upper = 0.1f }, out int jLimited);
+            int driven = Wheel(2, suspension with { LocalFrameA = new Transform2D(new Vector2(2, 0), suspension.LocalFrameA.Q), EnableMotor = true, MotorSpeed = -5, MaxMotorForce = 50 }, out int jDriven);
+            Steps(w, 300);
+            float sag = 10 / (2 * MathF.PI * 1) / (2 * MathF.PI * 1);
+            Assert.True(MathF.Abs(w.JointTranslation(jFree) + sag) < 0.005f, $"sagged {w.JointTranslation(jFree)}, expected {-sag}");
+            Assert.True(MathF.Abs(w.GetPosition(free).Y - (5 - sag)) < 0.005f && MathF.Abs(w.GetPosition(free).X + 2) < 0.002f, $"and stayed on its axis at {w.GetPosition(free)}");
+            Assert.True(MathF.Abs(w.JointTranslation(jLimited) + 0.1f) < 0.01f, $"the limited wheel stops at its lower limit: {w.JointTranslation(jLimited)}");
+            Assert.True(MathF.Abs(w.GetAngularVelocity(driven) + 5) < 0.01f && MathF.Abs(w.JointSpeed(jDriven) + 5) < 0.01f, $"the motor spins the wheel at {w.GetAngularVelocity(driven)}");
+            Assert.True(MathF.Abs(w.JointTranslation(jDriven) + sag) < 0.005f, "spinning doesn't change the sag");
+            // The joint carries the wheel's weight: along the axis on the spring, or at the limit.
+            float weight = 10 * MathF.PI * 0.4f * 0.4f;
+            var (springForce, _) = w.JointConstraintForce(jFree);
+            Assert.True(Vector2.Distance(springForce, new Vector2(0, weight)) < 0.02f * weight, $"spring force {springForce}, weight {weight}");
+            var (limitForce, _) = w.JointConstraintForce(jLimited);
+            Assert.True(Vector2.Distance(limitForce, new Vector2(0, weight)) < 0.02f * weight, $"limit force {limitForce}");
+            Assert.True(MathF.Abs(w.JointMotorForce(jDriven)) < 0.01f, $"a free-spinning wheel needs no motor torque ({w.JointMotorForce(jDriven)})");
+        });
+
+        Test("physics2d world: motor joints drive velocity within their force; movers per axis", () =>
+        {
+            var w = World(sleep: false);
+            // Unit-mass boxes (1 × 1, density 1) attached to the world.
+            int Box(float x) => Dynamic(w, new Vector2(x, 0), Shape.Box(0.5f, 0.5f));
+            var motor = JointDef2D.Default(JointType2D.Motor);
+            int strong = Box(0), weak = Box(10), held = Box(20);
+            w.CreateJoint(default, -1, strong, motor with { LinearVelocity = new Vector2(2, 0), AngularVelocity = 1, MaxVelocityForce = 1000, MaxVelocityTorque = 1000 });
+            int jWeak = w.CreateJoint(default, -1, weak, motor with { MaxVelocityForce = 5, MaxVelocityTorque = 1000 }); // half the weight
+            int jHeld = w.CreateJoint(default, -1, held, motor with { MaxVelocityForce = 1000, MaxVelocityTorque = 1000 });
+            var mover = JointDef2D.Default(JointType2D.Mover) with { LinearVelocity = new Vector2(3, 3) };
+            int sideways = Box(30), both = Box(40);
+            int jSideways = w.CreateJoint(default, -1, sideways, mover with { MaxAxisForce = new Vector2(1000, 0) });
+            int jBoth = w.CreateJoint(default, -1, both, mover with { MaxAxisForce = new Vector2(1000, 1000) });
+            Steps(w, 60);
+            Assert.True(Vector2.Distance(w.GetVelocity(strong), new Vector2(2, 0)) < 0.01f && MathF.Abs(w.GetAngularVelocity(strong) - 1) < 0.01f,
+                $"the motor drives {w.GetVelocity(strong)}, {w.GetAngularVelocity(strong)}");
+            Assert.True(MathF.Abs(w.GetPosition(strong).X - 2) < 0.05f && MathF.Abs(w.GetPosition(strong).Y) < 0.01f, $"and moved to {w.GetPosition(strong)}");
+            // Half its weight held up: it falls at half g.
+            Assert.True(MathF.Abs(w.GetVelocity(weak).Y + 5) < 0.1f && MathF.Abs(w.GetVelocity(weak).X) < 1e-3f, $"the weak motor falls at {w.GetVelocity(weak)}");
+            Assert.True(Vector2.Distance(w.JointConstraintForce(jWeak).Force, new Vector2(0, 5)) < 0.01f, $"at its force limit {w.JointConstraintForce(jWeak).Force}");
+            Assert.True(Vector2.Distance(w.JointConstraintForce(jHeld).Force, new Vector2(0, 10)) < 0.05f && w.GetPosition(held).Length() < 20.01f,
+                $"a still motor holds the weight: {w.JointConstraintForce(jHeld).Force}");
+            Assert.True(MathF.Abs(w.GetVelocity(sideways).X - 3) < 0.01f && MathF.Abs(w.GetVelocity(sideways).Y + 10) < 0.1f, $"a mover with no vertical force falls freely: {w.GetVelocity(sideways)}");
+            Assert.True(MathF.Abs(w.JointConstraintForce(jSideways).Force.Y) < 1e-3f, "and pushes nothing vertically");
+            Assert.True(Vector2.Distance(w.GetVelocity(both), new Vector2(3, 3)) < 0.01f, $"a mover on both axes drives {w.GetVelocity(both)}");
+            Assert.True(Vector2.Distance(w.JointConstraintForce(jBoth).Force, new Vector2(0, 10)) < 0.05f, $"holding up its weight {w.JointConstraintForce(jBoth).Force}");
+        });
+
+        Test("physics2d world: pogo joints: tension pulls a body down to the rest length, none lets a jump go, compression gives way past its force", () =>
+        {
+            var w = World(sleep: false);
+            var pogo = JointDef2D.Default(JointType2D.Pogo) with { Normal = Vector2.UnitY, Length = 1, Hertz = 5, DampingRatio = 1, MaxCompressionForce = 1000 };
+            // Unit-mass boxes on pogos standing on the world's y = 0.
+            int Rider(float x, float y, float vy, JointDef2D def, out int joint)
+            {
+                int b = Dynamic(w, default, Shape.Box(0.5f, 0.5f), def: BodyDef2D.Dynamic(new Vector2(x, y)) with { FixedRotation = true, LinearVelocity = new Vector2(0, vy) });
+                joint = w.CreateJoint(default, -1, b, def with { LocalFrameA = new Transform2D(new Vector2(x, 0), Rot.Identity) });
+                return b;
+            }
+            int jumper = Rider(0, 1, 5, pogo, out int jJumper);
+            // Box2D's character mover gives its pogo tension to pull the body onto the ground, and none while jumping.
+            int rider = Rider(5, 3, 0, pogo with { MaxTensionForce = 1000 }, out int jRider); // stretched 2 m
+            int heavy = Rider(10, 1, 0, pogo with { MaxCompressionForce = 5 }, out int jHeavy); // half its weight
+            Steps(w, 18);
+            // Rising off its rest length, the pogo doesn't hold it back: gravity alone slows it.
+            Assert.True(MathF.Abs(w.GetVelocity(jumper).Y - 2) < 0.02f, $"the jumper rises at {w.GetVelocity(jumper).Y} after 0.3 s");
+            Assert.True(w.JointConstraintForce(jJumper).Force.Length() < 1e-3f, "with no force from its pogo");
+            Steps(w, 180);
+            Assert.True(MathF.Abs(w.JointTranslation(jRider) - 1) < 0.01f && MathF.Abs(w.GetVelocity(rider).Y) < 0.01f, $"the rider settled at the rest length: {w.JointTranslation(jRider)}");
+            Assert.True(Vector2.Distance(w.JointConstraintForce(jRider).Force, new Vector2(0, 10)) < 0.05f, $"carrying its weight {w.JointConstraintForce(jRider).Force}");
+            Assert.True(w.GetPosition(heavy).Y < -5, $"a pogo weaker than the weight gives way: {w.GetPosition(heavy)}");
+            Assert.True(MathF.Abs(w.JointConstraintForce(jHeavy).Force.Y - 5) < 0.01f, $"pushing at its limit {w.JointConstraintForce(jHeavy).Force}");
+        });
+
+        Test("physics2d world: constraint forces of hanging bodies; joint events when a threshold is reached", () =>
+        {
+            var w = World(sleep: false);
+            int wall = w.CreateBody(default, BodyDef2D.Static(new Vector2(0, 10)));
+            w.CreateShape(wall, default, Shape.Box(0.2f, 0.2f), ShapeDef2D.Default);
+            // Unit-mass bodies: a bob hanging on a hinge, a beam welded at one end, a beam held level by a hinge's motor, a rope.
+            int bob = Dynamic(w, new Vector2(0, 8), Shape.Box(0.5f, 0.5f));
+            int jHinge = w.CreateJoint(default, wall, bob, JointDef2D.Revolute(Vector2.Zero, new Vector2(0, 2)));
+            int beam = Dynamic(w, new Vector2(11, 10), Shape.Box(1, 0.25f));
+            int wall2 = w.CreateBody(default, BodyDef2D.Static(new Vector2(10, 10)));
+            int jWeld = w.CreateJoint(default, wall2, beam, JointDef2D.Weld(Vector2.Zero, new Vector2(-1, 0)));
+            int lever = Dynamic(w, new Vector2(21, 10), Shape.Box(1, 0.25f));
+            int wall3 = w.CreateBody(default, BodyDef2D.Static(new Vector2(20, 10)));
+            int jLever = w.CreateJoint(default, wall3, lever, JointDef2D.Revolute(Vector2.Zero, new Vector2(-1, 0)) with { EnableMotor = true, MotorSpeed = 0, MaxMotorForce = 1000 });
+            int weight = Dynamic(w, new Vector2(30, 7), Shape.Box(0.5f, 0.5f));
+            int wall4 = w.CreateBody(default, BodyDef2D.Static(new Vector2(30, 10)));
+            int jRope = w.CreateJoint(default, wall4, weight, JointDef2D.Distance(Vector2.Zero, Vector2.Zero, 3));
+            Steps(w, 120);
+            bool Near((Vector2 Force, float Torque) got, Vector2 force, float torque) => Vector2.Distance(got.Force, force) < 0.05f && MathF.Abs(got.Torque - torque) < 0.05f;
+            Assert.True(Near(w.JointConstraintForce(jHinge), new Vector2(0, 10), 0), $"hinge {w.JointConstraintForce(jHinge)}");
+            // The weld holds the weight and the moment of a beam whose center is 1 m out.
+            Assert.True(Near(w.JointConstraintForce(jWeld), new Vector2(0, 10), 10), $"weld {w.JointConstraintForce(jWeld)}");
+            Assert.True(Near(w.JointConstraintForce(jLever), new Vector2(0, 10), 10) && MathF.Abs(w.JointMotorForce(jLever) - 10) < 0.05f, $"motor {w.JointConstraintForce(jLever)}, {w.JointMotorForce(jLever)}");
+            Assert.True(MathF.Abs(w.GetRotation(lever).Angle) < 0.01f, $"the motor keeps the lever level ({w.GetRotation(lever).Angle})");
+            Assert.True(Near(w.JointConstraintForce(jRope), new Vector2(0, 10), 0), $"rope {w.JointConstraintForce(jRope)}");
+
+            // A pendulum dropped from level pulls 3 × its weight at the bottom: a 2 × threshold raises events there, 4 × never does.
+            var events = World(sleep: false);
+            int pivot = events.CreateBody(default, BodyDef2D.Static(new Vector2(0, 10)));
+            var owner = new Entity(7, 1);
+            int swinging = Dynamic(events, new Vector2(2, 10), Shape.Circle(0.25f, Vector2.Zero));
+            float m = MathF.PI * 0.25f * 0.25f;
+            int jLow = events.CreateJoint(owner, pivot, swinging, JointDef2D.Revolute(Vector2.Zero, new Vector2(-2, 0)) with { ForceThreshold = 2 * 10 * m });
+            int swinging2 = Dynamic(events, new Vector2(12, 10), Shape.Circle(0.25f, Vector2.Zero));
+            int pivot2 = events.CreateBody(default, BodyDef2D.Static(new Vector2(10, 10)));
+            events.CreateJoint(new Entity(8, 1), pivot2, swinging2, JointDef2D.Revolute(Vector2.Zero, new Vector2(-2, 0)) with { ForceThreshold = 4 * 10 * m });
+            int first = -1, count = 0;
+            for (int i = 0; i < 90; i++)
+            {
+                events.Step(1 / 60f);
+                var raised = events.JointEvents;
+                foreach (var e in raised)
+                {
+                    Assert.True(e.Joint == jLow && e.Owner.Equals(owner), $"only the low-threshold joint raises events (got joint {e.Joint})");
+                    if (first < 0) first = i;
+                    count++;
+                }
+                Assert.True(raised.Length <= 1, "one event per joint per step");
+            }
+            // Tension is 3mg·sin θ below level: past 2 × weight from θ ≈ 42°; the bottom comes after a quarter of the 90° swing's 3.3 s period.
+            Assert.True(first > 20 && first < 50 && count > 10, $"events from step {first}, {count} of them");
+            events.DestroyJoint(jLow);
+            events.Step(1 / 60f);
+            Assert.Equal(0, events.JointEvents.Length);
+        });
     }
 }
