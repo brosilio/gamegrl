@@ -143,6 +143,18 @@ internal static class AudioTests
             Assert.True(output.All(x => x == 0) && Render(engine, 2048).All(x => x == 0), "no note or fade leaks through");
         });
 
+        Test("audio: a virtual cue keeps its scheduled stop when it becomes audible", () =>
+        {
+            using var engine = Engine();
+            var cue = engine.Play(Dc(), PlayOptions.Default with { Gain = 0, Loop = true });
+            engine.Stop(cue, fadeSeconds: 0.001f, at: 1024);
+            engine.SetGain(cue, 1);
+            engine.Update();
+            var output = Render(engine, 2048);
+            Assert.True(output[2 * 900] > 0.5f, "the promoted voice sounds before its stop");
+            Assert.True(output[2 * 1100] == 0 && !engine.IsPlaying(cue), "the stop survives promotion");
+        });
+
         Test("audio: resampling keeps pitch — a 44.1 kHz clip plays at its own pitch at 48 kHz; pitch 1.5 raises a fifth", () =>
         {
             var e = Engine(ChannelLayout.Mono);

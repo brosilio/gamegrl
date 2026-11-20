@@ -113,7 +113,7 @@ public sealed class AudioEngine : IDisposable
     private struct Voice
     {
         public bool Active, Real, Demoting, Stopping, Loop, Positional;
-        public int Generation, Mixer, Bus, Priority, FadeIn;
+        public int Generation, Mixer, Bus, Priority, FadeIn, StopFade;
         public AudioClip Clip;
         public float Gain, Pan, Pitch;
         public SpatialParams Spatial;
@@ -249,14 +249,19 @@ public sealed class AudioEngine : IDisposable
     {
         if (!TryGet(voice, out int i)) return;
         ref var v = ref _voices[i];
-        if (v.Real && !v.Demoting)
-        {
-            if (v.Stopping) return;
-            v.Stopping = true;
-            Post(new Command { Kind = CommandKind.Stop, Target = v.Mixer, Time = at, Ramp = Math.Max(1, Frames(fadeSeconds)) });
-        }
-        else if (at > Time) v.StopAt = at;
-        else End(i);
+        long now = Time;
+        long stop = Math.Max(at, now);
+        if (stop >= v.StopAt) return;
+        v.StopAt = stop;
+        v.StopFade = Math.Max(1, Frames(fadeSeconds));
+        if (Rendering(i)) ScheduleStop(ref v);
+        else if (stop == now) End(i);
+    }
+
+    private void ScheduleStop(ref Voice v)
+    {
+        v.Stopping = true;
+        Post(new Command { Kind = CommandKind.Stop, Target = v.Mixer, Time = v.StopAt, Ramp = v.StopFade });
     }
 
     public void SetGain(VoiceHandle voice, float gain, float rampSeconds = 0.01f)
@@ -427,6 +432,7 @@ public sealed class AudioEngine : IDisposable
             Ramp = fromStart ? v.FadeIn : Frames(SwapFadeSeconds), Offset = (long)Math.Round(v.Position * 4294967296.0),
             Positional = v.Positional, Spatial = v.Spatial, Rotation = v.Rotation, Matrix = v.Matrix,
         });
+        if (v.StopAt != long.MaxValue) ScheduleStop(ref v);
         if (v.TapCount > 0) Post(new Command { Kind = CommandKind.VoiceReflections, Target = v.Mixer, Taps = v.Taps, TapCount = v.TapCount, Tone = v.Tone });
     }
 
