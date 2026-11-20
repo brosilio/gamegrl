@@ -542,6 +542,59 @@ internal static class AcousticsTests
             Assert.True(Math.Abs(ratio - expected) < 0.25 * expected, $"at {ratio:0.000} of the direct sound, expected {expected:0.000} (distance and the facade)");
         });
 
+        Test("acoustics: baked probes — a grid through a room bakes, interpolates like a live estimate, skips probes in solids, round-trips", () =>
+        {
+            var builder = new AcousticSceneBuilder();
+            builder.AddRoom(Box(Vector3.Zero, new Vector3(10, 6, 4)), new AcousticMaterial(Bands3.All(0.2f), 1, Bands3.All(0)));
+            var room = builder.Build();
+            var volume = Box(Vector3.Zero, new Vector3(8, 4, 2.4f));
+            var grid = AcousticProbeGrid.Bake(room, volume, spacing: 2, rays: 1024, bounces: 128, temperatureC: 20, humidityPercent: 50);
+            Assert.True(grid.CountX == 5 && grid.CountY == 3 && grid.CountZ == 3 && grid.ValidCount == grid.Count, $"{grid.CountX}×{grid.CountY}×{grid.CountZ}, {grid.ValidCount} valid");
+            var between = new Vector3(1, 1, 0.3f);
+            Assert.True(grid.Sample(between, out var baked), "a point inside samples");
+            var live = ReverbEstimator.Estimate(room, between, 4096, 128);
+            Assert.True(MathF.Abs(baked.DecaySeconds.Mid - live.DecaySeconds.Mid) < 0.1f * live.DecaySeconds.Mid && MathF.Abs(baked.Level - live.Level) < 0.15f * live.Level,
+                $"interpolated {baked.DecaySeconds.Mid:0.000} s level {baked.Level:0.00}; live {live.DecaySeconds.Mid:0.000} s level {live.Level:0.00}");
+            Assert.True(!grid.Sample(new Vector3(4.5f, 0, 0), out _), "outside the volume, nothing");
+            var bytes = grid.ToBytes();
+            var back = AcousticProbeGrid.FromBytes(bytes);
+            Assert.True(back.ToBytes().AsSpan().SequenceEqual(bytes), "the stored form round-trips");
+            var imported = new Gamegrl.AssetPipeline.AcousticProbesImporter().Import(new Gamegrl.AssetPipeline.ImportContext("Assets/room.acprobes", bytes, new Dictionary<string, string>(), _ => [], _ => null));
+            Assert.True(imported.AsSpan().SequenceEqual(bytes), "and imports as it is");
+
+            // A pillar through the middle: the probes inside it are skipped, and points beside it still sample from the rest.
+            builder.AddBox(Box(Vector3.Zero, new Vector3(1.2f, 6, 1.2f)), AcousticMaterial.Concrete);
+            var pillared = AcousticProbeGrid.Bake(builder.Build(), volume, spacing: 2, rays: 256, bounces: 64);
+            Assert.True(pillared.ValidCount < pillared.Count, $"{pillared.Count - pillared.ValidCount} probes inside the pillar");
+            Assert.True(pillared.Sample(new Vector3(0.9f, 0.2f, 0.1f), out var beside) && beside.DecaySeconds.Mid > 0, "beside the pillar");
+        });
+
+        Test("acoustics: inside a baked volume the listener's reverb comes from the probes, with no surfaces traced", () =>
+        {
+            var builder = new AcousticSceneBuilder();
+            builder.AddRoom(Box(new Vector3(0, 1, -1), new Vector3(12, 5, 9)), AcousticMaterial.Concrete);
+            var volumeMatrix = Box(new Vector3(0, 1, -1), new Vector3(10, 4, 8));
+            var grid = AcousticProbeGrid.Bake(builder.Build(), volumeMatrix, spacing: 3, rays: 512, bounces: 128);
+            var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));
+            using var app = b.Build();
+            var w = app.World;
+            var context = w.Resource<AudioContext>();
+            var probes = new AssetRef<AcousticProbesAsset>(Guid.NewGuid());
+            context.RegisterProbes(probes, grid);
+            // No acoustic surfaces in this world at all: only the baked volume.
+            w.Spawn(new LocalTransform { Position = new Vector3(0, 1, -1), Rotation = Quaternion.Identity, Scale = new Vector3(10, 4, 8) }, new LocalToWorld(),
+                AcousticProbeVolume.Default with { Probes = probes });
+            var listener = w.Spawn(LocalTransform.Identity, new LocalToWorld(), AudioListener.Default);
+            app.Tick(1 / 60.0);
+            Assert.True(context.Scene.TriangleCount == 0 && context.Reverb.DecaySeconds.Mid > 1.5f && context.Reverb.Enclosure > 0.99f,
+                $"baked reverb {context.Reverb.DecaySeconds} with {context.Scene.TriangleCount} triangles traced");
+            grid.Sample(Vector3.Zero, out var expected);
+            Assert.True(MathF.Abs(context.Reverb.Level - expected.Level) < 1e-5f, "the probes' value at the listener");
+            w.Get<LocalTransform>(listener).Position = new Vector3(30, 0, 0);
+            app.Tick(1 / 60.0);
+            Assert.True(context.Reverb.IsSilent, "outside the volume, with nothing to trace, there's no reverb");
+        });
+
         Test("acoustics: an entity behind a wall entity is heard through the wall's transmission", () =>
         {
             var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));

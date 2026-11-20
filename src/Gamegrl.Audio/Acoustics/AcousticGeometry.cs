@@ -10,13 +10,15 @@ public enum AcousticShape : byte
     Box,
     /// <summary>The triangles of <see cref="AcousticSurface.Mesh"/> through the entity's transform.</summary>
     Mesh,
+    /// <summary>A room: the unit cube through the transform, hollow (its inside is air, each wall a thin surface).</summary>
+    Room,
 }
 
 /// <summary>
-/// Geometry that sound reflects off and passes through: a box or a mesh, made of <see cref="Material"/>. Sound passing
-/// through is scaled by the material's transmission: a box is solid and counts once per path (a wall, a pillar, a crate,
-/// or a box room around the listener); a mesh is thin surfaces and counts at every crossing (model rooms as meshes or
-/// as separate wall boxes).
+/// Geometry that sound reflects off and passes through: a box, a room or a mesh, made of <see cref="Material"/>. Sound
+/// passing through is scaled by the material's transmission: a box is solid and counts once per path (a wall, a pillar,
+/// a crate); a room is a hollow box whose inside is air and whose walls count once each; a mesh is thin surfaces counting
+/// at every crossing.
 /// </summary>
 public struct AcousticSurface : IComponent
 {
@@ -25,6 +27,7 @@ public struct AcousticSurface : IComponent
     public AcousticMaterial Material;
 
     public static AcousticSurface Box(AcousticMaterial material) => new() { Shape = AcousticShape.Box, Material = material };
+    public static AcousticSurface Room(AcousticMaterial material) => new() { Shape = AcousticShape.Room, Material = material };
     public static AcousticSurface Of(AssetRef<MeshAsset> mesh, AcousticMaterial material) => new() { Shape = AcousticShape.Mesh, Mesh = mesh, Material = material };
 }
 
@@ -89,6 +92,7 @@ public static class AcousticGeometry
             for (int r = 0; r < surfaces.Length; r++)
             {
                 if (surfaces[r].Shape == AcousticShape.Box) builder.AddBox(transforms[r].Value, surfaces[r].Material);
+                else if (surfaces[r].Shape == AcousticShape.Room) builder.AddRoom(transforms[r].Value, surfaces[r].Material);
                 else if (MeshTriangles(surfaces[r].Mesh, assets, meshes) is { } local) builder.AddMesh(local, transforms[r].Value, surfaces[r].Material);
             }
         }

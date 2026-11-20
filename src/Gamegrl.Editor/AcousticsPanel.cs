@@ -32,6 +32,7 @@ internal sealed partial class EditorHost
     private VoiceHandle _auditionVoice;
     private readonly Dictionary<Guid, Vector3[]?> _acousticMeshes = new();
     private static readonly string[] AuditionSounds = ["clap", "gunshot", "source clip"];
+    private bool _baking;
 
     /// <summary>The last measurement (for tests and the smoke run).</summary>
     internal AcousticMeasurement? Measurement => _measurement;
@@ -44,6 +45,7 @@ internal sealed partial class EditorHost
         Registry.AddCommand("acoustics.clap", "Acoustics: Listen to a clap in the space", _ => Audition(0));
         Registry.AddCommand("acoustics.gunshot", "Acoustics: Listen to a gunshot in the space", _ => Audition(1));
         Registry.AddCommand("acoustics.export", "Acoustics: Export the impulse response (WAV)", _ => ExportImpulseResponse());
+        Registry.AddCommand("acoustics.bake", "Acoustics: Bake probe volumes", _ => BakeProbes());
     }
 
     private void AcousticsPanel(Rect area)
@@ -68,6 +70,14 @@ internal sealed partial class EditorHost
         _ui.Toggle(Place(12), "acoustics-phones", "headphones", ref _auditionPhones, theme.AxisY);
         _ui.Toggle(Place(7), "acoustics-paths", "paths", ref _showPaths, theme.AxisZ);
         if (_ui.Link(Place(9), "acoustics-export", "export IR", theme.Dim, _measurement is not null)) ExportImpulseResponse();
+        var (volumes, baked) = ProbeVolumes();
+        if (volumes > 0)
+        {
+            Span<char> probes = stackalloc char[48];
+            var label = SpanFormat.Write(probes, $"probes {baked}/{volumes} baked");
+            _ui.TextIn(Place(label.Length), label, baked == volumes ? theme.Dim : theme.Warning);
+            if (_ui.Link(Place(11), "acoustics-bake", _baking ? "baking" : "bake probes", theme.Accent, !_baking && !Document.Playing)) BakeProbes();
+        }
         if (_acousticsStatus.Length > 0) { var status = Place(Math.Min(area.W, _acousticsStatus.Length)); _ui.TextIn(status, _acousticsStatus, theme.Dim); }
         y++;
         if (y + 1 >= area.Bottom) return;
@@ -311,10 +321,89 @@ internal sealed partial class EditorHost
         }, written => { _acousticsStatus = "wrote " + Path.GetRelativePath(_root, written); Log.Info("acoustics: wrote " + written); });
     }
 
+    /// <summary>How many probe volumes the scene has, and how many reference baked probes.</summary>
+    private (int Volumes, int Baked) ProbeVolumes()
+    {
+        int volumes = 0, baked = 0;
+        foreach (var a in _app.World.Query(new QueryDesc().With<AcousticProbeVolume>().With<LocalToWorld>()).Archetypes)
+            foreach (ref readonly var v in a.GetSpan<AcousticProbeVolume>()) { volumes++; if (!v.Probes.IsNone) baked++; }
+        return (volumes, baked);
+    }
+
+    /// <summary>
+    /// Bakes every probe volume in the scene as a background job: each becomes <c>Assets/&lt;name&gt;.acprobes</c> (with a
+    /// .meta, keeping its GUID when re-baked), the volume points at it (an undoable edit), and assets reimport.
+    /// </summary>
+    private void BakeProbes()
+    {
+        if (_baking) return;
+        if (Document.Playing) { _acousticsStatus = "stop play mode to bake"; return; }
+        var world = _app.World;
+        var volumes = new List<(Entity Entity, Matrix4x4 Transform, float Spacing, string Name, Guid Existing)>();
+        Span<char> label = stackalloc char[64];
+        foreach (var a in world.Query(new QueryDesc().With<AcousticProbeVolume>().With<LocalToWorld>()).Archetypes)
+        {
+            var specs = a.GetSpan<AcousticProbeVolume>();
+            var transforms = a.GetSpan<LocalToWorld>();
+            for (int i = 0; i < specs.Length; i++)
+            {
+                var e = a.Entities[i];
+                string name = world.Has<Name>(e) ? new string(label[..EntityLabel(world, e, label)]) : "probes-" + Document.SceneIdOf(e).ToString("x");
+                foreach (char bad in Path.GetInvalidFileNameChars()) name = name.Replace(bad, '-');
+                volumes.Add((e, transforms[i].Value, specs[i].Spacing, name, specs[i].Probes.Guid));
+            }
+        }
+        if (volumes.Count == 0) { _acousticsStatus = "no AcousticProbeVolume in the scene"; return; }
+        var builder = new AcousticSceneBuilder();
+        AcousticGeometry.Gather(world, builder, _assets, _acousticMeshes);
+        var env = Environment();
+        _baking = true;
+        _acousticsStatus = $"baking {volumes.Count} volume{(volumes.Count == 1 ? "" : "s")}…";
+        string assets = Path.Combine(_root, "Assets");
+        Jobs.Run("Bake acoustic probes", stop =>
+        {
+            var scene = builder.Build();
+            var results = new List<(Entity Entity, Guid Guid, AcousticProbeGrid Grid)>();
+            foreach (var v in volumes)
+            {
+                var grid = AcousticProbeGrid.Bake(scene, v.Transform, v.Spacing, 2048, 96, env.TemperatureC, env.HumidityPercent, stop);
+                string path = Path.Combine(assets, v.Name + ".acprobes");
+                File.WriteAllBytes(path, grid.ToBytes());
+                Guid guid = v.Existing;
+                string meta = path + ".meta";
+                if (File.Exists(meta))
+                    foreach (string line in File.ReadAllLines(meta))
+                        if (line.StartsWith("guid = ", StringComparison.Ordinal) && Guid.TryParse(line[7..], out var g)) guid = g;
+                if (guid == Guid.Empty) guid = Guid.NewGuid();
+                if (!File.Exists(meta)) File.WriteAllText(meta, $"gamegrl meta 1\nguid = {guid:N}\nimporter = acousticprobes\n");
+                results.Add((v.Entity, guid, grid));
+            }
+            return results;
+        }, results =>
+        {
+            foreach (var (e, guid, grid) in results)
+            {
+                if (!world.IsAlive(e) || !world.Has<AcousticProbeVolume>(e)) continue;
+                var probes = new Gamegrl.AssetRef<AcousticProbesAsset>(guid);
+                if (world.HasResource<AudioContext>()) world.Resource<AudioContext>().RegisterProbes(probes, grid);
+                if (world.Get<AcousticProbeVolume>(e).Probes.Guid != guid)
+                {
+                    Document.BeginEntityEdit(e);
+                    world.Get<AcousticProbeVolume>(e).Probes = probes;
+                    Document.CommitEdit();
+                }
+            }
+            int count = 0, valid = 0;
+            foreach (var r in results) { count += r.Grid.Count; valid += r.Grid.ValidCount; }
+            _acousticsStatus = $"baked {valid} probes ({count - valid} inside solids)";
+            Import();
+        }, () => _baking = false);
+    }
+
     /// <summary>
     /// The acoustic geometry and the measured paths in the Scene view (while the Acoustics panel is showing): surfaces
-    /// as wireframes coloured by hardness (cool and hard, warm and soft); the direct line (red when walls are in the
-    /// way); reflections by order.
+    /// as wireframes coloured by hardness (cool and hard, warm and soft); probe volumes in amber (orange until baked);
+    /// the direct line (red when walls are in the way); reflections by order.
     /// </summary>
     private void DrawAcousticPaths()
     {
@@ -329,6 +418,13 @@ internal sealed partial class EditorHost
                 float soft = Math.Clamp(surfaces[i].Material.Absorption.Mid * 1.5f, 0, 1);
                 _render.Debug.Box(transforms[i].Value, new Vector3(-0.5f), new Vector3(0.5f), new Vector4(0.45f + 0.5f * soft, 0.6f, 0.95f - 0.6f * soft, 1));
             }
+        }
+        foreach (var a in _app.World.Query(new QueryDesc().With<AcousticProbeVolume>().With<LocalToWorld>()).Archetypes)
+        {
+            var specs = a.GetSpan<AcousticProbeVolume>();
+            var transforms = a.GetSpan<LocalToWorld>();
+            for (int i = 0; i < specs.Length; i++)
+                _render.Debug.Box(transforms[i].Value, new Vector3(-0.5f), new Vector3(0.5f), specs[i].Probes.IsNone ? new Vector4(1, 0.55f, 0.2f, 1) : new Vector4(0.95f, 0.8f, 0.3f, 1));
         }
         var m = _measurement;
         if (m is null) return;

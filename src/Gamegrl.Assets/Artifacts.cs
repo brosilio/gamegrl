@@ -17,6 +17,8 @@ public enum AssetKind : uint
     Font = 5,
     /// <summary>Decoded audio as a float WAV (any layout and rate); <c>Gamegrl.Audio</c> loads it into an AudioClip.</summary>
     Audio = 6,
+    /// <summary>Baked acoustic probes (a grid of reverb estimates); <c>Gamegrl.Audio</c> reads it as an AcousticProbeGrid.</summary>
+    AcousticProbes = 7,
 }
 
 // Marker types for AssetRef<T>.
@@ -25,6 +27,7 @@ public sealed class MeshAsset;
 public sealed class FontAsset;
 public sealed class SceneAsset;
 public sealed class AudioAsset;
+public sealed class AcousticProbesAsset;
 
 /// <summary>A decoded image: RGBA8, rows top to bottom.</summary>
 public sealed class TextureData(int width, int height, byte[] rgba, bool srgb = true)

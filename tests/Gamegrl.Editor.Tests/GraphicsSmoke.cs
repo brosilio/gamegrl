@@ -155,7 +155,7 @@ internal static class GraphicsSmoke
         foreach (var a in app.World.Query(new QueryDesc().With<Gamegrl.Audio.AudioListener>().With<LocalToWorld>()).Archetypes)
             if (a.Count > 0) listenerAt = a.GetSpan<LocalToWorld>()[0].Value.Translation;
         app.World.Spawn(new LocalTransform { Position = listenerAt, Rotation = Quaternion.Identity, Scale = new Vector3(12, 5, 9) }, new LocalToWorld(),
-            Gamegrl.Audio.Acoustics.AcousticSurface.Box(Gamegrl.Audio.Acoustics.AcousticMaterial.Concrete));
+            Gamegrl.Audio.Acoustics.AcousticSurface.Room(Gamegrl.Audio.Acoustics.AcousticMaterial.Concrete));
         var gun = app.World.Spawn(LocalTransform.At(listenerAt + new Vector3(2, -1, -3)), new LocalToWorld(), new Name("Gun"));
         Frame();
         editor.Document.Selected = gun;
@@ -170,6 +170,20 @@ internal static class GraphicsSmoke
         Command("acoustics.export"); Wait(() => !editor.Jobs.Busy);
         string impulse = Path.Combine(root, "Library", "Acoustics", "impulse-response.wav");
         Check(File.Exists(impulse) && Gamegrl.Audio.Wav.Read(impulse).Frames > 48000, "Impulse response export missing");
+        // Probes: a volume inside the room bakes to an asset the volume then references and the asset source serves.
+        var hall = app.World.Spawn(new LocalTransform { Position = listenerAt, Rotation = Quaternion.Identity, Scale = new Vector3(10, 4, 8) }, new LocalToWorld(),
+            Gamegrl.Audio.Acoustics.AcousticProbeVolume.Default with { Spacing = 4 }, new Name("Hall"));
+        Frame();
+        Command("acoustics.bake"); Wait(() => !editor.Jobs.Busy);
+        var baked = app.World.Get<Gamegrl.Audio.Acoustics.AcousticProbeVolume>(hall).Probes;
+        Check(File.Exists(Path.Combine(root, "Assets", "Hall.acprobes")) && !baked.IsNone, "Probe bake did not write or reference its asset");
+        Check(assets.TryRead(baked.Guid, out var probeKind, out var probeBytes) && probeKind == AssetKind.AcousticProbes
+            && Gamegrl.Audio.Acoustics.AcousticProbeGrid.FromBytes(probeBytes.Span).ValidCount > 0, "Baked probes did not import");
+        // The bake's reference is an undoable document edit. (These test entities were spawned outside the document, so
+        // undoing rebuilds the world without them.)
+        Check(editor.Document.Dirty, "The bake did not record an edit");
+        Command("edit.undo");
+        Check(!editor.Document.Dirty, "Undo did not take back the bake's edit");
         Command("file.new"); Check(app.World.EntityCount == 0 && editor.Files.CurrentPath is null && editor.Document.Dirty, "New failed");
         Command("file.save"); Check(editor.Files.Dialog == SceneFileDialog.SaveAs, "Missing Save As dialog");
         Button("destination");

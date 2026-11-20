@@ -143,8 +143,10 @@ public static class Diffraction
 
     /// <summary>
     /// Nothing between two points, ignoring the surfaces they sit on (each end is pulled in by a millimetre), and not a
-    /// crevice: a leg running between solids flush against each other (a wall standing on a floor) grazes both without
-    /// hitting either, so it's rejected when its middle has solid on opposite sides.
+    /// crevice: a leg running between solids flush against each other (a wall box standing on a floor box) grazes both
+    /// without hitting either, so it's rejected when its middle has solid on opposite sides. (A leg across the top of a
+    /// barrier, or along a door jamb, has solid on one side only. Hollow rooms are <see cref="AcousticShape.Room"/>,
+    /// whose inside isn't solid.)
     /// </summary>
     private static bool Clear(AcousticScene scene, Vector3 a, Vector3 b)
     {
@@ -159,7 +161,6 @@ public static class Diffraction
         var v = Vector3.Cross(axis, u);
         const float probe = 3e-3f;
         if (scene.InsideSolid(mid + u * probe) && scene.InsideSolid(mid - u * probe)) return false;
-        if (scene.InsideSolid(mid + v * probe) && scene.InsideSolid(mid - v * probe)) return false;
-        return true;
+        return !(scene.InsideSolid(mid + v * probe) && scene.InsideSolid(mid - v * probe));
     }
 }

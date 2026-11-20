@@ -256,7 +256,7 @@ public sealed unsafe class SceneDocument(World world, Func<Guid, string?>? prefa
         Revision++;
     }
 
-    private ulong SceneIdOf(Entity e) => World.IsAlive(e) && World.Has<SceneId>(e) ? World.Get<SceneId>(e).Value : 0;
+    internal ulong SceneIdOf(Entity e) => World.IsAlive(e) && World.Has<SceneId>(e) ? World.Get<SceneId>(e).Value : 0;
 
     internal Entity FindSceneId(ulong id)
     {

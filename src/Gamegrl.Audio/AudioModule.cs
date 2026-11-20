@@ -122,7 +122,10 @@ public struct AudioEnvironment
 public sealed class AudioContext : IDisposable
 {
     private readonly Dictionary<Guid, AudioClip?> _clips = [];
+    private readonly Dictionary<Guid, AcousticProbeGrid?> _probes = [];
     private IAssetSource? _assets;
+    /// <summary>This frame's baked probe volumes (set by the audio update).</summary>
+    internal readonly List<AcousticProbeGrid> Grids = [];
 
     internal struct OneShot
     {
@@ -198,6 +201,7 @@ public sealed class AudioContext : IDisposable
         _assets = assets;
         if (assets is not null) assets.Changed += OnChanged;
         foreach (var guid in _clips.Keys.ToArray()) if (_clips[guid] is null) _clips.Remove(guid); // retry what was missing
+        foreach (var guid in _probes.Keys.ToArray()) if (_probes[guid] is null) _probes.Remove(guid);
     }
 
     /// <summary>The clip for an asset, loading it on first use; null (warned once) when it's missing or broken.</summary>
@@ -215,6 +219,38 @@ public sealed class AudioContext : IDisposable
     {
         Engine.StopAll();
         OneShots.Clear();
+    }
+
+    /// <summary>A baked probe grid, loading it on first use; null (warned once) when it's missing or broken.</summary>
+    public AcousticProbeGrid? Probes(AssetRef<AcousticProbesAsset> asset)
+    {
+        if (asset.IsNone) return null;
+        if (_probes.TryGetValue(asset.Guid, out var grid)) return grid;
+        grid = LoadProbes(asset.Guid);
+        _probes[asset.Guid] = grid;
+        return grid;
+    }
+
+    /// <summary>Supplies a probe grid for an asset reference directly (a bake not yet imported, tests).</summary>
+    public void RegisterProbes(AssetRef<AcousticProbesAsset> asset, AcousticProbeGrid grid) => _probes[asset.Guid] = grid;
+
+    /// <summary>The baked reverb at a point, when a probe volume covers it.</summary>
+    public bool SampleProbes(Vector3 point, out ReverbParams reverb)
+    {
+        foreach (var grid in Grids) if (grid.Sample(point, out reverb)) return true;
+        reverb = ReverbParams.None;
+        return false;
+    }
+
+    private AcousticProbeGrid? LoadProbes(Guid guid)
+    {
+        if (_assets is null || !_assets.TryRead(guid, out var kind, out var bytes) || kind != AssetKind.AcousticProbes)
+        {
+            Warn($"No acoustic probes asset {guid:N}; the volume is traced live.");
+            return null;
+        }
+        try { return AcousticProbeGrid.FromBytes(bytes.Span); }
+        catch (InvalidDataException e) { Warn($"Acoustic probes {guid:N} are broken: {e.Message}"); return null; }
     }
 
     /// <summary>Supplies a clip for an asset reference directly (generated sounds, tests).</summary>
@@ -339,6 +375,7 @@ public sealed class AudioContext : IDisposable
     private void OnChanged(Guid guid)
     {
         if (_clips.ContainsKey(guid)) _clips[guid] = Load(guid);
+        if (_probes.ContainsKey(guid)) _probes[guid] = LoadProbes(guid);
     }
 
     public void Dispose()
@@ -412,7 +449,7 @@ public sealed class AudioModule(AudioOutput output, string? device = null, bool 
 /// </summary>
 internal sealed class AudioUpdate : ISystem
 {
-    private Query _sources = null!, _listeners = null!;
+    private Query _sources = null!, _listeners = null!, _volumes = null!;
     private Entity[] _owner = [];
     private int[] _ownerVoice = [], _stamps = [];
     private float[] _sentVolume = [], _sentPitch = [], _sentPan = [];
@@ -446,6 +483,7 @@ internal sealed class AudioUpdate : ISystem
     {
         _sources = world.Query(new QueryDesc().With<AudioSource>());
         _listeners = world.Query(new QueryDesc().With<AudioListener>().With<LocalToWorld>());
+        _volumes = world.Query(new QueryDesc().With<AcousticProbeVolume>());
         int n = world.Resource<AudioContext>().Engine.MaxVoices;
         _owner = new Entity[n]; _ownerVoice = new int[n]; _stamps = new int[n];
         _sentVolume = new float[n]; _sentPitch = new float[n]; _sentPan = new float[n];
@@ -465,10 +503,22 @@ internal sealed class AudioUpdate : ISystem
         _diffraction = env.Diffraction;
         float dt = world.HasResource<Time>() ? MathF.Max(world.Resource<Time>().Delta, 1e-4f) : 1 / 60f;
         UpdateListener(audio, dt);
+        audio.Grids.Clear();
+        foreach (var a in _volumes.Archetypes)
+            foreach (ref readonly var volume in a.GetSpan<AcousticProbeVolume>())
+                if (audio.Probes(volume.Probes) is { } grid) audio.Grids.Add(grid);
         if (env.Reverb)
         {
-            audio.Simulator.Submit(audio.Scene, audio.Listener.Translation, env.TemperatureC, env.HumidityPercent);
-            if (audio.Simulator.TryTake(out var reverb)) { audio.Reverb = reverb; engine.SetReverb(reverb); }
+            if (audio.SampleProbes(audio.Listener.Translation, out var baked))
+            {
+                // Inside a baked volume: interpolate the probes instead of tracing.
+                if (Differs(baked, audio.Reverb)) { audio.Reverb = baked; engine.SetReverb(baked, 0.1f); }
+            }
+            else
+            {
+                audio.Simulator.Submit(audio.Scene, audio.Listener.Translation, env.TemperatureC, env.HumidityPercent);
+                if (audio.Simulator.TryTake(out var reverb)) { audio.Reverb = reverb; engine.SetReverb(reverb); }
+            }
         }
         else if (!audio.Reverb.IsSilent) { audio.Reverb = ReverbParams.None; engine.SetReverb(ReverbParams.None); }
         var orientation = Quaternion.CreateFromRotationMatrix(Orthonormal(audio.Listener));
@@ -640,7 +690,8 @@ internal sealed class AudioUpdate : ISystem
             _remoteOpening = way.First;
             // The room's reverberant sound leaves the way the source's own sound does.
             _remoteCoupling = _pendingParams[anchor].Mid;
-            audio.Simulator.SubmitRemote(audio.Scene, _remoteAnchor, env.TemperatureC, env.HumidityPercent);
+            if (audio.SampleProbes(_remoteAnchor, out var bakedRoom)) audio.RemoteReverb = bakedRoom;
+            else audio.Simulator.SubmitRemote(audio.Scene, _remoteAnchor, env.TemperatureC, env.HumidityPercent);
         }
         if (audio.Simulator.TryTakeRemote(out var remote)) audio.RemoteReverb = remote;
         var room = audio.RemoteReverb;
@@ -765,6 +816,14 @@ internal sealed class AudioUpdate : ISystem
             return;
         }
         audio.ListenerVelocity = Vector3.Zero;
+    }
+
+    /// <summary>Whether two reverb settings differ enough (half a percent) to send the mixer new ones.</summary>
+    private static bool Differs(in ReverbParams a, in ReverbParams b)
+    {
+        static bool Far(float x, float y) => MathF.Abs(x - y) > 0.005f * MathF.Max(MathF.Abs(x), MathF.Abs(y)) + 1e-6f;
+        return Far(a.DecaySeconds.Low, b.DecaySeconds.Low) || Far(a.DecaySeconds.Mid, b.DecaySeconds.Mid) || Far(a.DecaySeconds.High, b.DecaySeconds.High)
+            || Far(a.Level, b.Level) || Far(a.PreDelaySeconds, b.PreDelaySeconds);
     }
 
     /// <summary>A world matrix's +Z axis (row 3); an entity faces along its negation.</summary>

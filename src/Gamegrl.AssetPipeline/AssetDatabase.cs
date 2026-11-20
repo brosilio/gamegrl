@@ -95,6 +95,22 @@ public sealed class AudioImporter : IAssetImporter
     }
 }
 
+/// <summary>Baked acoustic probes (written by the editor's bake), validated and stored as they are.</summary>
+public sealed class AcousticProbesImporter : IAssetImporter
+{
+    public string Id => "acousticprobes";
+    public int Version => 1;
+    public AssetKind Kind => AssetKind.AcousticProbes;
+    public IReadOnlyList<string> Extensions { get; } = [".acprobes"];
+    public IReadOnlyDictionary<string, string> DefaultSettings { get; } = new Dictionary<string, string>();
+    public byte[] Import(ImportContext ctx)
+    {
+        try { Gamegrl.Audio.Acoustics.AcousticProbeGrid.FromBytes(ctx.Bytes); }
+        catch (InvalidDataException e) { throw new FormatException(ctx.Path + ": " + e.Message, e); }
+        return ctx.Bytes;
+    }
+}
+
 /// <summary>
 /// Text scenes (and prefabs) to the binary player format, with prefab instances flattened. Needs the game's
 /// components loaded in this process.
@@ -146,7 +162,7 @@ public sealed class AssetDatabase : IAssetSource, IDisposable
     }
 
     private readonly string _root;
-    private readonly List<IAssetImporter> _importers = [new TextureImporter(), new MeshImporter(), new FontImporter(), new AudioImporter(), new SceneImporter(), new PrefabImporter()];
+    private readonly List<IAssetImporter> _importers = [new TextureImporter(), new MeshImporter(), new FontImporter(), new AudioImporter(), new AcousticProbesImporter(), new SceneImporter(), new PrefabImporter()];
     private readonly Dictionary<Guid, AssetRecord> _byGuid = new();
     private readonly Dictionary<string, AssetRecord> _byPath = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _pendingChanges = new();

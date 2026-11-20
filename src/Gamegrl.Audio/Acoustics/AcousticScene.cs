@@ -474,6 +474,27 @@ public sealed class AcousticSceneBuilder
         }
     }
 
+    /// <summary>
+    /// A room: the same box with its faces pointing inward, the inside air and each wall a thin surface (one crossing
+    /// to the outside), its corners concave from within (so not diffraction edges).
+    /// </summary>
+    public void AddRoom(Matrix4x4 transform, in AcousticMaterial material)
+    {
+        int m = Material(material), instance = _solid.Count;
+        _solid.Add(false);
+        Span<Vector3> c = stackalloc Vector3[8];
+        for (int i = 0; i < 8; i++) c[i] = Vector3.Transform(new Vector3((i & 1) - 0.5f, ((i >> 1) & 1) - 0.5f, ((i >> 2) & 1) - 0.5f), transform);
+        ReadOnlySpan<int> faces = [0, 2, 3, 1, 4, 5, 7, 6, 0, 1, 5, 4, 2, 6, 7, 3, 0, 4, 6, 2, 1, 3, 7, 5];
+        for (int f = 0; f < 6; f++)
+        {
+            int a = faces[4 * f], b = faces[4 * f + 1], cc = faces[4 * f + 2], d = faces[4 * f + 3];
+            // Reversed winding: the normals face into the room.
+            _vertices.Add(c[a]); _vertices.Add(c[cc]); _vertices.Add(c[b]);
+            _vertices.Add(c[a]); _vertices.Add(c[d]); _vertices.Add(c[cc]);
+            _materials.Add(m); _materials.Add(m); _instances.Add(instance); _instances.Add(instance);
+        }
+    }
+
     /// <summary>An open mesh: triangles (three vertices each, in its own space) through <paramref name="transform"/>.</summary>
     public void AddMesh(ReadOnlySpan<Vector3> triangles, Matrix4x4 transform, in AcousticMaterial material)
     {
