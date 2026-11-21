@@ -95,7 +95,7 @@ internal sealed class Mixer
         public Ramp[] Matrix = null!; // bed channel o, input i at [o * Inputs + i]
         public int Inputs;            // clip channels, or 1 for positional voices (the clip mixed to mono)
         public BandEq3 Eq;
-        public Ramp ReverbSend, RemoteSend;
+        public Ramp ReverbSend, RemoteSend, SpreadSend;
         public SpatialParams Spatial;
         // Early reflections: a delay line of the voice's dry signal (through the surfaces' tone), read by taps.
         public float[]? Delay;   // lent from the pool while the voice has reflections
@@ -116,6 +116,10 @@ internal sealed class Mixer
         public int Parent;
         public Ramp Gain;
         public float[] Buffer = null!; // planar: channel c at [c * MaxBlock ..]
+        // Its voices' spread, mono, spread over the bed decorrelated before the bus folds into its parent.
+        public float[] Spread = null!;
+        public Decorrelator Decorrelate = null!;
+        public int SpreadIdle = int.MaxValue;     // frames since a voice last sent to it
     }
 
     private readonly int _bedChannels, _outChannels, _rate;
@@ -191,13 +195,25 @@ internal sealed class Mixer
                 TapDelay = new Ramp[ReflectionTaps.Count], TapGains = new Ramp[ReflectionTaps.Count * _bedChannels],
             };
         _buses = new Bus[maxBuses];
-        for (int i = 0; i < maxBuses; i++) _buses[i] = new Bus { Buffer = new float[_bedChannels * MaxBlock], Gain = new Ramp { Current = 1, Target = 1 } };
+        for (int i = 0; i < maxBuses; i++)
+            _buses[i] = new Bus { Buffer = new float[_bedChannels * MaxBlock], Gain = new Ramp { Current = 1, Target = 1 }, Spread = new float[MaxBlock], Decorrelate = new Decorrelator(_bed, sampleRate) };
         _buses[0].Used = true;
     }
 
     /// <summary>Renders interleaved frames in the output layout's channel order.</summary>
+    /// <summary>The longest a <see cref="Render"/> call has taken, in stopwatch ticks (reset by <see cref="TakeWorstRender"/>).</summary>
+    private long _worstRender;
+
+    /// <summary>The worst render time since the last call, in seconds, and resets it.</summary>
+    internal double TakeWorstRender() => Interlocked.Exchange(ref _worstRender, 0) / (double)System.Diagnostics.Stopwatch.Frequency;
+
+    /// <summary>The engine time (frames) at which the worst render since the last <see cref="TakeWorstRender"/> began.</summary>
+    internal long WorstRenderAt => Volatile.Read(ref _worstRenderAt);
+    private long _worstRenderAt;
+
     public void Render(Span<float> interleaved, int frames)
     {
+        long started = System.Diagnostics.Stopwatch.GetTimestamp();
         int done = 0;
         while (done < frames)
         {
@@ -220,6 +236,8 @@ internal sealed class Mixer
             }
             Volatile.Write(ref _historyWritten, _historyWritten + frames);
         }
+        long took = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+        if (took > Volatile.Read(ref _worstRender)) { Volatile.Write(ref _worstRender, took); Volatile.Write(ref _worstRenderAt, _time - frames); }
     }
 
     private float[]? _history;
@@ -262,6 +280,15 @@ internal sealed class Mixer
         Array.Clear(_reverbInput, 0, n);
         Array.Clear(_remoteInput, 0, n);
         foreach (var v in _voices) if (v.Active) RenderVoice(v, blockStart, n);
+        // Spread, decorrelated, into each bus (and its allpasses' ringing for a little after the last send).
+        for (int b = 0; b < _busCount; b++)
+        {
+            var bus = _buses[b];
+            if (!bus.Used || bus.SpreadIdle > 2048) continue;
+            bus.Decorrelate.Process(bus.Spread.AsSpan(0, n), bus.Buffer, MaxBlock, n);
+            Array.Clear(bus.Spread, 0, n);
+            bus.SpreadIdle += n;
+        }
 
         // Children have higher indices than their parents: fold the tree from the leaves up.
         for (int b = _busCount - 1; b > 0; b--)
@@ -325,6 +352,7 @@ internal sealed class Mixer
                 v.Eq.Init(_rate);
                 v.ReverbSend = default;
                 v.RemoteSend = default;
+                v.SpreadSend = default;
                 v.TapCount = v.LiveTaps = 0;
                 v.Tail = 0;
                 v.ReflectionEq.Init(_rate);
@@ -458,8 +486,11 @@ internal sealed class Mixer
         target.Clear();
         if (v.Positional)
         {
-            _panner.Pan(v.Spatial.Direction, v.Spatial.Spread, target);
-            for (int o = 0; o < _bedChannels; o++) target[o] *= v.Spatial.Gain;
+            // The point part pans; the spread part goes to the bus's decorrelator (equal power, uncorrelated copies).
+            float spread = MathF.Max(Math.Clamp(v.Spatial.Spread, 0, 1), _panner.Point(v.Spatial.Direction, target));
+            float point = MathF.Sqrt(1 - spread) * v.Spatial.Gain;
+            for (int o = 0; o < _bedChannels; o++) target[o] *= point;
+            v.SpreadSend.Set(MathF.Sqrt(spread) * v.Spatial.Gain, ramp);
         }
         else if (clip.IsAmbisonic) _ambisonics.Fill(v.Rotation, target);
         else if (inputs == 1)
@@ -623,6 +654,12 @@ internal sealed class Mixer
             if (v.TapCount > 0) RenderReflections(v, first, tail ? n - first : count);
             AddRamped(_reverbInput.AsSpan(first, count), block.AsSpan(first, count), ref v.ReverbSend);
             AddRamped(_remoteInput.AsSpan(first, count), block.AsSpan(first, count), ref v.RemoteSend);
+            if (v.SpreadSend.Current != 0 || v.SpreadSend.Target != 0)
+            {
+                var bus = _buses[v.Bus];
+                AddRamped(bus.Spread.AsSpan(first, count), block.AsSpan(first, count), ref v.SpreadSend);
+                bus.SpreadIdle = 0;
+            }
         }
         if (count > 0)
         {

@@ -195,9 +195,41 @@ public sealed class AudioEngine : IDisposable
     /// <summary>An engine driven by a device's audio thread, in the device's rate and layout.</summary>
     public static AudioEngine Start(IAudioDevice device, AudioEngineSettings? settings = null)
     {
-        var engine = new AudioEngine(device.SampleRate, device.Layout, settings ?? AudioEngineSettings.Default) { _device = device };
+        var resolved = settings ?? AudioEngineSettings.Default;
+        WarmUp(device.SampleRate, device.Layout, resolved);
+        var engine = new AudioEngine(device.SampleRate, device.Layout, resolved) { _device = device };
         device.Start(engine._mixer.Render);
         return engine;
+    }
+
+    /// <summary>
+    /// Runs a throwaway offline engine through every path the mixer has (positional voices with spread, reflections
+    /// gliding and restarting, both reverbs and a new room, the other room, a multichannel clip), so a JIT compiles them
+    /// now rather than on the audio thread the first time a game uses them: a first shot, a first echo. Compiling there
+    /// took 10–15 ms, nearly a whole device buffer, and the device ran dry. Under NativeAOT it costs a few milliseconds.
+    /// </summary>
+    private static void WarmUp(int rate, ChannelLayout layout, in AudioEngineSettings settings)
+    {
+        using var engine = Offline(rate, layout, settings with { MaxVoices = 8, MaxRealVoices = 4 });
+        uint state = 1;
+        var noise = AudioClip.Generate("warm-up", rate, rate / 5, _ => { state ^= state << 13; state ^= state >> 17; state ^= state << 5; return ((state >> 8) * (2f / 16777216f) - 1) * 1e-3f; });
+        var stereo = new AudioClip("warm-up", rate, ChannelLayout.Stereo, new float[rate / 10 * 2]);
+        var room = new Acoustics.ReverbParams { DecaySeconds = Acoustics.Bands3.All(1), Level = 0.1f, PreDelaySeconds = 0.02f };
+        engine.SetReverb(room, 0);
+        engine.SetRemoteReverb(room, -Vector3.UnitZ, 0.2f, 0);
+        var voice = engine.Play(noise, PlayOptions.Default with { Positional = true, Spatial = SpatialParams.Default with { Reverb = 0.5f, RemoteReverb = 0.5f, Spread = 0.5f } });
+        engine.Play(stereo, PlayOptions.Default);
+        Span<Reflection> taps = [new() { Direction = Vector3.UnitX, Delay = 0.01f, Gain = 0.5f }, new() { Direction = -Vector3.UnitX, Delay = 0.02f, Gain = 0.5f, Restart = true }];
+        var block = new float[256 * layout.Count];
+        for (int k = 0; k < 40; k++)
+        {
+            if (k == 5) engine.SetReflections(voice, taps, Acoustics.Bands3.All(1), 0.005f);
+            if (k == 10) { taps[0].Delay = 0.012f; engine.SetReflections(voice, taps, new Acoustics.Bands3(0.8f, 1, 0.6f), 0.005f); }
+            if (k == 15) engine.SetReverb(room with { DecaySeconds = Acoustics.Bands3.All(2) }, 0.005f, newRoom: true);
+            if (k == 20) engine.SetSpatial(voice, SpatialParams.Default with { Direction = Vector3.UnitX, Reverb = 0.5f, Spread = 0.2f }, 0.005f);
+            engine.Update();
+            engine.Render(block);
+        }
     }
 
     /// <summary>Offline engines only: renders the next frames (interleaved, <see cref="Layout"/> order).</summary>
@@ -365,6 +397,12 @@ public sealed class AudioEngine : IDisposable
 
     /// <summary>Whether a voice loops (false when it has ended).</summary>
     public bool Loops(VoiceHandle voice) => TryGet(voice, out int i) && _voices[i].Loop;
+
+    /// <summary>The audio thread's worst render time since the last call, in seconds (resets it): against the device's period, how close it came to an underrun.</summary>
+    public double TakeWorstRenderSeconds() => _mixer.TakeWorstRender();
+
+    /// <summary>The engine time, in seconds, at which that worst render began.</summary>
+    public double WorstRenderAtSeconds => (double)_mixer.WorstRenderAt / SampleRate;
 
     /// <summary>The clip a voice plays (null when it has ended).</summary>
     public AudioClip? ClipOf(VoiceHandle voice) => TryGet(voice, out int i) ? _voices[i].Clip : null;

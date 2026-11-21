@@ -116,22 +116,34 @@ public sealed class Panner
     /// <summary>Gains for every bed channel (LFE gets 0) for a unit direction in listener space.</summary>
     public void Pan(Vector3 direction, float spread, Span<float> gains)
     {
+        int n = _speakers.Length;
+        if (n <= 1) { gains.Clear(); if (n == 1) gains[_speakers[0]] = 1; return; }
+        spread = MathF.Max(Math.Clamp(spread, 0, 1), Point(direction, gains));
+        for (int i = 0; i < n; i++) { int c = _speakers[i]; gains[c] = MathF.Sqrt((1 - spread) * gains[c] * gains[c] + spread / n); }
+    }
+
+    /// <summary>
+    /// The point-source gains alone (power-normalised), for a mixer that renders spread separately, decorrelated. Returns
+    /// the spread a direction forces: 1 when it has none (zero, or straight up or down on a flat layout), the gains then zero.
+    /// </summary>
+    public float Point(Vector3 direction, Span<float> gains)
+    {
         gains.Clear();
         int n = _speakers.Length;
-        if (n == 0) return;
-        if (n == 1) { gains[_speakers[0]] = 1; return; }
+        if (n == 0) return 0;
+        if (n == 1) { gains[_speakers[0]] = 1; return 0; }
         Span<float> g = stackalloc float[n];
         g.Clear();
+        float spread = 0;
         float len = direction.Length();
         if (len < 1e-6f) spread = 1;
         else if (_threeD) Pan3D(direction / len, g);
         else Pan2D(direction / len, g, ref spread);
-
+        if (spread >= 1) return 1;
         float power = 0;
         for (int i = 0; i < n; i++) power += g[i] * g[i];
-        if (power > 0) { float s = 1 / MathF.Sqrt(power); for (int i = 0; i < n; i++) g[i] *= s; }
-        spread = Math.Clamp(spread, 0, 1);
-        for (int i = 0; i < n; i++) gains[_speakers[i]] = MathF.Sqrt((1 - spread) * g[i] * g[i] + spread / n);
+        if (power > 0) { float s = 1 / MathF.Sqrt(power); for (int i = 0; i < n; i++) gains[_speakers[i]] = g[i] * s; }
+        return spread;
     }
 
     private void Pan2D(Vector3 d, Span<float> g, ref float spread)

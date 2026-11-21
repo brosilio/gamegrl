@@ -400,5 +400,50 @@ internal static class AudioSpatialTests
             float fl = o[500 * l.Count + l.IndexOf(Speaker.FrontLeft)], fc = o[500 * l.Count + l.IndexOf(Speaker.FrontCenter)], bl = o[500 * l.Count + l.IndexOf(Speaker.BackLeft)];
             Assert.True(fl > fc && bl > o[500 * l.Count + l.IndexOf(Speaker.FrontRight)], $"turned right: FL {fl}, FC {fc}, BL {bl}");
         });
+
+        Test("audio spatial: spread is decorrelated — a wide source on headphones keeps its spectrum (no comb from the virtual speakers)", () =>
+        {
+            uint state = 7;
+            var noise = AudioClip.Generate("noise", Rate, Rate, _ => { state ^= state << 13; state ^= state >> 17; state ^= state << 5; return ((state >> 8) * (2f / 16777216f) - 1) * 0.25f; });
+            float[] Render(float spread)
+            {
+                using var engine = AudioEngine.Offline(Rate, ChannelLayout.Stereo, AudioEngineSettings.Default with { Headphones = true, Limiter = false });
+                engine.Play(noise, PlayOptions.Default with { Positional = true, Spatial = SpatialParams.Default with { Direction = -Vector3.UnitZ, Spread = spread } });
+                var o = new float[Rate * 2];
+                engine.Render(o);
+                return o;
+            }
+            // Power at a frequency, left ear, averaged over 4096-sample chunks (Goertzel).
+            static double Power(float[] o, float frequency)
+            {
+                double total = 0, k = 2 * Math.Cos(2 * Math.PI * frequency / Rate);
+                for (int start = 4096; start + 4096 <= o.Length / 2; start += 4096)
+                {
+                    double s1 = 0, s2 = 0;
+                    for (int i = 0; i < 4096; i++) { double s0 = o[2 * (start + i)] + k * s1 - s2; s2 = s1; s1 = s0; }
+                    total += s1 * s1 + s2 * s2 - k * s1 * s2;
+                }
+                return total;
+            }
+            var point = Render(0); var wide = Render(1);
+            var ratio = new double[40];
+            for (int b = 0; b < 40; b++)
+            {
+                // Each band: 8 neighbouring frequencies, so the noise's own ripple averages out.
+                double p = 0, w = 0;
+                float centre = 400 * MathF.Pow(20, b / 39f);
+                for (int j = -4; j < 4; j++) { float f = centre * (1 + 0.01f * j); p += Power(point, f); w += Power(wide, f); }
+                ratio[b] = 10 * Math.Log10(w / p);
+            }
+            // Smoothed over five bands: uncorrelated copies leave only fine ripple, which averages away; identical copies at
+            // the virtual speakers' different delays comb, broad dips and peaks 10 dB apart that smoothing keeps.
+            double lowest = double.MaxValue, highest = double.MinValue;
+            for (int b = 2; b < 38; b++)
+            {
+                double mean = (ratio[b - 2] + ratio[b - 1] + ratio[b] + ratio[b + 1] + ratio[b + 2]) / 5;
+                lowest = Math.Min(lowest, mean); highest = Math.Max(highest, mean);
+            }
+            Assert.True(highest - lowest < 6, $"wide against point, 400 Hz to 8 kHz, smoothed: {lowest:0.0} to {highest:0.0} dB (identical copies comb across 8 dB or more)");
+        });
     }
 }

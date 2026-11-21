@@ -78,6 +78,12 @@ public static class ReverbEstimator
 
     private static readonly float Golden = MathF.PI * (3 - MathF.Sqrt(5));
 
+    /// <summary>
+    /// Half the cores at most: an estimate is a burst of work, and taking every core starves whatever else must run on
+    /// time (the sound server, the game's own frame).
+    /// </summary>
+    private static readonly ParallelOptions Workers = new() { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount / 4) };
+
     private static Vector3 Direction(int r, int n)
     {
         float y = 1 - 2 * (r + 0.5f) / n, rad = MathF.Sqrt(1 - y * y), phi = Golden * r;
@@ -164,7 +170,7 @@ public static class ReverbEstimator
                 }
             }
         }
-        if (parallel) Parallel.For(0, Chunks, Chunk);
+        if (parallel) Parallel.For(0, Chunks, Workers, Chunk);
         else for (int k = 0; k < Chunks; k++) Chunk(k);
 
         // Sum the chunks in order.

@@ -108,6 +108,9 @@ public sealed class CaveModule(bool tour = false, double quitAfter = 0, CaveCapt
         audio.Register(Clips.Drip2, Sounds.Drip(rate, 2));
         // Gunfights want the space back quickly after a shot: release the HDR window faster than the default.
         world.Resource<AudioEnvironment>().HdrReleaseDbPerSecond = 18;
+        // And a quiet moment stays quiet: the window never drops below 80 dB, so the 48 dB wind sits well down rather
+        // than being raised to the top (full scale) whenever nothing louder is playing.
+        world.Resource<AudioEnvironment>().HdrFloorDb = 80;
         // Always ready for a capture (F12): the last 12 s of output and every voice's state.
         audio.Engine.KeepHistory(12);
         audio.Diagnostics.Enabled = true;

@@ -75,6 +75,14 @@ public sealed class AudioDiagnostics
         var env = audio.Environment;
         Line($"engine: {engine.SampleRate} Hz, out {engine.Layout.Count} ch, bed {engine.BedLayout.Count} ch{(engine.Headphones ? ", binaural (headphones)" : "")}, device {engine.Device?.Name ?? "offline"}");
         Line($"voices: {engine.ActiveVoices} playing, {engine.RealVoices} rendered; dropped commands {engine.DroppedCommands}");
+        double worstAt = engine.WorstRenderAtSeconds, now = (double)engine.Time / engine.SampleRate;
+        double worst = engine.TakeWorstRenderSeconds();
+        if (engine.Device is { } device)
+            Line($"device: period {device.PeriodFrames} frames ({device.PeriodFrames * 1000.0 / engine.SampleRate:0.0} ms), buffer {device.BufferFrames} frames ({device.BufferFrames * 1000.0 / engine.SampleRate:0.0} ms); underruns {device.Underruns}; worst render since the last report {worst * 1000:0.00} ms, {now - worstAt:0.0} s ago");
+        else Line($"offline; worst render since the last report {worst * 1000:0.00} ms");
+        if (engine.Device is Devices.AlsaDevice alsa) Line($"audio thread: {(alsa.RealTimeThread ? "SCHED_FIFO" : "normal priority (no rtprio permission)")}");
+        var gc = GC.GetGCMemoryInfo();
+        Line($"GC: {GC.CollectionCount(0)} gen0, {GC.CollectionCount(1)} gen1, {GC.CollectionCount(2)} gen2 collections; {GC.GetTotalPauseDuration().TotalMilliseconds:0} ms paused in all; last pause {gc.PauseDurations[0].TotalMilliseconds:0.00} ms; {GC.GetTotalAllocatedBytes() / 1048576.0:0} MB allocated in all");
         var forward = -new Vector3(Listener.M31, Listener.M32, Listener.M33);
         Line($"listener: at {V(Listener.Translation)}, facing {V(forward)}, gain {audio.ListenerGain:0.00}, velocity {V(audio.ListenerVelocity)}");
         Line($"environment: reverb {env.Reverb}, reflections {env.Reflections}, diffraction {env.Diffraction}, remote reverb {env.RemoteReverb}, HDR {env.Hdr}; {env.TemperatureC:0} °C, {env.HumidityPercent:0}% RH");
