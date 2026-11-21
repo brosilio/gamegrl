@@ -65,6 +65,8 @@ deliberately stops MSBuild from importing the engine's `Directory.Build.*` files
 
 ## Commits
 
+- Branch from `develop` and open pull requests against it. `main` catches up to `develop` from time to time, at
+  commits where CI passes; don't commit to it directly.
 - One logical change per commit, and each commit passes CI. Commit as yourself.
 - The message: a short summary line, then what changed and why, and how it was verified (tests added, numbers
   measured). Note anything not verified.
