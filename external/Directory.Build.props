@@ -1,0 +1,3 @@
+<Project>
+  <!-- Third-party code under external/ builds with its own settings: stop MSBuild from importing the engine's Directory.Build.props. -->
+</Project>

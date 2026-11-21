@@ -5,7 +5,14 @@ APIs. Design and decisions: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Build and run
 
-Needs the .NET 10 SDK, Vulkan 1.3 (hardware or software), and `glslc` (shaderc). The editor references the sibling `../ansidotnet` repository. SDL3 and a TrueType monospace font are needed for desktop mode; terminal mode needs neither.
+```sh
+git clone --recursive https://github.com/brosilio/gamegrl.git   # or, after a plain clone: git submodule update --init
+```
+
+Needs the .NET 10 SDK, Vulkan 1.3 (hardware or software), and `glslc` (shaderc). The editor's terminal UI comes from
+the `external/ansidotnet` submodule. SDL3 and a TrueType monospace font are needed for desktop mode; terminal mode
+needs neither. Audio on Linux uses ALSA's `libasound` (through PulseAudio or PipeWire, or a hardware device); without
+it, sound goes to a null device. Linux is the platform developed and tested on so far.
 
 ```sh
 ./scripts/ci.sh                                   # build, test (JIT + NativeAOT), benchmarks, publish the sample
@@ -95,7 +102,8 @@ using (Pathing.Scope()) { /* ... */ }
 
 Players record with `GAMEGRL_PROFILE=1` and write a trace on exit with `GAMEGRL_PROFILE_OUT=trace.json`.
 
-Benchmarks gate CI against this machine's baseline in `perf/baselines/`:
+Benchmarks gate CI against the running machine's baseline in `perf/baselines/` (named after its CPU; a machine with
+none only warns, and `GAMEGRL_BENCH=0` skips them on a busy machine):
 
 ```sh
 ./artifacts/bench-aot/Gamegrl.Bench --tree          # engine scenarios (NativeAOT, built by ci.sh)
@@ -111,6 +119,7 @@ dotnet run --project tests/Gamegrl.Editor.Tests -c Release -- --bench --tree # e
 | `src/Gamegrl.Generators` | Roslyn source generators: `[System]` loops and registration, component serializers |
 | `src/Gamegrl.Platform`, `.Sdl3` | Windows and input behind `IPlatform`; the SDL3 backend |
 | `src/Gamegrl.Rhi`, `.Vulkan` | The render hardware interface; the Vulkan 1.3 backend |
+| `src/Gamegrl.Audio` | Audio (`AudioModule`, `AudioSource`, `AudioListener`): mixer, ALSA output, spatial panning to any layout and binaural, HDR mixing, geometric acoustics (occlusion, diffraction, early reflections, ray-traced reverb, baked probes), diagnostics and captures |
 | `src/Gamegrl.Physics2D` | 2D physics (`Physics2DModule`, `RigidBody2D`, `Collider2D`, `Joint2D`): compound bodies, capsules, sensors and contact events, sleeping, five joint types, a parallel SIMD soft-step solver; deterministic per `<GamegrlDeterminism>` |
 | `src/Gamegrl.UI` | The pixel UI games ship (`UiModule`): TrueType text, windows and widgets, rendering; also the editor's in-view overlays |
 | `src/Gamegrl.Editor` | Shared AnsiDotNet cell interface, desktop/TTY hosts, headless viewports, scene editing, jobs and collectible game code |
@@ -120,6 +129,10 @@ dotnet run --project tests/Gamegrl.Editor.Tests -c Release -- --bench --tree # e
 | `tests/Gamegrl.Tests` | Dependency-free tests, also run as a NativeAOT binary |
 | `tests/Gamegrl.Editor.Tests` | Headless editor tests, optional SDL/Vulkan interaction smoke, editor benchmarks (`--bench`) |
 | `tests/Gamegrl.Bench` | Engine benchmark scenarios under the profiler (NativeAOT); baselines in `perf/baselines` |
+| `tests/Gamegrl.PhysicsBench` | Box2D's benchmark scenes for Physics 2D, with Box2D's command line (`scripts/box2d-compare.sh`) |
+| `tests/Gamegrl.AudioSmoke` | Audio device smoke test, offline analysis of recordings, room renders, mixer benchmark |
+| `tests/Gamegrl.DeterminismFixture`, `tests/Gamegrl.Editor.PluginFixture` | Fixtures: code the determinism analyzer must reject; an editor extension to load |
+| `external/ansidotnet` | Submodule: the ANSI terminal library behind the editor's cell UI |
 | `samples/BogOpera` | Interactive frog choir, sample-timed sequencer, and offline WAV player |
 | `samples/CaveGunfight` | First-person cave walk under fire: geometric acoustics, diffraction, HDR, offline tour |
 | `samples/Spinners` | `Game` (library), `Player` (NativeAOT), `Build` (dev tool), `Assets/` |
@@ -192,3 +205,14 @@ It uses temporary sample copies and verifies real pipes, PTY resize, EOF/hangup 
 restoration. Set `GAMEGRL_TERMINAL_SMOKE=1` when running `scripts/ci.sh` to also run the headless Vulkan editor
 workflow. Terminal preview downsampling preserves a separate logical screen size for sprites and game mouse
 coordinates, so reducing output resolution does not enlarge sprites or change input units.
+
+## Contributing
+
+Agents and people alike: start with [AGENTS.md](AGENTS.md) (the ground rules and how to verify a change), then
+[docs/DESIGN.md](docs/DESIGN.md), which records every decision and why. `./scripts/ci.sh` must pass before a change
+lands.
+
+## License
+
+BSD Zero Clause (see [LICENSE](LICENSE)). Code ported from Box2D and Jolt Physics stays under their MIT licenses; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

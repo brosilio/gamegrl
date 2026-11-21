@@ -1,3 +1,5 @@
+// Ported from Box2D (https://github.com/erincatto/box2d), Copyright (c) 2022 Erin Catto, under the MIT License;
+// see THIRD_PARTY_NOTICES.md.
 using System.Runtime.CompilerServices;
 
 namespace Gamegrl.Physics2D;
