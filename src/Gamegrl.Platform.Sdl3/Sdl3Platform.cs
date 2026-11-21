@@ -12,6 +12,10 @@ public sealed unsafe class Sdl3Platform : IPlatform
     public Sdl3Platform()
     {
         Sdl.Load();
+        // On X11, SDL by default asks the compositor to stop compositing its windows (_NET_WM_BYPASS_COMPOSITOR), so KWin
+        // unredirects a window as it opens and composites again as it closes: the screen flickered on every quit, and other
+        // GPU clients saw a reset each time. Windows stay composited; a fullscreen mode can ask for bypass when it wants it.
+        Sdl.SetHint("SDL_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR", "0");
         if (!Sdl.Init(Sdl.InitVideo | Sdl.InitEvents)) throw new InvalidOperationException("SDL_Init failed: " + Sdl.Error());
     }
 

@@ -45,6 +45,7 @@ public sealed class AudioDiagnostics
     /// <summary>Where the other room's reverb is heard from (world), when it's active.</summary>
     public Vector3 RemoteOpening;
     public bool RemoteActive;
+    private int _underrunsReported;
 
     internal void Begin(in Matrix4x4 listener)
     {
@@ -78,7 +79,11 @@ public sealed class AudioDiagnostics
         double worstAt = engine.WorstRenderAtSeconds, now = (double)engine.Time / engine.SampleRate;
         double worst = engine.TakeWorstRenderSeconds();
         if (engine.Device is { } device)
-            Line($"device: period {device.PeriodFrames} frames ({device.PeriodFrames * 1000.0 / engine.SampleRate:0.0} ms), buffer {device.BufferFrames} frames ({device.BufferFrames * 1000.0 / engine.SampleRate:0.0} ms); underruns {device.Underruns}; worst render since the last report {worst * 1000:0.00} ms, {now - worstAt:0.0} s ago");
+        {
+            int underruns = device.Underruns, recent = underruns - _underrunsReported;
+            _underrunsReported = underruns;
+            Line($"device: period {device.PeriodFrames} frames ({device.PeriodFrames * 1000.0 / engine.SampleRate:0.0} ms), buffer {device.BufferFrames} frames ({device.BufferFrames * 1000.0 / engine.SampleRate:0.0} ms); underruns {underruns} ({recent} since the last report); worst render since the last report {worst * 1000:0.00} ms, {now - worstAt:0.0} s ago");
+        }
         else Line($"offline; worst render since the last report {worst * 1000:0.00} ms");
         if (engine.Device is Devices.AlsaDevice alsa) Line($"audio thread: {(alsa.RealTimeThread ? "SCHED_FIFO" : "normal priority (no rtprio permission)")}");
         var gc = GC.GetGCMemoryInfo();

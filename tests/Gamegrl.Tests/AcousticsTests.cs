@@ -255,6 +255,35 @@ internal static class AcousticsTests
             Assert.True(v.Spatial.Reverb > 0.95f && v.Spatial.RemoteReverb == 0, $"its reverb send {v.Spatial.Reverb:0.000} (as if in view: 1), other room {v.Spatial.RemoteReverb:0.000}");
         });
 
+        Test("acoustics: HDR ranks by what's heard — a brief shot ducks a steady hum by its perceived loudness, and itself plays at the top", () =>
+        {
+            var b = EngineBuilder.Create().AddModule(new AudioModule(AudioOutput.Offline));
+            using var app = b.Build();
+            var w = app.World;
+            var context = w.Resource<AudioContext>();
+            ref var env = ref w.Resource<AudioEnvironment>();
+            env.Hdr = true; env.HdrHeadroomDb = 0; env.Reverb = false; env.Reflections = false; env.Diffraction = false;
+            context.Diagnostics.Enabled = true;
+            var hum = new AssetRef<AudioAsset>(Guid.NewGuid()); var shot = new AssetRef<AudioAsset>(Guid.NewGuid());
+            context.Register(hum, AudioClip.Generate("hum", Rate, Rate, i => MathF.Sin(i * 0.05f)));
+            var gunshot = TestSounds.Gunshot(Rate);
+            context.Register(shot, gunshot);
+            w.Spawn(LocalTransform.Identity, new LocalToWorld(), AudioListener.Default);
+            w.Spawn(LocalTransform.At(new Vector3(-10, 0, 0)), new LocalToWorld(), AudioSource.At(hum, loop: true) with { Emitter = AudioEmitter.Default with { LoudnessDb = 70 } });
+            for (int f = 0; f < 3; f++) { app.Tick(1 / 60.0); context.Engine.Render(new float[Rate / 60 * 2]); }
+            float alone = context.Diagnostics.Voices[0].Spatial.Gain;
+            context.PlayAt(shot, new Vector3(10, 0, 0), AudioEmitter.Default with { LoudnessDb = 110 }, PlayOptions.Default);
+            app.Tick(1 / 60.0); context.Engine.Render(new float[Rate / 60 * 2]);
+            VoiceReport humNow = default, shotNow = default;
+            foreach (var v in context.Diagnostics.Voices) if (v.Clip == gunshot) shotNow = v; else humNow = v;
+            // The shot is 90 dB at the listener, heard 10·lg(D/0.2 s) quieter for its brevity: the window's top.
+            float brevity = 10 * MathF.Log10(gunshot.EnergySeconds / 0.2f);
+            Assert.True(brevity < -8 && MathF.Abs(context.Hdr.TopDb - (90 + brevity)) < 0.5f, $"the window's top {context.Hdr.TopDb:0.0} dB, expected {90 + brevity:0.0} (90 dB heard {brevity:0.0} dB quieter)");
+            float ducked = 20 * MathF.Log10(humNow.Spatial.Gain / alone);
+            Assert.True(MathF.Abs(ducked - (50 - (90 + brevity))) < 0.5f, $"the hum ducked {ducked:0.0} dB, expected {50 - (90 + brevity):0.0} (not -40)");
+            Assert.True(MathF.Abs(shotNow.Spatial.Gain - 1) < 0.01f, $"the shot plays at full scale, capped by its level: gain {shotNow.Spatial.Gain:0.000}");
+        });
+
         Test("acoustics: a new room — what's ringing keeps the old room's decay, new sound gets the new room's", () =>
         {
             double TailAfter(bool newRoom)

@@ -289,7 +289,7 @@ public sealed class AudioContext : IDisposable
     public VoiceHandle PlayAt(AssetRef<AudioAsset> asset, Vector3 position, in AudioEmitter emitter, in PlayOptions options)
     {
         if (Clip(asset) is not { } clip) return default;
-        var spatial = Placed(position, Vector3.Zero, Vector3.Zero, emitter, options.Gain, Occlusion(position, emitter), starting: true);
+        var spatial = Placed(position, Vector3.Zero, Vector3.Zero, emitter, options.Gain, Occlusion(position, emitter), starting: true, Brevity(clip, options.Loop));
         var voice = Engine.Play(clip, options with { Positional = true, Spatial = spatial });
         if (voice.IsValid) OneShots.Add(new OneShot { Voice = voice, Position = position, Emitter = emitter, Volume = options.Gain });
         return voice;
@@ -305,7 +305,7 @@ public sealed class AudioContext : IDisposable
     {
         if (Clip(asset) is not { } clip) return default;
         var position = FollowPoint(entity, offset, offset);
-        var spatial = Placed(position, Vector3.Zero, Vector3.Zero, emitter, options.Gain, Occlusion(position, emitter), starting: true);
+        var spatial = Placed(position, Vector3.Zero, Vector3.Zero, emitter, options.Gain, Occlusion(position, emitter), starting: true, Brevity(clip, options.Loop));
         var voice = Engine.Play(clip, options with { Positional = true, Spatial = spatial });
         if (voice.IsValid) OneShots.Add(new OneShot { Voice = voice, Position = position, Emitter = emitter, Volume = options.Gain, Follow = entity, Offset = offset });
         return voice;
@@ -316,13 +316,13 @@ public sealed class AudioContext : IDisposable
         World is { } w && !entity.IsNull && w.IsAlive(entity) && w.Has<LocalToWorld>(entity) ? Vector3.Transform(offset, w.Get<LocalToWorld>(entity).Value) : fallback;
 
     /// <summary>A voice starting now, fully placed: spatial parameters with HDR applied (a sound louder than the window raises it at once).</summary>
-    internal SpatialParams Placed(Vector3 position, Vector3 velocity, Vector3 forward, in AudioEmitter emitter, float volume, Bands3 occlusion, bool starting)
+    internal SpatialParams Placed(Vector3 position, Vector3 velocity, Vector3 forward, in AudioEmitter emitter, float volume, Bands3 occlusion, bool starting, float brevityDb = 0)
     {
         var spatial = Spatialize(position, velocity, forward, emitter, volume, occlusion, out float loudness);
         if (Environment.Hdr && spatial.Gain > 0)
         {
-            if (starting) Hdr.Raise(loudness);
-            float hdr = HdrFactor(loudness, emitter.LoudnessDb);
+            if (starting) Hdr.Raise(loudness + brevityDb);
+            float hdr = HdrFactor(loudness + brevityDb, loudness, emitter.LoudnessDb);
             spatial.Gain *= hdr; spatial.Reverb *= hdr; spatial.RemoteReverb *= hdr;
         }
         return spatial;
@@ -334,8 +334,12 @@ public sealed class AudioContext : IDisposable
     /// volume, occlusion and air stay where they are (in the gain, the voice's volume and its bands), so each counts once:
     /// the loudest sound lands at the top of the window, at full scale less the headroom.
     /// </summary>
-    internal float HdrFactor(float loudness, float emitterDb) =>
-        loudness < Hdr.TopDb - Hdr.RangeDb ? 0 : MathF.Pow(10, (emitterDb - Hdr.TopDb - Environment.HdrHeadroomDb) / 20);
+    internal float HdrFactor(float heard, float loudness, float emitterDb) =>
+        heard < Hdr.TopDb - Hdr.RangeDb ? 0 : MathF.Pow(10, (emitterDb - MathF.Max(Hdr.TopDb, loudness) - Environment.HdrHeadroomDb) / 20);
+
+    /// <summary>How much quieter a clip is heard than its level, in dB: 10·lg(D/0.2 s) for energy lasting D under 200 ms; 0 if it loops.</summary>
+    internal static float Brevity(AudioClip clip, bool loop) =>
+        loop ? 0 : 10 * MathF.Log10(Math.Clamp(clip.EnergySeconds / AudioUpdate.Integration, 1e-3f, 1));
 
     /// <summary>
     /// Direction, distance gain, air absorption, directivity and Doppler for a source as heard by the current listener.
@@ -472,7 +476,11 @@ public sealed class AudioModule(AudioOutput output, string? device = null, bool 
         if (mode == AudioOutput.Offline) return AudioEngine.Offline(48000, ChannelLayout.Stereo, settings);
         if (mode == AudioOutput.Device && AlsaDevice.IsAvailable)
         {
-            try { return AudioEngine.Start(AlsaDevice.Open(AlsaDeviceOptions.Default with { Device = name ?? "default" }), settings); }
+            // Through a sound server (PulseAudio or PipeWire behind "default") a 16 ms buffer ran dry thousands of times
+            // while a USB sink settled; 32 ms gives the server's client thread room. A hardware device keeps 16 ms.
+            var options = AlsaDeviceOptions.Default with { Device = name ?? "default" };
+            if (options.Device is "default" or "pulse" or "pipewire") options = options with { PeriodFrames = 512 };
+            try { return AudioEngine.Start(AlsaDevice.Open(options), settings); }
             catch (AudioDeviceException e) { Log.Warn($"audio: {e.Message}; using the null device"); }
         }
         return AudioEngine.Start(new NullAudioDevice(), settings);
@@ -550,7 +558,9 @@ internal sealed class AudioUpdate : ISystem
     // This frame's positional voices: computed first, sent once the HDR window has moved.
     private VoiceHandle[] _pending = [];
     private SpatialParams[] _pendingParams = [];
-    private float[] _pendingLoudness = [], _pendingVolume = [];
+    private float[] _pendingLoudness = [], _pendingVolume = [], _pendingHeard = [];
+    /// <summary>The ear's loudness integration time (s): sounds shorter than this are heard as quieter than their level.</summary>
+    internal const float Integration = 0.2f;
     private Vector3[] _pendingPosition = [];
     private AudioEmitter[] _pendingEmitter = [];
     private float[] _pendingBlocked = []; // the mid band's direct-path transmission (1: in plain view)
@@ -580,7 +590,7 @@ internal sealed class AudioUpdate : ISystem
         _owner = new Entity[n]; _ownerVoice = new int[n]; _stamps = new int[n];
         _sentVolume = new float[n]; _sentPitch = new float[n]; _sentPan = new float[n];
         _lastPosition = new Vector3[n]; _hasLast = new bool[n]; _occlusion = new Bands3[n]; _occlusionVoice = new int[n];
-        _pending = new VoiceHandle[n]; _pendingParams = new SpatialParams[n]; _pendingLoudness = new float[n]; _pendingVolume = new float[n];
+        _pending = new VoiceHandle[n]; _pendingParams = new SpatialParams[n]; _pendingLoudness = new float[n]; _pendingVolume = new float[n]; _pendingHeard = new float[n];
         _pendingPosition = new Vector3[n]; _pendingEmitter = new AudioEmitter[n]; _pendingBlocked = new float[n];
         _slots = new TapSlots(n);
     }
@@ -654,7 +664,8 @@ internal sealed class AudioUpdate : ISystem
                     playing = false;
                     var options = PlayOptions.Default with { Gain = s.Volume, Pitch = s.Pitch, Pan = s.Pan, Loop = s.Loop, ListenerOrientation = orientation };
                     var occlusion = positional ? audio.Occlusion(world4.Translation, s.Emitter) : Bands3.All(1);
-                    if (positional) options = options with { Positional = true, Spatial = audio.Placed(world4.Translation, Vector3.Zero, forward, s.Emitter, s.Volume, occlusion, starting: true) };
+                    if (positional && audio.Clip(s.Clip) is { } placing)
+                        options = options with { Positional = true, Spatial = audio.Placed(world4.Translation, Vector3.Zero, forward, s.Emitter, s.Volume, occlusion, starting: true, AudioContext.Brevity(placing, s.Loop)) };
                     voice = audio.Clip(s.Clip) is { } clip ? engine.Play(clip, options) : default;
                     s.Voice = voice.Value;
                     if (voice.IsValid)
@@ -729,24 +740,33 @@ internal sealed class AudioUpdate : ISystem
             // heard from outside, is mostly the cave's reverb pouring out of the mouth, far above its shadowed crack.) A
             // short sound's reverb spreads its energy over the decay: weighted by the clip's energy duration over the
             // decay's time constant (T/13.8), up to 1 for long and looping sounds.
+            //
+            // The window follows perceived loudness: the ear integrates over about 200 ms, so a sound whose energy lasts
+            // D < 200 ms (a gunshot: 23 ms) is heard 10·lg(D/0.2) quieter than its level; a reverb return is heard over
+            // max(T/13.8, 200 ms). Each voice's gain is still capped by its level, so a brief loud sound plays at the top of
+            // the window, not above it, while everything else is ducked only as much as it's heard.
             var room = audio.Reverb; var other = audio.RemoteReverb;
             float local = room.IsSilent ? 0 : room.Level, tauLocal = room.DecaySeconds.Mid / 13.8f;
             float remote = _remoteActive && !other.IsSilent ? other.Level * _remoteCoupling : 0, tauRemote = other.DecaySeconds.Mid / 13.8f;
             for (int i = 0; i < _pendingCount; i++)
             {
+                _pendingHeard[i] = _pendingLoudness[i];
                 if (float.IsNegativeInfinity(_pendingLoudness[i])) continue;
                 ref readonly var p = ref _pendingParams[i];
                 float volume = _pendingVolume[i];
                 bool near = _remoteActive && Vector3.DistanceSquared(_pendingPosition[i], _remoteAnchor) <= _remoteRadius * _remoteRadius;
                 float direct = MathF.Pow(10, (_pendingLoudness[i] - _pendingEmitter[i].LoudnessDb) / 20);
                 float here = p.Reverb * volume * local, there = near ? p.RemoteReverb * volume * remote : 0;
-                if (here == 0 && there == 0) continue;
-                float lasts = engine.Loops(_pending[i]) ? float.MaxValue : engine.ClipOf(_pending[i])?.EnergySeconds ?? 0;
+                float lasts = engine.Loops(_pending[i]) ? float.MaxValue : engine.ClipOf(_pending[i])?.EnergySeconds ?? Integration;
                 float wLocal = tauLocal > 0 ? MathF.Min(1, lasts / tauLocal) : 0, wRemote = tauRemote > 0 ? MathF.Min(1, lasts / tauRemote) : 0;
-                _pendingLoudness[i] = _pendingEmitter[i].LoudnessDb + 10 * MathF.Log10(direct * direct + wLocal * here * here + wRemote * there * there);
+                float hLocal = MathF.Min(1, lasts / MathF.Max(tauLocal, Integration)), hRemote = MathF.Min(1, lasts / MathF.Max(tauRemote, Integration));
+                float brief = MathF.Min(1, lasts / Integration);
+                double d2 = direct * direct, l2 = here * here, r2 = there * there;
+                _pendingLoudness[i] = _pendingEmitter[i].LoudnessDb + 10 * (float)Math.Log10(d2 + wLocal * l2 + wRemote * r2);
+                _pendingHeard[i] = _pendingEmitter[i].LoudnessDb + 10 * (float)Math.Log10(d2 * brief + hLocal * l2 + hRemote * r2);
             }
             float loudest = float.NegativeInfinity;
-            for (int i = 0; i < _pendingCount; i++) loudest = MathF.Max(loudest, _pendingLoudness[i]);
+            for (int i = 0; i < _pendingCount; i++) loudest = MathF.Max(loudest, _pendingHeard[i]);
             audio.Hdr.Update(loudest, dt);
         }
         for (int i = 0; i < _pendingCount; i++)
@@ -754,7 +774,7 @@ internal sealed class AudioUpdate : ISystem
             var p = _pendingParams[i];
             if (env.Hdr && p.Gain > 0)
             {
-                float hdr = audio.HdrFactor(_pendingLoudness[i], _pendingEmitter[i].LoudnessDb);
+                float hdr = audio.HdrFactor(_pendingHeard[i], _pendingLoudness[i], _pendingEmitter[i].LoudnessDb);
                 p.Gain *= hdr; p.Reverb *= hdr; p.RemoteReverb *= hdr;
             }
             // Only hidden voices around the remote room's anchor send to it.

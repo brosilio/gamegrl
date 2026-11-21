@@ -37,6 +37,10 @@ internal static unsafe partial class Sdl
 
     public static string Error() => Marshal.PtrToStringUTF8(GetError()) ?? "(no error)";
 
+    [LibraryImport(Lib, EntryPoint = "SDL_SetHint", StringMarshalling = StringMarshalling.Utf8)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static partial bool SetHint(string name, string value);
+
     [LibraryImport(Lib, EntryPoint = "SDL_Init")]
     [return: MarshalAs(UnmanagedType.U1)]
     public static partial bool Init(uint flags);
